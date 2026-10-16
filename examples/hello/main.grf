@@ -1,0 +1,5 @@
+import grf.io;
+
+void main() {
+    io.println("Hello from Graphite!");
+}

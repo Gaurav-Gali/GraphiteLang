@@ -1,0 +1,47 @@
+{
+  "formatVersion": 1,
+  "domain": {
+    "name": "grf",
+    "description": "Graphite's official standard library domain."
+  },
+  "libraries": {
+    "io": {
+      "description": "Provides console input and output functions.",
+      "functions": {
+        "print": {
+          "description": "Prints a value to standard output without a newline.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto str"
+            }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::print"
+        },
+        "println": {
+          "description": "Prints a value to standard output followed by a newline.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto str"
+            }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::println"
+        },
+        "input": {
+          "description": "Displays a prompt and reads one line of user input.",
+          "params": [
+            {
+              "name": "prompt",
+              "type": "auto str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::io::input"
+        }
+      }
+    }
+  }
+}

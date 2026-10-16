@@ -1,0 +1,12 @@
+[package]
+name = "grf"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "grf"
+path = "src/main.rs"
+
+[dependencies]
+graphite-compiler = { path = "../graphite-compiler" }
