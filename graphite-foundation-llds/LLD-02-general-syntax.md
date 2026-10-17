@@ -417,7 +417,7 @@ import grf.io;
 import other.io;
 ```
 
-**Open decision:** importing the same domain and library more than once must not create two bindings. v0.1 must either diagnose the repeat as redundant or accept it as idempotent. Pick one behavior, document it, and test it. Do not leave the two behaviors mixed.
+Importing the same domain and library more than once is a compile error. The diagnostic identifies the repeated import. The compiler does not ignore the repeat and does not register a second binding.
 
 ## 15. Collections and classes
 

@@ -74,7 +74,7 @@ Rules:
 10. Import statements appear at the beginning of the source file, before declarations.
 11. Two imports that bind the same local library name are a compile error. `import grf.io;` together with `import other.io;` is rejected.
 
-**Open decision:** a repeated import of the same domain and library must not create a second binding. Diagnose it as redundant, or accept it as idempotent. Choose one, document it, and test it.
+A repeated import of the same domain and library is a redundant-import diagnostic. It does not create a second binding and it is not an idempotent no-op.
 
 The lexer recognizes `import`, identifiers, and dots. It does not resolve domains or libraries. Name resolution occurs later.
 
@@ -286,19 +286,19 @@ Settled for v0.1, and no longer open:
 - `auto T` conversion is inserted at the call site. The Rust function receives the target type.
 - Interpolation to text uses the same formatting rules as `auto str`.
 - Graphite-authored libraries are deferred. v0.1 library implementations are Rust code described by `grf.json`.
+- A repeated import of the same domain and library is a redundant-import diagnostic.
 
 These items remain open:
 
-1. Exact JSON schema and whether unknown fields are rejected.
+1. Stage 3 rejects unknown `grf.json` fields so the current schema stays closed. A versioned schema extension belongs in a later LLD. Domain discovery and dependency metadata are still open.
 2. Whether the manifest is named `grf.json` for every domain root or whether non-`grf` domains use another canonical name. Current recommendation: `grf.json` for each domain.
 3. How domains are located/registered and how dependencies/version locking work.
 4. How manifest-declared Rust dependencies are represented.
 5. How compiler/build validation confirms each `rustPath` has a compatible signature.
 6. Graphite-to-Rust ownership, borrowing, and the concrete string-formatting helpers. Call-site conversion is settled; the helper names and ownership are not.
 7. Exact structured representation of `auto T` in JSON. The display form `"auto str"` is the current illustration.
-8. Conversion-failure semantics for explicit casts and `auto T`. Failures must not invent a value. The diagnostic or runtime mechanism is not yet specified.
-9. Whether a repeated import of the same domain and library is a redundant-import diagnostic or an idempotent no-op.
-10. Library re-exports, generics, async functions, and platform-specific APIs.
+8. Conversion-failure semantics for explicit casts and `auto T`. Failures must not invent a value. The diagnostic or runtime mechanism is not yet specified. Stage 3 rejects those conversions at compile time instead of inventing a value. `auto str` formatting for `str`, integers, and `bln` is specified and implemented.
+9. Library re-exports, generics, async functions, and platform-specific APIs.
 
 
 

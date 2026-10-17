@@ -28,4 +28,4 @@ The root `test.grf` file is a v0.1 sample program. It is not a language specific
 - Rust remains the implementation and native compilation/linking target.
 - The lexer, parser, semantic analysis, manifest resolution, and code generation remain separate compiler phases.
 
-These LLDs are design drafts, not evidence that an implementation exists or has passed tests. Where conversion-failure behavior, integer overflow, duplicate imports of the same library, or manifest schema details remain open, the documents explicitly identify them rather than silently inventing behavior.
+These LLDs are design drafts, not evidence that an implementation exists or has passed tests. Duplicate imports of the same library are diagnostics. Stage 3 rejects unknown `grf.json` fields. Conversion-failure behavior for numeric parsing, integer overflow policy, and floating-point and `chr` spellings remain open. The documents identify those items rather than silently inventing behavior.
