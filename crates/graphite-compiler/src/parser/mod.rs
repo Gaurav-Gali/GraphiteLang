@@ -1,7 +1,15 @@
-//! Parser and Graphite AST.
+//! Recursive-descent parser for Graphite v0.1.
 //!
-//! Milestone 3. This module will turn tokens into an AST. It must not generate Rust.
+//! The parser consumes lexer tokens and builds an AST. It does not check types,
+//! resolve `grf.json`, convert `auto T` values, or generate Rust.
 
-/// Placeholder so the module boundary exists before the parser is implemented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParserNotImplemented;
+mod ast;
+mod parse;
+mod tree;
+
+pub use ast::*;
+pub use parse::{ParseOutput, ParserDiagnostic, ParserDiagnosticKind, parse};
+pub use tree::format_ast;
+
+#[cfg(test)]
+mod tests;

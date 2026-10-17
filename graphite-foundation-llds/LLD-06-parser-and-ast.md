@@ -41,7 +41,7 @@ str greet(auto str msg) {
 
 The parser must produce a structured AST containing:
 
-- Two import-independent function declarations and one import declaration.
+- One import declaration and three function declarations. The phrase "two import-independent function declarations" was a documentation error.
 - A `main` function with a block containing two expression statements.
 - Nested function calls and a member-style library call.
 - A multiplication expression and a return statement.
@@ -358,6 +358,8 @@ Rules:
 
 Do not add visibility modifiers or overload-specific syntax to this grammar.
 
+`const` is not a v0.1 declaration. The parser must reject `KwConst` with a diagnostic that `const` is not supported. It must not treat `const` as an identifier or ignore it. Add `const` only after its semantics are specified.
+
 ### 7.4 Type syntax
 
 The type grammar must use the actual primitive type tokens supported by the lexer and base-version LLD.
@@ -389,9 +391,7 @@ The parser recognizes type syntax; semantic analysis later normalizes aliases su
 
 Do not add unsupported types such as `string`, `any`, or bare `auto`.
 
-**Return-type restriction:** `void` is permitted as a function return type. It must not be accepted as a variable type or parameter type unless a later language decision explicitly permits it.
-
-The parser may enforce this syntactic restriction where practical. Other type validity checks belong to semantic analysis.
+**Return-type restriction:** `void` is permitted as a function return type. Using `void` as a variable type or a parameter type is invalid, and semantic analysis rejects those uses. The parser still accepts `void` wherever this type grammar allows it, and preserves the type node so the semantic diagnostic can name the declaration.
 
 ---
 
@@ -413,7 +413,7 @@ An unterminated block must produce a diagnostic indicating that `}` was expected
 
 ```ebnf
 VariableDeclaration ::=
-    [ "auto" ] Type Identifier [ "=" Expression ] ";" ;
+    [ "auto" ] Type Identifier "=" Expression ";" ;
 ```
 
 Examples:
@@ -430,12 +430,12 @@ The parser builds a declaration node containing:
 - Whether `auto` was present.
 - The declared type.
 - The variable name.
-- The optional initializer.
+- The required initializer.
 - The declaration's source span.
 
 The parser does not convert initializer values or verify assignment compatibility.
 
-The exact initialization requirements for individual types belong to the semantic specification. For parsing, the initializer is optional unless the frozen LLD explicitly requires it.
+A declaration without `=` is a syntax error. v0.1 does not provide implicit default initialization. The same initializer requirement applies to a C-style loop's variable-declaration initializer.
 
 ### 8.3 Return statements
 
@@ -508,12 +508,13 @@ Support the loop forms specified by the existing syntax LLD.
 
 ```ebnf
 LoopStatement ::=
-      "loop" "(" [ Expression ] ")" Block
+      "loop" "(" ")" Block
+    | "loop" "(" Expression ")" Block
     | "loop" "(" [ VariableDeclarationWithoutSemicolon ]
       ";" [ Expression ] ";" [ Expression ] ")" Block ;
 
 VariableDeclarationWithoutSemicolon ::=
-    [ "auto" ] Type Identifier [ "=" Expression ] ;
+    [ "auto" ] Type Identifier "=" Expression ;
 ```
 
 Examples:
@@ -538,7 +539,11 @@ loop () {
 
 The parser must handle the semicolons inside the C-style loop header without confusing them with statement terminators outside the loop.
 
-If the existing syntax LLD defines any additional loop forms, include them only after confirming the exact grammar. Do not add `while`, `for`, or other aliases merely because they are common elsewhere.
+`loop ()` is the only infinite loop. It has its own AST variant. `loop (;;)` is a syntax error and must not be stored as that infinite-loop variant.
+
+A C-style initializer is a variable declaration with `=`, or it is absent, as in `loop (; index < 10; index++)`. An assignment or other expression in the initializer position is a syntax error.
+
+Do not add `while`, `for`, or other aliases merely because they are common elsewhere.
 
 ### 8.7 Break and continue
 
@@ -608,7 +613,7 @@ MultiplicativeExpression ::=
     UnaryExpression { ( "*" | "/" | "%" ) UnaryExpression } ;
 
 UnaryExpression ::=
-      ( "!" | "-" | "+" ) UnaryExpression
+      ( "!" | "-" ) UnaryExpression
     | PrefixUpdateExpression
     | PostfixExpression ;
 
@@ -642,7 +647,7 @@ From highest to lowest:
 | Precedence | Operators |
 |---:|---|
 | 1 | Function calls, member access, postfix `++` and `--` |
-| 2 | Prefix `!`, unary `-`, unary `+`, prefix `++` and `--` |
+| 2 | Prefix `!`, unary `-`, prefix `++` and `--` |
 | 3 | `*`, `/`, `%` |
 | 4 | `+`, `-` |
 | 5 | `<`, `<=`, `>`, `>=` |
@@ -720,14 +725,13 @@ The parser does not validate mutability, integer types, or overflow behavior.
 
 The following operators are not supported by the v0.1 parser:
 
+- Unary `+`. A `+` token where an operand is expected is a syntax error.
 - `+=`, `-=`, `*=`, `/=`, `%=`.
 - `->`.
 - `?`.
 - `:` as a general expression or declaration operator.
 
-Do not silently parse these as combinations of smaller tokens if the lexer produces a dedicated token for them. Report an appropriate syntax diagnostic.
-
-A colon used as part of an unrelated future construct must not be accepted until that construct is specified.
+The lexer does not emit one token for `+=` or `->`. It emits `+` then `=`, or `-` then `>`. The parser must reject those sequences. It must not build a compound-assignment or arrow node. `:` and `?` are lexer errors and do not reach the parser as tokens.
 
 ---
 
@@ -735,15 +739,14 @@ A colon used as part of an unrelated future construct must not be accepted until
 
 ### 10.1 Ordinary literals
 
-The parser must recognize the literal token types exposed by the existing lexer, including:
+The parser must recognize the literal forms the lexer actually emits:
 
 - Integer literals.
 - Floating-point literals.
-- Boolean literals.
-- Character literals.
+- `true` and `false`, which are keywords, as boolean literals.
 - Ordinary string literals.
 
-The exact supported literal inventory must match LLD-02 and LLD-05.
+v0.1 has no character-literal syntax. `chr` remains a type name. A quote that would begin a character literal is a lexical error. Do not add a character-literal token as part of the parser task.
 
 The parser should preserve literal values or their token representations according to the current AST design. Numeric range validation and literal type resolution are semantic responsibilities unless the lexer already reports lexical errors.
 
@@ -903,7 +906,7 @@ pub struct VariableDecl {
     pub name: Identifier,
     pub ty: TypeSyntax,
     pub conversion: ConversionMode,
-    pub initializer: Option<Expr>,
+    pub initializer: Expr,
     pub span: Span,
 }
 
@@ -931,7 +934,19 @@ pub struct LoopStmt {
 }
 ```
 
-`LoopKind` should distinguish the loop forms that the grammar supports, including condition-based and C-style loop headers. Use dedicated structured fields for initializer, condition, and update expressions rather than storing the header as raw text.
+```rust
+pub enum LoopKind {
+    Infinite,
+    Condition { condition: Expr },
+    CStyle {
+        initializer: Option<VariableDecl>,
+        condition: Option<Expr>,
+        update: Option<Expr>,
+    },
+}
+```
+
+`Infinite` is only `loop ()`. A C-style initializer is either a variable declaration or absent. `loop (;;)` is rejected and is not represented as `Infinite`.
 
 ### 11.4 Expressions
 
@@ -1375,19 +1390,22 @@ The coding agent must follow this order:
 
 Do not begin semantic analysis or code generation as part of this task.
 
-## 17. Explicit boundaries and open questions
+## 17. Binding parser decisions
 
-The following must be checked against the existing LLDs before being treated as finalized grammar:
+These rules override conflicting examples elsewhere in this LLD.
 
-- Whether every logical operator shown in the expression grammar is present in the approved v0.1 operator inventory.
-- The exact full primitive type list and token spellings.
-- The precise condition-loop and C-style loop syntax.
-- Whether empty `return;` is permitted in all functions or only `void` functions; this is a semantic restriction unless explicitly encoded syntactically.
-- Whether the parser must retain parentheses as AST nodes or may discard them while preserving spans.
-- Whether the compiler's existing diagnostic infrastructure already defines a shared `Span` type and diagnostic representation.
-- The lexer representation and boundary rules for escaped and nested interpolation expressions.
-
-If the existing LLDs conflict with an example or this document, do not silently choose a behavior. Report the discrepancy and preserve the already locked decisions, especially `import grf.io;` with calls written as `io.println(...)`.
+- `const` is rejected. It is not an AST declaration and not an identifier.
+- Character literals are not part of v0.1. `true` and `false` are boolean literals. `chr` is only a type name.
+- Unary `+` is rejected. Unary operators are `-`, `!`, and prefix `++` / `--`.
+- A C-style initializer is a variable declaration with `=` or is empty. `loop (index = 0; ...)` is rejected.
+- `loop ()` is the `Infinite` AST variant. `loop (;;)` is rejected.
+- The parser accepts `void` in every type position this grammar allows. Semantic analysis rejects `void` variables and `void` parameters.
+- Variable declarations require `=`.
+- Parentheses are a dedicated AST node. The span includes both parentheses.
+- `+=` and `->` are rejected as token sequences. `:` and `?` are lexer errors.
+- Empty `return;` is syntactically legal in every function. Whether the enclosing function may use it is a semantic check.
+- `&&`, `||`, and `!` are in the v0.1 operator inventory. The parser implements the precedence table in section 9, with assignment associating right-to-left.
+- The shared source span type is `crate::span::Span`. Parser diagnostics are separate from lexer diagnostics and use that span.
 
 ---
 
