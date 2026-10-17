@@ -1,5 +1,6 @@
 pub mod codegen;
 pub mod diagnostics;
+pub mod driver;
 pub mod lexer;
 pub mod manifest;
 pub mod parser;

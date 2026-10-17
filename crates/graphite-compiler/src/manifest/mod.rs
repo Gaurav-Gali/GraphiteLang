@@ -1,15 +1,198 @@
 //! Domain manifest loader.
 //!
-//! `grf.json` is JSON metadata. It must be loaded here, not by the Graphite lexer
-//! or parser. Schema validation, unknown-field policy, and domain lookup are
-//! milestone 4. Those decisions are still open in LLD-03.
+//! `grf.json` is JSON metadata. It is loaded here, not by the Graphite lexer
+//! or parser. Stage 3 keeps the existing schema. Unknown fields are rejected so
+//! a typo cannot silently change the contract. Type mappings and code-generation
+//! strategies are not read from this file. They live in the compiler.
+
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
 
 pub const MANIFEST_FILE_NAME: &str = "grf.json";
 
-/// Checks that manifest text is JSON. This does not validate the Graphite schema
-/// and does not choose whether unknown fields are rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    pub format_version: u32,
+    pub domain: String,
+    pub libraries: BTreeMap<String, Library>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Library {
+    pub description: String,
+    pub functions: BTreeMap<String, Function>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    pub description: String,
+    pub params: Vec<Parameter>,
+    pub returns: ManifestType,
+    pub rust_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    pub name: String,
+    pub ty: ManifestType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestType {
+    pub auto: bool,
+    pub name: String,
+}
+
+/// Checks that manifest text is JSON. This does not validate the Graphite schema.
 pub fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     serde_json::from_str(text)
+}
+
+pub fn load_manifest(text: &str) -> Result<Manifest, String> {
+    let file: ManifestFile =
+        serde_json::from_str(text).map_err(|error| format!("invalid grf.json: {error}"))?;
+    if file.format_version != 1 {
+        return Err(format!(
+            "unsupported grf.json formatVersion {}",
+            file.format_version
+        ));
+    }
+    if file.domain.name.is_empty() {
+        return Err("grf.json domain name is empty".to_string());
+    }
+    let mut libraries = BTreeMap::new();
+    for (name, library) in file.libraries {
+        let mut functions = BTreeMap::new();
+        for (function_name, function) in library.functions {
+            if function.rust_path.is_empty() || !function.rust_path.contains("::") {
+                return Err(format!("function '{function_name}' is missing a Rust path"));
+            }
+            let mut params = Vec::new();
+            for param in function.params {
+                params.push(Parameter {
+                    name: param.name,
+                    ty: parse_manifest_type(&param.ty)?,
+                });
+            }
+            functions.insert(
+                function_name,
+                Function {
+                    description: function.description,
+                    params,
+                    returns: parse_manifest_type(&function.returns)?,
+                    rust_path: function.rust_path,
+                },
+            );
+        }
+        libraries.insert(
+            name,
+            Library {
+                description: library.description,
+                functions,
+            },
+        );
+    }
+    Ok(Manifest {
+        format_version: file.format_version,
+        domain: file.domain.name,
+        libraries,
+    })
+}
+
+pub fn builtin_manifest() -> Manifest {
+    load_manifest(include_str!("../../../../crates/graphite-core/grf.json"))
+        .expect("bundled grf.json")
+}
+
+fn parse_manifest_type(text: &str) -> Result<ManifestType, String> {
+    let mut parts = text.split_whitespace();
+    let first = parts.next().ok_or_else(|| "empty type".to_string())?;
+    let (auto, name) = if first == "auto" {
+        let name = parts
+            .next()
+            .ok_or_else(|| "auto requires a target type".to_string())?;
+        (true, name)
+    } else {
+        (false, first)
+    };
+    if parts.next().is_some() {
+        return Err(format!("invalid manifest type '{text}'"));
+    }
+    if !is_known_type(name) {
+        return Err(format!("unknown manifest type '{name}'"));
+    }
+    if auto && name == "void" {
+        return Err("auto void is not a valid manifest type".to_string());
+    }
+    Ok(ManifestType {
+        auto,
+        name: name.to_string(),
+    })
+}
+
+fn is_known_type(name: &str) -> bool {
+    matches!(
+        name,
+        "void"
+            | "int"
+            | "uint"
+            | "flt"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "flt32"
+            | "flt64"
+            | "bln"
+            | "chr"
+            | "str"
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+struct ManifestFile {
+    format_version: u32,
+    domain: DomainFile,
+    libraries: BTreeMap<String, LibraryFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct DomainFile {
+    name: String,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct LibraryFile {
+    description: String,
+    functions: BTreeMap<String, FunctionFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+struct FunctionFile {
+    description: String,
+    params: Vec<ParamFile>,
+    returns: String,
+    rust_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParamFile {
+    name: String,
+    #[serde(rename = "type")]
+    ty: String,
 }
 
 #[cfg(test)]
@@ -28,5 +211,33 @@ mod tests {
         let core_json = parse_json(core).expect("graphite-core grf.json");
         let hello_json = parse_json(hello).expect("examples/hello grf.json");
         assert_eq!(core_json, hello_json);
+    }
+
+    #[test]
+    fn builtin_manifest_keeps_the_io_contract() {
+        let manifest = builtin_manifest();
+        assert_eq!(manifest.format_version, 1);
+        assert_eq!(manifest.domain, "grf");
+        let io = manifest.libraries.get("io").expect("io");
+        let println = io.functions.get("println").expect("println");
+        assert_eq!(println.rust_path, "graphite_core::io::println");
+        assert_eq!(println.returns.name, "void");
+        assert!(println.params[0].ty.auto);
+        assert_eq!(println.params[0].ty.name, "str");
+        let input = io.functions.get("input").expect("input");
+        assert_eq!(input.returns.name, "str");
+        assert!(!input.returns.auto);
+    }
+
+    #[test]
+    fn unknown_manifest_fields_are_rejected() {
+        let mut value =
+            parse_json(include_str!("../../../../crates/graphite-core/grf.json")).expect("json");
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("language".to_string(), serde_json::json!({}));
+        let error = load_manifest(&value.to_string()).expect_err("unknown field");
+        assert!(error.contains("unknown field"), "{error}");
     }
 }
