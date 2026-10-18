@@ -485,6 +485,134 @@ void main() {
 }
 
 #[test]
+fn arrays_keep_static_element_types() {
+    let accepted = analyze_source(
+        "\
+import grf.io;
+
+int[] copy_of(int[] items) {
+    return items;
+}
+
+void main() {
+    int[] values = [10, 20, 30];
+    int32[] narrow = [1, 2];
+    int[][] matrix = [[1, 2], [3, 4]];
+    int[][] empty = [];
+    int[][] rows = [[], [1]];
+    const int[] fixed = [4, 5];
+    int first = fixed[0];
+    int[] copied = fixed[:];
+    uint64 count = lengthOf(fixed);
+    uint64 same = fixed.length();
+    int a, const int b = [8, 9];
+    loop (int value = values.iter()) {
+        io.println(value);
+    }
+    loop (uint64 idx, int value = values.enumerate()) {
+        io.println(idx);
+        io.println(value);
+    }
+    int[] returned = copy_of(values);
+    int[3] bounded = [];
+    bounded.push(1);
+    int[3] filled = [1, 2, 3];
+    int[2][1] grid = [[4, 5]];
+    io.println(first);
+    io.println(count);
+    io.println(same);
+    io.println(a);
+    io.println(b);
+    io.println(narrow[0]);
+    io.println(matrix[1][0]);
+    io.println(empty.length());
+    io.println(rows[1][0]);
+    io.println(copied[0]);
+    io.println(returned[0]);
+    io.println(bounded.length());
+    io.println(filled[2]);
+    io.println(grid[0][1]);
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+
+    let mismatch = messages("void main() {\n    int[] values = [1, \"two\"];\n}\n");
+    assert!(mismatch.contains("type mismatch"), "{mismatch}");
+    let nested = messages("void main() {\n    int[][] rows = [[1], [\"two\"]];\n}\n");
+    assert!(nested.contains("type mismatch"), "{nested}");
+    let ordinary = messages("void main() {\n    int value = [1];\n}\n");
+    assert!(ordinary.contains("type mismatch"), "{ordinary}");
+    assert!(!ordinary.contains("destructur"), "{ordinary}");
+    let void_array = messages("void main() {\n    void[] values = [];\n}\n");
+    assert!(
+        void_array.contains("void is not a valid array element type"),
+        "{void_array}"
+    );
+    let empty = messages(
+        "void main() {\n    int[] values = [];\n    int[] missing = values;\n    missing = [];\n}\n",
+    );
+    assert!(empty.is_empty(), "{empty}");
+    let untyped = messages("void main() {\n    io.println([]);\n}\n");
+    assert!(
+        untyped.contains("needs a known element type")
+            || untyped.contains("cannot be interpolated"),
+        "{untyped}"
+    );
+    let equality = messages(
+        "void main() {\n    int[] left = [1];\n    int[] right = [1];\n    bln same = left == right;\n}\n",
+    );
+    assert!(equality.contains("comparable"), "{equality}");
+    let interpolated = messages(
+        "import grf.io;\n\nvoid main() {\n    int[] values = [1];\n    str text = f\"{values}\";\n    io.println(values);\n    io.println(str(values));\n    io.println(text);\n}\n",
+    );
+    assert!(interpolated.is_empty(), "{interpolated}");
+    let outside = messages("void main() {\n    int[] values = [1];\n    values.iter();\n}\n");
+    assert!(
+        outside.contains("can only be used as a loop source"),
+        "{outside}"
+    );
+    let index_type = messages(
+        "void main() {\n    int[] values = [1];\n    loop (int idx, int value = values.enumerate()) {\n        io.println(value);\n    }\n}\n",
+    );
+    assert!(index_type.contains("uint64"), "{index_type}");
+    let constant = messages(
+        "void main() {\n    const int[] values = [1];\n    values[0] = 2;\n    values.push(3);\n}\n",
+    );
+    assert!(constant.contains("cannot assign to constant"), "{constant}");
+    let during = messages(
+        "void main() {\n    int[] values = [1];\n    loop (int value = values.iter()) {\n        values.push(value);\n    }\n}\n",
+    );
+    assert!(during.contains("while it is being iterated"), "{during}");
+    let duplicate = messages("void main() {\n    int a, int a = [1, 2];\n}\n");
+    assert!(duplicate.contains("duplicate binding"), "{duplicate}");
+    let too_long = messages("void main() {\n    int[3] values = [1, 2, 3, 4];\n}\n");
+    assert!(too_long.contains("exceeds the maximum of 3"), "{too_long}");
+    let nested_limit = messages("void main() {\n    int[2][1] grid = [[1, 2, 3]];\n}\n");
+    assert!(
+        nested_limit.contains("exceeds the maximum of 2"),
+        "{nested_limit}"
+    );
+    let different =
+        messages("void main() {\n    int[] dynamic = [1];\n    int[3] bounded = dynamic;\n}\n");
+    assert!(different.contains("type mismatch"), "{different}");
+    let widening =
+        messages("void main() {\n    int[3] bounded = [1];\n    int[] dynamic = bounded;\n}\n");
+    assert!(widening.contains("type mismatch"), "{widening}");
+    let literal_count = messages("void main() {\n    int a, int b = [1];\n}\n");
+    assert!(
+        literal_count.contains("expects 2 elements, found 1"),
+        "{literal_count}"
+    );
+    let too_wide = messages("void main() {\n    int32[] values = [4000000000];\n}\n");
+    assert!(too_wide.contains("does not fit"), "{too_wide}");
+}
+
+#[test]
 fn codegen_uses_the_manifest_rust_path() {
     let analysis = analyze_source("import grf.io;\n\nvoid main() {\n    io.print(\"Hi\");\n}\n");
     assert!(

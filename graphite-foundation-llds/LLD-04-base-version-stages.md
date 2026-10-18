@@ -133,7 +133,7 @@ loop (int value = arr.iter()) {
     io.println(value);
 }
 
-loop (int idx, int value = arr.enumerate()) {
+loop (uint64 idx, int value = arr.enumerate()) {
     io.println(f"{idx} - {value}");
 }
 ```

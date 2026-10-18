@@ -285,7 +285,7 @@ fn deferred_operators_are_not_single_tokens() {
 
 #[test]
 fn colon_question_and_lone_ampersand_are_unexpected() {
-    for source in [":", "?", "&", "|"] {
+    for source in ["?", "&", "|"] {
         let result = lex("op.grf", source);
         assert_eq!(result.tokens.len(), 1);
         assert_eq!(result.tokens[0].kind, TokenKind::Eof);
@@ -302,9 +302,14 @@ fn colon_question_and_lone_ampersand_are_unexpected() {
             .iter()
             .map(|token| token.kind)
             .collect::<Vec<_>>(),
-        vec![TokenKind::Identifier, TokenKind::Identifier, TokenKind::Eof]
+        vec![
+            TokenKind::Identifier,
+            TokenKind::Colon,
+            TokenKind::Identifier,
+            TokenKind::Eof
+        ]
     );
-    assert_eq!(result.diagnostics.len(), 1);
+    assert!(result.diagnostics.is_empty());
 }
 
 #[test]

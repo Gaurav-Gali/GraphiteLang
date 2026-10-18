@@ -71,6 +71,39 @@ pub fn char_to_str(value: char) -> String {
     value.to_string()
 }
 
+/// Formats an array as `[elem, elem]`.
+///
+/// Element text uses the same rules as `str(element)`. `str` and `chr`
+/// elements are quoted so commas and brackets stay readable.
+pub fn array_text<T>(items: &[T], element: impl Fn(&T) -> String) -> String {
+    let mut text = String::from("[");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&element(item));
+    }
+    text.push(']');
+    text
+}
+
+pub fn quoted_str(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 pub fn str_to_signed(text: &str, min: i128, max: i128, to: &str, site: Site<'_>) -> i128 {
     let Some(value) = parse_signed(text) else {
         let category = if signed_shape(text) {
@@ -515,6 +548,30 @@ mod tests {
             line: 1,
             column: 1,
         }
+    }
+
+    #[test]
+    fn array_text_uses_element_formatting() {
+        assert_eq!(
+            array_text(&[1_i64, 2, 3], |item| signed_text(i128::from(*item))),
+            "[1, 2, 3]"
+        );
+        assert_eq!(array_text(&[] as &[i64], |_| String::new()), "[]");
+        let nested = vec![vec![1_i64], vec![]];
+        assert_eq!(
+            array_text(&nested, |row| array_text(row, |item| signed_text(
+                i128::from(*item)
+            ))),
+            "[[1], []]"
+        );
+        assert_eq!(
+            array_text(&["A\"B"], |item| quoted_str(item)),
+            "[\"A\\\"B\"]"
+        );
+        assert_eq!(
+            array_text(&[true, false], |item| bln_text(*item)),
+            "[true, false]"
+        );
     }
 
     #[test]

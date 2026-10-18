@@ -390,6 +390,238 @@ mod tests {
     }
 
     #[test]
+    fn arrays_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-array-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+int[] copy_of(int[] items) {
+    return items;
+}
+
+void mutate(int[] items) {
+    items[0] = 99;
+}
+
+void main() {
+    int[] original = [10, 20, 30, 40, 50];
+    io.println(original[0]);
+    io.println(original[-1]);
+    int[] copy = original;
+    copy[0] = 7;
+    io.println(original[0]);
+    io.println(copy[0]);
+    mutate(original);
+    io.println(original[0]);
+    int[] returned = copy_of(original);
+    returned[1] = 8;
+    io.println(original[1]);
+    int[] prefix = original[:3];
+    io.println(prefix[-1]);
+    int[] reversed = original[::-1];
+    io.println(reversed[0]);
+    original[1:3] = [];
+    io.println(lengthOf(original));
+    io.println(original.length());
+    io.println(original[1]);
+    int[][] matrix = [[1, 2], [3, 4]];
+    int[] row = matrix[0];
+    row[0] = 9;
+    io.println(matrix[0][0]);
+    io.println(row[0]);
+    matrix[1][0] = 30;
+    io.println(matrix[1][0]);
+    int a, const int b = [4, 5];
+    io.println(a);
+    io.println(b);
+    loop (uint64 idx, int value = [8].enumerate()) {
+        io.println(idx);
+        io.println(value);
+    }
+    original.push(60);
+    io.println(original[-1]);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "10\n50\n10\n7\n10\n20\n30\n50\n3\n3\n40\n1\n9\n30\n4\n5\n0\n8\n60\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrays_print() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-array-print-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    int[] values = [1, 2, 3];
+    int[][] matrix = [[1], []];
+    int[] empty = [];
+    str[] names = ["Ada", "A\"B"];
+    bln[] flags = [true, false];
+    chr[] letters = [chr("A")];
+    io.println(values);
+    io.println(str(values));
+    io.println(f"n={values}");
+    io.println(matrix);
+    io.println(empty);
+    io.println(names);
+    io.println(flags);
+    io.println(letters);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "[1, 2, 3]\n[1, 2, 3]\nn=[1, 2, 3]\n[[1], []]\n[]\n[\"Ada\", \"A\\\"B\"]\n[true, false]\n[\"A\"]\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bounded_arrays_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-array-bound-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    int[3] values = [];
+    values.push(1);
+    values.push(2);
+    values.push(3);
+    io.println(values);
+    values[1:3] = [8];
+    values.push(4);
+    io.println(values);
+    int[2][] rows = [[1], []];
+    io.println(rows);
+    int[] dynamic = [];
+    dynamic.push(1);
+    dynamic.push(2);
+    dynamic.push(3);
+    dynamic.push(4);
+    io.println(dynamic);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "[1, 2, 3]\n[1, 8, 4]\n[[1], []]\n[1, 2, 3, 4]\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn array_failures_terminate() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-array-fail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] values = [1];\n    io.println(values[1]);\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("array index out of bounds"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] values = [1, 2, 3];\n    values[::2] = [9];\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("slice assignment length mismatch"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] values = [1, 2, 3];\n    int[] copy = values[::0];\n    io.println(copy.length());\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("slice step equals zero"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] values = [1];\n    int a, int b = values;\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("destructuring length mismatch"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[3] values = [1, 2, 3];\n    values.push(4);\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("array exceeds its maximum length"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[3] values = [1, 2, 3];\n    values[0:0] = [8, 9];\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("array exceeds its maximum length"),
+            "{}",
+            output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn conversions_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-convert-{}", std::process::id()));

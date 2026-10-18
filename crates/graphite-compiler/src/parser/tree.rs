@@ -119,6 +119,21 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                     write_line(out, &child, false, "Condition");
                     write_expression(out, &child_prefix(&child, false), true, condition);
                 }
+                LoopKind::Iteration { bindings, iterable } => {
+                    write_line(out, &child, false, "Iteration");
+                    let header = child_prefix(&child, false);
+                    for (index, binding) in bindings.iter().enumerate() {
+                        let binding_last = index + 1 == bindings.len();
+                        write_line(
+                            out,
+                            &header,
+                            binding_last && false,
+                            &format_typed_name(binding.conversion, &binding.ty, &binding.name.name),
+                        );
+                    }
+                    write_line(out, &header, true, "Iterable");
+                    write_expression(out, &child_prefix(&header, true), true, iterable);
+                }
                 LoopKind::CStyle {
                     initializer,
                     condition,
@@ -153,6 +168,26 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
         }
         Stmt::Break(_) => write_line(out, prefix, last, "Break"),
         Stmt::Continue(_) => write_line(out, prefix, last, "Continue"),
+        Stmt::Destructure(declaration) => {
+            write_line(out, prefix, last, "Destructure");
+            let child = child_prefix(prefix, last);
+            for (index, binding) in declaration.bindings.iter().enumerate() {
+                write_line(
+                    out,
+                    &child,
+                    false,
+                    &format_typed_name(binding.conversion, &binding.ty, &binding.name.name),
+                );
+                let _ = index;
+            }
+            write_line(out, &child, true, "Initializer");
+            write_expression(
+                out,
+                &child_prefix(&child, true),
+                true,
+                &declaration.initializer,
+            );
+        }
         Stmt::Expression(expression) => {
             write_line(out, prefix, last, "Expression");
             write_expression(
@@ -267,6 +302,31 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
                 }
             }
         }
+        Expr::Array(array) => {
+            write_line(out, prefix, last, "Array");
+            let child = child_prefix(prefix, last);
+            let count = array.elements.len();
+            if count == 0 {
+                write_line(out, &child, true, "Empty");
+            }
+            for (index, element) in array.elements.iter().enumerate() {
+                write_expression(out, &child, index + 1 == count, element);
+            }
+        }
+        Expr::Index(index) => {
+            write_line(out, prefix, last, "Index");
+            let child = child_prefix(prefix, last);
+            write_expression(out, &child, false, &index.object);
+            write_expression(out, &child, true, &index.index);
+        }
+        Expr::Slice(slice) => {
+            write_line(out, prefix, last, "Slice");
+            let child = child_prefix(prefix, last);
+            write_optional_expr(out, &child, false, "Start", slice.start.as_deref());
+            write_optional_expr(out, &child, false, "Stop", slice.stop.as_deref());
+            write_optional_expr(out, &child, true, "Step", slice.step.as_deref());
+            write_expression(out, &child, false, &slice.object);
+        }
         Expr::Parenthesized { expression, .. } => {
             write_line(out, prefix, last, "Parenthesized");
             write_expression(out, &child_prefix(prefix, last), true, expression);
@@ -285,8 +345,29 @@ fn format_typed_name(conversion: ConversionMode, ty: &TypeSyntax, name: &str) ->
     }
 }
 
-fn format_type(ty: &TypeSyntax) -> &'static str {
-    match ty.kind {
+fn write_optional_expr(
+    out: &mut String,
+    prefix: &str,
+    last: bool,
+    label: &str,
+    expression: Option<&Expr>,
+) {
+    write_line(
+        out,
+        prefix,
+        last && expression.is_none(),
+        &format!(
+            "{label}{}",
+            if expression.is_none() { " omitted" } else { "" }
+        ),
+    );
+    if let Some(expression) = expression {
+        write_expression(out, &child_prefix(prefix, last), true, expression);
+    }
+}
+
+fn format_type(ty: &TypeSyntax) -> String {
+    let mut name = match ty.kind {
         TypeKind::Void => "void",
         TypeKind::Int => "int",
         TypeKind::UInt => "uint",
@@ -303,6 +384,14 @@ fn format_type(ty: &TypeSyntax) -> &'static str {
         TypeKind::Chr => "chr",
         TypeKind::Str => "str",
     }
+    .to_string();
+    for bound in &ty.bounds {
+        match bound {
+            None => name.push_str("[]"),
+            Some(limit) => name.push_str(&format!("[{limit}]")),
+        }
+    }
+    name
 }
 
 fn format_literal(literal: &LiteralExpr) -> String {

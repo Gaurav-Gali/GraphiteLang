@@ -43,9 +43,14 @@ pub struct Identifier {
     pub span: Span,
 }
 
+/// Maximum number of array dimensions a type can carry.
+pub const MAX_ARRAY_RANK: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeSyntax {
     pub kind: TypeKind,
+    /// One entry per dimension, innermost first. `None` is a dynamic array.
+    pub bounds: Vec<Option<u64>>,
     pub span: Span,
 }
 
@@ -78,12 +83,29 @@ pub struct BlockStmt {
 pub enum Stmt {
     Block(BlockStmt),
     VariableDecl(VariableDecl),
+    Destructure(DestructureDecl),
     Return(ReturnStmt),
     If(IfStmt),
     Loop(LoopStmt),
     Break(Span),
     Continue(Span),
     Expression(ExpressionStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestructureDecl {
+    pub bindings: Vec<BindingHead>,
+    pub initializer: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingHead {
+    pub name: Identifier,
+    pub ty: TypeSyntax,
+    pub conversion: ConversionMode,
+    pub mutable: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +156,10 @@ pub enum LoopKind {
         condition: Option<Expr>,
         update: Option<Expr>,
     },
+    Iteration {
+        bindings: Vec<BindingHead>,
+        iterable: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +174,9 @@ pub enum Expr {
     Member(MemberExpr),
     Update(UpdateExpr),
     InterpolatedString(InterpolatedStringExpr),
+    Array(ArrayExpr),
+    Index(IndexExpr),
+    Slice(SliceExpr),
     Parenthesized { expression: Box<Expr>, span: Span },
 }
 
@@ -164,6 +193,9 @@ impl Expr {
             Expr::Member(member) => member.span,
             Expr::Update(update) => update.span,
             Expr::InterpolatedString(interpolated) => interpolated.span,
+            Expr::Array(array) => array.span,
+            Expr::Index(index) => index.span,
+            Expr::Slice(slice) => slice.span,
             Expr::Parenthesized { span, .. } => *span,
         }
     }
@@ -186,6 +218,28 @@ impl LiteralExpr {
             | LiteralExpr::String { span, .. } => *span,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayExpr {
+    pub elements: Vec<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexExpr {
+    pub object: Box<Expr>,
+    pub index: Box<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SliceExpr {
+    pub object: Box<Expr>,
+    pub start: Option<Box<Expr>>,
+    pub stop: Option<Box<Expr>>,
+    pub step: Option<Box<Expr>>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

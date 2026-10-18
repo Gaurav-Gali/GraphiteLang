@@ -48,40 +48,195 @@ pub enum CanonicalType {
     Bln,
     Chr,
     Str,
+    Array {
+        leaf: Leaf,
+        depth: u8,
+        /// `limits[i]` is dimension `i`, innermost first. `None` is dynamic.
+        limits: [Option<u64>; MAX_ARRAY_RANK],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leaf {
+    Void,
+    Int16,
+    Int32,
+    Int64,
+    UInt16,
+    UInt32,
+    UInt64,
+    Flt32,
+    Flt64,
+    Bln,
+    Chr,
+    Str,
 }
 
 impl CanonicalType {
-    pub fn rust_name(self) -> &'static str {
+    pub fn rust_name(self) -> String {
         match self {
-            CanonicalType::Void => "()",
-            CanonicalType::Int16 => "i16",
-            CanonicalType::Int32 => "i32",
-            CanonicalType::Int64 => "i64",
-            CanonicalType::UInt16 => "u16",
-            CanonicalType::UInt32 => "u32",
-            CanonicalType::UInt64 => "u64",
-            CanonicalType::Flt32 => "f32",
-            CanonicalType::Flt64 => "f64",
-            CanonicalType::Bln => "bool",
-            CanonicalType::Chr => "char",
-            CanonicalType::Str => "String",
+            CanonicalType::Void => "()".to_string(),
+            CanonicalType::Int16 => "i16".to_string(),
+            CanonicalType::Int32 => "i32".to_string(),
+            CanonicalType::Int64 => "i64".to_string(),
+            CanonicalType::UInt16 => "u16".to_string(),
+            CanonicalType::UInt32 => "u32".to_string(),
+            CanonicalType::UInt64 => "u64".to_string(),
+            CanonicalType::Flt32 => "f32".to_string(),
+            CanonicalType::Flt64 => "f64".to_string(),
+            CanonicalType::Bln => "bool".to_string(),
+            CanonicalType::Chr => "char".to_string(),
+            CanonicalType::Str => "String".to_string(),
+            CanonicalType::Array { leaf, depth, .. } => {
+                let mut name = leaf.rust_name();
+                for _ in 0..depth {
+                    name = format!("Vec<{name}>");
+                }
+                name
+            }
         }
     }
 
-    pub fn spelling(self) -> &'static str {
+    pub fn spelling(self) -> String {
         match self {
-            CanonicalType::Void => "void",
-            CanonicalType::Int16 => "int16",
-            CanonicalType::Int32 => "int32",
-            CanonicalType::Int64 => "int64",
-            CanonicalType::UInt16 => "uint16",
-            CanonicalType::UInt32 => "uint32",
-            CanonicalType::UInt64 => "uint64",
-            CanonicalType::Flt32 => "flt32",
-            CanonicalType::Flt64 => "flt64",
-            CanonicalType::Bln => "bln",
-            CanonicalType::Chr => "chr",
-            CanonicalType::Str => "str",
+            CanonicalType::Void => "void".to_string(),
+            CanonicalType::Int16 => "int16".to_string(),
+            CanonicalType::Int32 => "int32".to_string(),
+            CanonicalType::Int64 => "int64".to_string(),
+            CanonicalType::UInt16 => "uint16".to_string(),
+            CanonicalType::UInt32 => "uint32".to_string(),
+            CanonicalType::UInt64 => "uint64".to_string(),
+            CanonicalType::Flt32 => "flt32".to_string(),
+            CanonicalType::Flt64 => "flt64".to_string(),
+            CanonicalType::Bln => "bln".to_string(),
+            CanonicalType::Chr => "chr".to_string(),
+            CanonicalType::Str => "str".to_string(),
+            CanonicalType::Array {
+                leaf,
+                depth,
+                limits,
+            } => {
+                let mut name = leaf.spelling().to_string();
+                for bound in limits.iter().take(depth as usize) {
+                    match bound {
+                        None => name.push_str("[]"),
+                        Some(limit) => name.push_str(&format!("[{limit}]")),
+                    }
+                }
+                name
+            }
+        }
+    }
+
+    pub fn element(self) -> Option<CanonicalType> {
+        match self {
+            CanonicalType::Array { leaf, depth: 1, .. } => Some(leaf.canonical()),
+            CanonicalType::Array {
+                leaf,
+                depth,
+                mut limits,
+            } if depth > 1 => {
+                limits[(depth - 1) as usize] = None;
+                Some(CanonicalType::Array {
+                    leaf,
+                    depth: depth - 1,
+                    limits,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub fn limit(self) -> Option<u64> {
+        match self {
+            CanonicalType::Array { depth, limits, .. } if depth > 0 => limits[(depth - 1) as usize],
+            _ => None,
+        }
+    }
+
+    pub fn depth(self) -> u8 {
+        match self {
+            CanonicalType::Array { depth, .. } => depth,
+            _ => 0,
+        }
+    }
+
+    pub fn is_array(self) -> bool {
+        matches!(self, CanonicalType::Array { .. })
+    }
+
+    pub fn is_void_array(self) -> bool {
+        matches!(
+            self,
+            CanonicalType::Array {
+                leaf: Leaf::Void,
+                ..
+            }
+        )
+    }
+
+    pub fn is_heap(self) -> bool {
+        matches!(self, CanonicalType::Str | CanonicalType::Array { .. })
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(
+            self,
+            CanonicalType::Int16 | CanonicalType::Int32 | CanonicalType::Int64
+        )
+    }
+
+    pub fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            CanonicalType::UInt16 | CanonicalType::UInt32 | CanonicalType::UInt64
+        )
+    }
+
+    pub fn nest(self) -> CanonicalType {
+        match self {
+            CanonicalType::Array {
+                leaf,
+                depth,
+                mut limits,
+            } => {
+                if depth as usize >= MAX_ARRAY_RANK {
+                    return CanonicalType::Array {
+                        leaf,
+                        depth,
+                        limits,
+                    };
+                }
+                limits[depth as usize] = None;
+                CanonicalType::Array {
+                    leaf,
+                    depth: depth + 1,
+                    limits,
+                }
+            }
+            other => CanonicalType::Array {
+                leaf: other.leaf(),
+                depth: 1,
+                limits: [None; MAX_ARRAY_RANK],
+            },
+        }
+    }
+
+    fn leaf(self) -> Leaf {
+        match self {
+            CanonicalType::Void => Leaf::Void,
+            CanonicalType::Int16 => Leaf::Int16,
+            CanonicalType::Int32 => Leaf::Int32,
+            CanonicalType::Int64 => Leaf::Int64,
+            CanonicalType::UInt16 => Leaf::UInt16,
+            CanonicalType::UInt32 => Leaf::UInt32,
+            CanonicalType::UInt64 => Leaf::UInt64,
+            CanonicalType::Flt32 => Leaf::Flt32,
+            CanonicalType::Flt64 => Leaf::Flt64,
+            CanonicalType::Bln => Leaf::Bln,
+            CanonicalType::Chr => Leaf::Chr,
+            CanonicalType::Str => Leaf::Str,
+            CanonicalType::Array { leaf, .. } => leaf,
         }
     }
 
@@ -106,8 +261,51 @@ impl CanonicalType {
     }
 }
 
-pub fn canonical_type(kind: TypeKind) -> CanonicalType {
-    match kind {
+impl Leaf {
+    fn canonical(self) -> CanonicalType {
+        match self {
+            Leaf::Void => CanonicalType::Void,
+            Leaf::Int16 => CanonicalType::Int16,
+            Leaf::Int32 => CanonicalType::Int32,
+            Leaf::Int64 => CanonicalType::Int64,
+            Leaf::UInt16 => CanonicalType::UInt16,
+            Leaf::UInt32 => CanonicalType::UInt32,
+            Leaf::UInt64 => CanonicalType::UInt64,
+            Leaf::Flt32 => CanonicalType::Flt32,
+            Leaf::Flt64 => CanonicalType::Flt64,
+            Leaf::Bln => CanonicalType::Bln,
+            Leaf::Chr => CanonicalType::Chr,
+            Leaf::Str => CanonicalType::Str,
+        }
+    }
+
+    fn spelling(self) -> &'static str {
+        match self {
+            Leaf::Void => "void",
+            Leaf::Int16 => "int16",
+            Leaf::Int32 => "int32",
+            Leaf::Int64 => "int64",
+            Leaf::UInt16 => "uint16",
+            Leaf::UInt32 => "uint32",
+            Leaf::UInt64 => "uint64",
+            Leaf::Flt32 => "flt32",
+            Leaf::Flt64 => "flt64",
+            Leaf::Bln => "bln",
+            Leaf::Chr => "chr",
+            Leaf::Str => "str",
+        }
+    }
+
+    fn rust_name(self) -> String {
+        match self {
+            Leaf::Void => "()".to_string(),
+            other => other.canonical().rust_name(),
+        }
+    }
+}
+
+pub fn canonical_type(kind: TypeKind, bounds: &[Option<u64>]) -> CanonicalType {
+    let scalar = match kind {
         TypeKind::Void => CanonicalType::Void,
         TypeKind::Int | TypeKind::Int64 => CanonicalType::Int64,
         TypeKind::UInt | TypeKind::UInt64 => CanonicalType::UInt64,
@@ -120,6 +318,18 @@ pub fn canonical_type(kind: TypeKind) -> CanonicalType {
         TypeKind::Bln => CanonicalType::Bln,
         TypeKind::Chr => CanonicalType::Chr,
         TypeKind::Str => CanonicalType::Str,
+    };
+    if bounds.is_empty() {
+        return scalar;
+    }
+    let mut limits = [None; MAX_ARRAY_RANK];
+    for (index, bound) in bounds.iter().take(MAX_ARRAY_RANK).enumerate() {
+        limits[index] = *bound;
+    }
+    CanonicalType::Array {
+        leaf: scalar.leaf(),
+        depth: bounds.len().min(MAX_ARRAY_RANK) as u8,
+        limits,
     }
 }
 
@@ -210,6 +420,41 @@ pub enum CheckedStmt {
     Block {
         body: Vec<CheckedStmt>,
     },
+    Destructure {
+        bindings: Vec<(String, CanonicalType, bool)>,
+        value: CheckedExpr,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    Iterate {
+        bindings: Vec<(String, CanonicalType, bool)>,
+        source: CheckedExpr,
+        enumerate: bool,
+        body: Vec<CheckedStmt>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArrayPlace {
+    Var(String),
+    Index {
+        object: Box<ArrayPlace>,
+        index: Box<CheckedExpr>,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrayMethod {
+    Get,
+    Set,
+    Push,
+    Insert,
+    Remove,
+    Length,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +513,62 @@ pub enum CheckedExpr {
         column: u32,
     },
     Char(char),
+    Array {
+        elements: Vec<CheckedExpr>,
+        ty: CanonicalType,
+    },
+    IndexGet {
+        object: Box<CheckedExpr>,
+        index: Box<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    SliceGet {
+        object: Box<CheckedExpr>,
+        start: Option<Box<CheckedExpr>>,
+        stop: Option<Box<CheckedExpr>>,
+        step: Option<Box<CheckedExpr>>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    IndexSet {
+        place: Option<ArrayPlace>,
+        object: Option<Box<CheckedExpr>>,
+        index: Box<CheckedExpr>,
+        value: Box<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    SliceSet {
+        place: Option<ArrayPlace>,
+        object: Option<Box<CheckedExpr>>,
+        start: Option<Box<CheckedExpr>>,
+        stop: Option<Box<CheckedExpr>>,
+        step: Option<Box<CheckedExpr>>,
+        value: Box<CheckedExpr>,
+        ty: CanonicalType,
+        limit: Option<u64>,
+        file: String,
+        line: u32,
+        column: u32,
+    },
+    ArrayCall {
+        place: Option<ArrayPlace>,
+        object: Option<Box<CheckedExpr>>,
+        method: ArrayMethod,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        limit: Option<u64>,
+        file: String,
+        line: u32,
+        column: u32,
+    },
     Interpolated {
         parts: Vec<CheckedPart>,
     },
@@ -285,6 +586,12 @@ impl CheckedExpr {
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. } => *ty,
             CheckedExpr::Convert { to, .. } => *to,
+            CheckedExpr::Array { ty, .. }
+            | CheckedExpr::IndexGet { ty, .. }
+            | CheckedExpr::SliceGet { ty, .. }
+            | CheckedExpr::IndexSet { ty, .. }
+            | CheckedExpr::SliceSet { ty, .. }
+            | CheckedExpr::ArrayCall { ty, .. } => *ty,
             CheckedExpr::LengthOf { .. } => CanonicalType::UInt64,
             CheckedExpr::Bool(_) => CanonicalType::Bln,
             CheckedExpr::Char(_) => CanonicalType::Chr,
@@ -333,6 +640,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         scopes: Vec::new(),
         loop_depth: 0,
         current_return: CanonicalType::Void,
+        iterating: Vec::new(),
     };
     checker.collect_imports(program);
     checker.collect_functions(program);
@@ -368,6 +676,13 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
     current_return: CanonicalType,
+    iterating: Vec<IterLock>,
+}
+
+#[derive(Clone)]
+struct IterLock {
+    name: String,
+    scope: usize,
 }
 
 impl<'a> Checker<'a> {
@@ -428,13 +743,19 @@ impl<'a> Checker<'a> {
 
     fn collect_functions(&mut self, program: &Program) {
         for function in &program.functions {
-            let ret = canonical_type(function.return_type.kind);
+            let ret = canonical_type(
+                function.return_type.kind,
+                function.return_type.bounds.as_slice(),
+            );
             let mut params = Vec::new();
             let mut names = HashMap::new();
             for parameter in &function.parameters {
-                let ty = canonical_type(parameter.ty.kind);
+                let ty = canonical_type(parameter.ty.kind, parameter.ty.bounds.as_slice());
                 if ty == CanonicalType::Void {
                     self.error(parameter.ty.span, "a parameter cannot have type void");
+                }
+                if ty.is_void_array() {
+                    self.error(parameter.ty.span, "void is not a valid array element type");
                 }
                 let _ = self.reject_unspecified_type(ty, parameter.ty.span);
                 if names
@@ -459,6 +780,12 @@ impl<'a> Checker<'a> {
                 });
             }
             self.reject_unspecified_type(ret, function.return_type.span);
+            if ret.is_void_array() {
+                self.error(
+                    function.return_type.span,
+                    "void is not a valid array element type",
+                );
+            }
             if function.name.name == "lengthOf" {
                 self.error(function.name.span, "'lengthOf' is a reserved built-in name");
                 continue;
@@ -508,7 +835,7 @@ impl<'a> Checker<'a> {
             return;
         }
         for main in mains {
-            let ret = canonical_type(main.return_type.kind);
+            let ret = canonical_type(main.return_type.kind, main.return_type.bounds.as_slice());
             if ret != CanonicalType::Void {
                 self.error(main.return_type.span, "'main' must return void");
             }
@@ -572,6 +899,7 @@ impl<'a> Checker<'a> {
                 body: self.check_block_stmts(block),
             }),
             Stmt::VariableDecl(decl) => self.check_variable(decl).map(|let_stmt| let_stmt),
+            Stmt::Destructure(decl) => self.check_destructure(decl),
             Stmt::Return(stmt) => {
                 if self.current_return == CanonicalType::Void {
                     if stmt.value.is_some() {
@@ -702,13 +1030,20 @@ impl<'a> Checker<'a> {
                     body,
                 })
             }
+            LoopKind::Iteration { bindings, iterable } => {
+                self.check_iteration(bindings, iterable, stmt)
+            }
         }
     }
 
     fn check_variable(&mut self, decl: &VariableDecl) -> Option<CheckedStmt> {
-        let ty = canonical_type(decl.ty.kind);
+        let ty = canonical_type(decl.ty.kind, decl.ty.bounds.as_slice());
         if ty == CanonicalType::Void {
             self.error(decl.ty.span, "a variable cannot have type void");
+            return None;
+        }
+        if ty.is_void_array() {
+            self.error(decl.ty.span, "void is not a valid array element type");
             return None;
         }
         if self.reject_unspecified_type(ty, decl.ty.span) {
@@ -777,6 +1112,9 @@ impl<'a> Checker<'a> {
             Expr::Update(expr) => self.check_update(expr),
             Expr::Call(expr) => self.check_call(expr, allow_void),
             Expr::Conversion(expr) => self.check_conversion(expr),
+            Expr::Array(expr) => self.check_array_literal(expr, expected),
+            Expr::Index(expr) => self.check_index(expr),
+            Expr::Slice(expr) => self.check_slice(expr),
             Expr::Member(expr) => {
                 self.error(
                     expr.span,
@@ -926,23 +1264,26 @@ impl<'a> Checker<'a> {
     }
 
     fn check_assignment(&mut self, expr: &AssignmentExpr) -> CheckedExpr {
+        match &*expr.target {
+            Expr::Index(index) => return self.check_index_assignment(index, &expr.value),
+            Expr::Slice(slice) => return self.check_slice_assignment(slice, &expr.value),
+            Expr::Identifier(_) => {}
+            _ => {
+                self.error(
+                    expr.target.span(),
+                    "the assignment target must be a variable, index, or slice",
+                );
+                return self.dummy(None);
+            }
+        }
         let Expr::Identifier(ident) = &*expr.target else {
-            self.error(
-                expr.target.span(),
-                "the assignment target must be a variable",
-            );
             return self.dummy(None);
         };
         let Some(binding) = self.lookup(&ident.name) else {
             self.error(ident.span, format!("unknown name '{}'", ident.name));
             return self.dummy(None);
         };
-        if !binding.mutable {
-            self.error(
-                ident.span,
-                format!("cannot assign to constant '{}'", ident.name),
-            );
-        }
+        self.reject_binding_write(&ident.name, ident.span, false);
         let ty = binding.ty;
         let value = self.check_expr(&expr.value, Some(ty), false);
         let value = self.apply_conversion(value, ty, false, expr.value.span());
@@ -965,12 +1306,8 @@ impl<'a> Checker<'a> {
             self.error(ident.span, format!("unknown name '{}'", ident.name));
             return self.dummy(None);
         };
-        if !binding.mutable {
-            self.error(
-                ident.span,
-                format!("cannot modify constant '{}'", ident.name),
-            );
-        } else if !binding.ty.is_integer() {
+        self.reject_binding_write(&ident.name, ident.span, true);
+        if binding.mutable && !binding.ty.is_integer() {
             self.error(
                 expr.span,
                 "increment and decrement require a mutable integer variable",
@@ -986,7 +1323,12 @@ impl<'a> Checker<'a> {
 
     fn check_call(&mut self, expr: &CallExpr, allow_void: bool) -> CheckedExpr {
         if let Expr::Member(member) = &*expr.callee {
-            return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
+            if let Expr::Identifier(object) = &*member.object {
+                if self.imports.contains_key(&object.name) {
+                    return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
+                }
+            }
+            return self.check_array_method(member, &expr.arguments, expr.span);
         }
         if let Expr::Identifier(ident) = &*expr.callee {
             if ident.name == "lengthOf" {
@@ -1077,12 +1419,12 @@ impl<'a> Checker<'a> {
             };
         }
         let argument = &arguments[0];
-        let value = self.check_expr(argument, Some(CanonicalType::Str), false);
-        if value.ty() != CanonicalType::Str {
+        let value = self.check_expr(argument, None, false);
+        if value.ty() != CanonicalType::Str && !value.ty().is_array() {
             self.error(
                 argument.span(),
                 format!(
-                    "lengthOf requires a str value; '{}' has no defined length",
+                    "lengthOf requires a str or array value; '{}' has no defined length",
                     value.ty().spelling()
                 ),
             );
@@ -1155,7 +1497,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_conversion(&mut self, expr: &ConversionExpr) -> CheckedExpr {
-        let target = canonical_type(expr.target.kind);
+        let target = canonical_type(expr.target.kind, expr.target.bounds.as_slice());
         if target == CanonicalType::Void {
             self.error(expr.target.span, "void is not a conversion target");
             return self.dummy(None);
@@ -1220,6 +1562,730 @@ impl<'a> Checker<'a> {
             ),
         );
         expr
+    }
+
+    fn check_array_literal(
+        &mut self,
+        expr: &ArrayExpr,
+        expected: Option<CanonicalType>,
+    ) -> CheckedExpr {
+        let element_expected = expected.and_then(|ty| ty.element());
+        if expr.elements.is_empty() {
+            let Some(ty) = expected.filter(|ty| ty.is_array()) else {
+                self.error(
+                    expr.span,
+                    "an empty array literal needs a known element type",
+                );
+                return CheckedExpr::Array {
+                    elements: Vec::new(),
+                    ty: expected.unwrap_or(CanonicalType::Int64.nest()),
+                };
+            };
+            if ty.is_void_array() {
+                self.error(expr.span, "void is not a valid array element type");
+            }
+            self.reject_over_limit(ty, 0, expr.span);
+            return CheckedExpr::Array {
+                elements: Vec::new(),
+                ty,
+            };
+        }
+        let mut elements: Vec<CheckedExpr> = Vec::new();
+        for (index, element) in expr.elements.iter().enumerate() {
+            let expected_element = if index == 0 {
+                element_expected
+            } else {
+                Some(elements[0].ty())
+            };
+            let element_expected = if index == 0 {
+                element_expected
+            } else {
+                expected_element
+            };
+            let checked = self.check_expr(element, element_expected, false);
+            let target = element_expected.unwrap_or_else(|| checked.ty());
+            if target == CanonicalType::Void || target.is_void_array() {
+                self.error(element.span(), "void is not a valid array element type");
+            }
+            elements.push(self.apply_conversion(checked, target, false, element.span()));
+        }
+        let element_ty = element_expected.unwrap_or_else(|| elements[0].ty());
+        let ty = match expected {
+            Some(expected) if expected.element() == Some(element_ty) => expected,
+            _ => element_ty.nest(),
+        };
+        self.reject_over_limit(ty, elements.len(), expr.span);
+        CheckedExpr::Array { elements, ty }
+    }
+
+    fn reject_over_limit(&mut self, ty: CanonicalType, len: usize, span: Span) {
+        let Some(limit) = ty.limit() else {
+            return;
+        };
+        if len as u64 > limit {
+            self.error(
+                span,
+                format!("array literal has {len} elements, which exceeds the maximum of {limit}"),
+            );
+        }
+    }
+
+    fn check_index(&mut self, expr: &IndexExpr) -> CheckedExpr {
+        let object = self.check_expr(&expr.object, None, false);
+        let index = self.check_index_operand(&expr.index);
+        let ty = if object.ty().is_array() {
+            object.ty().element().unwrap_or(CanonicalType::Int64)
+        } else {
+            self.error(
+                expr.object.span(),
+                format!("'{}' is not an array", object.ty().spelling()),
+            );
+            CanonicalType::Int64
+        };
+        let (file, line, column) = self.located(expr.span);
+        CheckedExpr::IndexGet {
+            object: Box::new(object),
+            index: Box::new(index),
+            ty,
+            file,
+            line,
+            column,
+        }
+    }
+
+    fn check_slice(&mut self, expr: &SliceExpr) -> CheckedExpr {
+        let object = self.check_expr(&expr.object, None, false);
+        if !object.ty().is_array() {
+            self.error(
+                expr.object.span(),
+                format!("'{}' is not an array", object.ty().spelling()),
+            );
+        }
+        let start = expr
+            .start
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let stop = expr
+            .stop
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let step = expr
+            .step
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let ty = object.ty();
+        let (file, line, column) = self.located(expr.span);
+        CheckedExpr::SliceGet {
+            object: Box::new(object),
+            start,
+            stop,
+            step,
+            ty,
+            file,
+            line,
+            column,
+        }
+    }
+
+    fn check_index_assignment(&mut self, index: &IndexExpr, value: &Expr) -> CheckedExpr {
+        let checked_index = self.check_index_operand(&index.index);
+        let (file, line, column) = self.located(index.span);
+        if let Some(place) = self.check_place(&index.object, true) {
+            let element = self
+                .place_type(&place)
+                .element()
+                .unwrap_or(CanonicalType::Int64);
+            let checked = self.check_expr(value, Some(element), false);
+            let value = self.apply_conversion(checked, element, false, value.span());
+            return CheckedExpr::IndexSet {
+                place: Some(place),
+                object: None,
+                index: Box::new(checked_index),
+                value: Box::new(value),
+                ty: element,
+                file,
+                line,
+                column,
+            };
+        }
+        let object = self.check_expr(&index.object, None, false);
+        let element = if object.ty().is_array() {
+            object.ty().element().unwrap_or(CanonicalType::Int64)
+        } else {
+            self.error(
+                index.object.span(),
+                format!("'{}' is not an array", object.ty().spelling()),
+            );
+            CanonicalType::Int64
+        };
+        let checked = self.check_expr(value, Some(element), false);
+        let value = self.apply_conversion(checked, element, false, value.span());
+        CheckedExpr::IndexSet {
+            place: None,
+            object: Some(Box::new(object)),
+            index: Box::new(checked_index),
+            value: Box::new(value),
+            ty: element,
+            file,
+            line,
+            column,
+        }
+    }
+
+    fn check_slice_assignment(&mut self, slice: &SliceExpr, value: &Expr) -> CheckedExpr {
+        let start = slice
+            .start
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let stop = slice
+            .stop
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let step = slice
+            .step
+            .as_ref()
+            .map(|bound| Box::new(self.check_index_operand(bound)));
+        let (file, line, column) = self.located(slice.span);
+        let (place, object, array_ty) = if let Some(place) = self.check_place(&slice.object, true) {
+            let array_ty = self.place_type(&place);
+            if !array_ty.is_array() {
+                self.error(
+                    slice.object.span(),
+                    format!("'{}' is not an array", array_ty.spelling()),
+                );
+            }
+            (Some(place), None, array_ty)
+        } else {
+            let object = self.check_expr(&slice.object, None, false);
+            if !object.ty().is_array() {
+                self.error(
+                    slice.object.span(),
+                    format!("'{}' is not an array", object.ty().spelling()),
+                );
+            }
+            let array_ty = object.ty();
+            (None, Some(Box::new(object)), array_ty)
+        };
+        let checked = self.check_expr(value, Some(array_ty), false);
+        let value = self.apply_conversion(checked, array_ty, false, value.span());
+        CheckedExpr::SliceSet {
+            place,
+            object,
+            start,
+            stop,
+            step,
+            value: Box::new(value),
+            ty: array_ty,
+            limit: array_ty.limit(),
+            file,
+            line,
+            column,
+        }
+    }
+
+    fn check_place(&mut self, expr: &Expr, mutating: bool) -> Option<ArrayPlace> {
+        match expr {
+            Expr::Parenthesized { expression, .. } => self.check_place(expression, mutating),
+            Expr::Identifier(ident) => {
+                let (scope, binding) = self.binding_at(&ident.name)?;
+                if !binding.ty.is_array() {
+                    return None;
+                }
+                if mutating {
+                    self.reject_iterated_write(&ident.name, scope, ident.span);
+                    if !binding.mutable {
+                        self.error(
+                            ident.span,
+                            format!("cannot assign to constant '{}'", ident.name),
+                        );
+                    }
+                }
+                let _ = scope;
+                Some(ArrayPlace::Var(ident.name.clone()))
+            }
+            Expr::Index(index) => {
+                let object = self.check_place(&index.object, mutating)?;
+                if !self.place_type(&object).is_array() {
+                    self.error(
+                        index.object.span(),
+                        format!("'{}' is not an array", self.place_type(&object).spelling()),
+                    );
+                    return None;
+                }
+                let checked = self.check_index_operand(&index.index);
+                let (file, line, column) = self.located(index.span);
+                Some(ArrayPlace::Index {
+                    object: Box::new(object),
+                    index: Box::new(checked),
+                    file,
+                    line,
+                    column,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn place_type(&self, place: &ArrayPlace) -> CanonicalType {
+        match place {
+            ArrayPlace::Var(name) => self
+                .lookup(name)
+                .map(|binding| binding.ty)
+                .unwrap_or(CanonicalType::Int64),
+            ArrayPlace::Index { object, .. } => self
+                .place_type(object)
+                .element()
+                .unwrap_or(CanonicalType::Int64),
+        }
+    }
+
+    fn check_array_method(
+        &mut self,
+        member: &MemberExpr,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        let name = member.member.name.as_str();
+        if matches!(name, "iter" | "enumerate") {
+            self.error(span, format!("{name}() can only be used as a loop source"));
+            let _ = self.check_expr(&member.object, None, false);
+            return self.dummy(None);
+        }
+        let method = match name {
+            "get" => ArrayMethod::Get,
+            "set" => ArrayMethod::Set,
+            "push" => ArrayMethod::Push,
+            "insert" => ArrayMethod::Insert,
+            "remove" => ArrayMethod::Remove,
+            "length" => ArrayMethod::Length,
+            _ => {
+                self.error(member.member.span, format!("array has no method '{name}'"));
+                let _ = self.check_expr(&member.object, None, false);
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            }
+        };
+        let expected_args = match method {
+            ArrayMethod::Length => 0,
+            ArrayMethod::Get | ArrayMethod::Push | ArrayMethod::Remove => 1,
+            ArrayMethod::Set | ArrayMethod::Insert => 2,
+        };
+        if arguments.len() != expected_args {
+            self.error(
+                span,
+                format!(
+                    "method '{name}' expects {expected_args} argument{}, found {}",
+                    if expected_args == 1 { "" } else { "s" },
+                    arguments.len()
+                ),
+            );
+        }
+        let (file, line, column) = self.located(span);
+        let mutating = matches!(
+            method,
+            ArrayMethod::Set | ArrayMethod::Push | ArrayMethod::Insert | ArrayMethod::Remove
+        );
+        if mutating {
+            if let Some(place) = self.check_place(&member.object, true) {
+                let array_ty = self.place_type(&place);
+                if !array_ty.is_array() {
+                    self.error(
+                        member.object.span(),
+                        format!("'{}' is not an array", array_ty.spelling()),
+                    );
+                }
+                let args = self.array_method_args(method, array_ty, arguments);
+                let ty = self.array_method_type(method, array_ty);
+                return CheckedExpr::ArrayCall {
+                    place: Some(place),
+                    object: None,
+                    method,
+                    args,
+                    ty,
+                    limit: array_ty.limit(),
+                    file,
+                    line,
+                    column,
+                };
+            }
+        }
+        let object = self.check_expr(&member.object, None, false);
+        if !object.ty().is_array() {
+            self.error(
+                member.object.span(),
+                format!("'{}' is not an array", object.ty().spelling()),
+            );
+        }
+        let array_ty = object.ty();
+        let args = self.array_method_args(method, array_ty, arguments);
+        CheckedExpr::ArrayCall {
+            place: None,
+            object: Some(Box::new(object)),
+            method,
+            args,
+            ty: self.array_method_type(method, array_ty),
+            limit: array_ty.limit(),
+            file,
+            line,
+            column,
+        }
+    }
+
+    fn array_method_type(&self, method: ArrayMethod, array_ty: CanonicalType) -> CanonicalType {
+        match method {
+            ArrayMethod::Get => array_ty.element().unwrap_or(CanonicalType::Int64),
+            ArrayMethod::Length => CanonicalType::UInt64,
+            ArrayMethod::Set | ArrayMethod::Push | ArrayMethod::Insert | ArrayMethod::Remove => {
+                CanonicalType::Void
+            }
+        }
+    }
+
+    fn array_method_args(
+        &mut self,
+        method: ArrayMethod,
+        array_ty: CanonicalType,
+        arguments: &[Expr],
+    ) -> Vec<CheckedExpr> {
+        let element = array_ty.element().unwrap_or(CanonicalType::Int64);
+        let mut checked = Vec::new();
+        for (index, argument) in arguments.iter().enumerate() {
+            let expected = match (method, index) {
+                (ArrayMethod::Get | ArrayMethod::Remove, 0) => None,
+                (ArrayMethod::Push, 0) => Some(element),
+                (ArrayMethod::Set, 0) | (ArrayMethod::Insert, 0) => None,
+                (ArrayMethod::Set, 1) | (ArrayMethod::Insert, 1) => Some(element),
+                _ => None,
+            };
+            let value = self.check_expr(argument, expected, false);
+            if expected.is_none() && matches!(index, 0) && method != ArrayMethod::Push {
+                if !value.ty().is_integer() && arguments.len() > index {
+                    self.error(
+                        argument.span(),
+                        format!(
+                            "an index must be an integer, found '{}'",
+                            value.ty().spelling()
+                        ),
+                    );
+                }
+            }
+            let value = if let Some(expected) = expected {
+                self.apply_conversion(value, expected, false, argument.span())
+            } else {
+                value
+            };
+            checked.push(value);
+        }
+        checked
+    }
+
+    fn check_destructure(&mut self, decl: &DestructureDecl) -> Option<CheckedStmt> {
+        if decl.bindings.len() < 2 {
+            self.error(decl.span, "destructuring requires at least two bindings");
+        }
+        let value = self.check_expr(&decl.initializer, None, false);
+        let Some(element) = value.ty().element() else {
+            self.error(
+                decl.initializer.span(),
+                format!(
+                    "destructuring requires an array, found '{}'",
+                    value.ty().spelling()
+                ),
+            );
+            return None;
+        };
+        if let Expr::Array(array) = unwrap_parens(&decl.initializer) {
+            if array.elements.len() != decl.bindings.len() {
+                self.error(
+                    decl.span,
+                    format!(
+                        "destructuring expects {} elements, found {}",
+                        decl.bindings.len(),
+                        array.elements.len()
+                    ),
+                );
+            }
+        }
+        let mut names = Vec::new();
+        let mut bindings = Vec::new();
+        for binding in &decl.bindings {
+            if binding.conversion == ConversionMode::Auto {
+                self.error(
+                    binding.span,
+                    "auto is not allowed in a destructuring declaration",
+                );
+            }
+            let ty = canonical_type(binding.ty.kind, binding.ty.bounds.as_slice());
+            if ty == CanonicalType::Void || ty.is_void_array() {
+                self.error(binding.ty.span, "void is not a valid array element type");
+            }
+            if ty != element {
+                self.error(
+                    binding.ty.span,
+                    format!(
+                        "type mismatch: expected '{}', found '{}'",
+                        element.spelling(),
+                        ty.spelling()
+                    ),
+                );
+            }
+            if names.contains(&binding.name.name) {
+                self.error(
+                    binding.name.span,
+                    format!("duplicate binding '{}'", binding.name.name),
+                );
+            }
+            names.push(binding.name.name.clone());
+            if binding.name.name == "lengthOf" {
+                self.error(binding.name.span, "'lengthOf' is a reserved built-in name");
+            }
+            if self
+                .scopes
+                .last()
+                .is_some_and(|scope| scope.contains_key(&binding.name.name))
+            {
+                self.error(
+                    binding.name.span,
+                    format!("'{}' is already declared in this scope", binding.name.name),
+                );
+            }
+            bindings.push((binding.name.name.clone(), ty, binding.mutable));
+        }
+        for (name, ty, mutable) in &bindings {
+            self.scopes.last_mut().unwrap().insert(
+                name.clone(),
+                Binding {
+                    ty: *ty,
+                    mutable: *mutable,
+                },
+            );
+        }
+        let (file, line, column) = self.located(decl.span);
+        Some(CheckedStmt::Destructure {
+            bindings,
+            value,
+            file,
+            line,
+            column,
+        })
+    }
+
+    fn check_iteration(
+        &mut self,
+        bindings: &[BindingHead],
+        iterable: &Expr,
+        stmt: &LoopStmt,
+    ) -> Option<CheckedStmt> {
+        let (source, enumerate, element) = self.expect_loop_source(iterable);
+        let expected = if enumerate { 2 } else { 1 };
+        if bindings.len() != expected {
+            self.error(
+                stmt.span,
+                format!(
+                    "this loop expects {expected} binding{}, found {}",
+                    if expected == 1 { "" } else { "s" },
+                    bindings.len()
+                ),
+            );
+        }
+        if enumerate {
+            if let Some(index) = bindings.first() {
+                let ty = canonical_type(index.ty.kind, index.ty.bounds.as_slice());
+                if ty != CanonicalType::UInt64 {
+                    self.error(
+                        index.ty.span,
+                        format!(
+                            "an enumeration index must have type uint64, found '{}'",
+                            ty.spelling()
+                        ),
+                    );
+                }
+            }
+            if let Some(value) = bindings.get(1) {
+                let ty = canonical_type(value.ty.kind, value.ty.bounds.as_slice());
+                if ty != element {
+                    self.error(
+                        value.ty.span,
+                        format!(
+                            "type mismatch: expected '{}', found '{}'",
+                            element.spelling(),
+                            ty.spelling()
+                        ),
+                    );
+                }
+            }
+        } else if let Some(value) = bindings.first() {
+            let ty = canonical_type(value.ty.kind, value.ty.bounds.as_slice());
+            if ty != element {
+                self.error(
+                    value.ty.span,
+                    format!(
+                        "type mismatch: expected '{}', found '{}'",
+                        element.spelling(),
+                        ty.spelling()
+                    ),
+                );
+            }
+        }
+        let mut seen = Vec::new();
+        let mut checked_bindings = Vec::new();
+        for binding in bindings {
+            if binding.conversion == ConversionMode::Auto {
+                self.error(binding.span, "auto is not allowed in a loop binding");
+            }
+            if seen.contains(&binding.name.name) {
+                self.error(
+                    binding.name.span,
+                    format!("duplicate binding '{}'", binding.name.name),
+                );
+            }
+            seen.push(binding.name.name.clone());
+            let ty = canonical_type(binding.ty.kind, binding.ty.bounds.as_slice());
+            checked_bindings.push((binding.name.name.clone(), ty, binding.mutable));
+        }
+        let lock = if let CheckedExpr::Load { name, .. } = &source {
+            self.binding_at(name).map(|(scope, _)| IterLock {
+                name: name.clone(),
+                scope,
+            })
+        } else {
+            None
+        };
+        if let Some(lock) = lock.clone() {
+            self.iterating.push(lock);
+        }
+        self.scopes.push(HashMap::new());
+        for (name, ty, mutable) in &checked_bindings {
+            if name == "lengthOf" {
+                self.error(stmt.span, "'lengthOf' is a reserved built-in name");
+                continue;
+            }
+            self.scopes.last_mut().unwrap().insert(
+                name.clone(),
+                Binding {
+                    ty: *ty,
+                    mutable: *mutable,
+                },
+            );
+        }
+        self.loop_depth += 1;
+        let body = self.check_block_stmts(&stmt.body);
+        self.loop_depth -= 1;
+        self.scopes.pop();
+        if lock.is_some() {
+            self.iterating.pop();
+        }
+        Some(CheckedStmt::Iterate {
+            bindings: checked_bindings,
+            source,
+            enumerate,
+            body,
+        })
+    }
+
+    fn expect_loop_source(&mut self, expr: &Expr) -> (CheckedExpr, bool, CanonicalType) {
+        let call = match unwrap_parens(expr) {
+            Expr::Call(call) => call,
+            _ => {
+                self.error(expr.span(), "a loop iterable must be iter() or enumerate()");
+                return (
+                    self.check_expr(expr, None, false),
+                    false,
+                    CanonicalType::Int64,
+                );
+            }
+        };
+        let Expr::Member(member) = &*call.callee else {
+            self.error(expr.span(), "a loop iterable must be iter() or enumerate()");
+            return (self.dummy(None), false, CanonicalType::Int64);
+        };
+        let enumerate = match member.member.name.as_str() {
+            "iter" => false,
+            "enumerate" => true,
+            _ => {
+                self.error(
+                    member.member.span,
+                    "a loop iterable must be iter() or enumerate()",
+                );
+                false
+            }
+        };
+        if !call.arguments.is_empty() {
+            self.error(
+                call.span,
+                format!(
+                    "method '{}' expects 0 arguments, found {}",
+                    member.member.name,
+                    call.arguments.len()
+                ),
+            );
+        }
+        let object = self.check_expr(&member.object, None, false);
+        if !object.ty().is_array() {
+            self.error(
+                member.object.span(),
+                format!("'{}' is not an array", object.ty().spelling()),
+            );
+        }
+        let element = object.ty().element().unwrap_or(CanonicalType::Int64);
+        (object, enumerate, element)
+    }
+
+    fn check_index_operand(&mut self, expr: &Expr) -> CheckedExpr {
+        let checked = self.check_expr(expr, None, false);
+        if !checked.ty().is_integer() {
+            self.error(
+                expr.span(),
+                format!(
+                    "an index must be an integer, found '{}'",
+                    checked.ty().spelling()
+                ),
+            );
+        }
+        checked
+    }
+
+    fn reject_binding_write(&mut self, name: &str, span: Span, update: bool) {
+        let Some((scope, binding)) = self.binding_at(name) else {
+            return;
+        };
+        self.reject_iterated_write(name, scope, span);
+        if !binding.mutable {
+            let verb = if update { "modify" } else { "assign to" };
+            self.error(span, format!("cannot {verb} constant '{name}'"));
+        }
+    }
+
+    fn reject_iterated_write(&mut self, name: &str, scope: usize, span: Span) {
+        if self
+            .iterating
+            .iter()
+            .any(|lock| lock.name == name && lock.scope == scope)
+        {
+            self.error(
+                span,
+                format!("cannot modify array '{name}' while it is being iterated"),
+            );
+        }
+    }
+
+    fn binding_at(&self, name: &str) -> Option<(usize, Binding)> {
+        for (scope, bindings) in self.scopes.iter().enumerate().rev() {
+            if let Some(binding) = bindings.get(name) {
+                return Some((scope, *binding));
+            }
+        }
+        None
+    }
+
+    fn located(&self, span: Span) -> (String, u32, u32) {
+        (
+            self.source_name.to_string(),
+            span.start.line,
+            span.start.column,
+        )
     }
 
     fn load(&mut self, ident: &Identifier) -> CheckedExpr {

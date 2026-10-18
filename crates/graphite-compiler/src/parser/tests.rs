@@ -537,19 +537,23 @@ void main() {
 }
 
 #[test]
-fn colon_and_question_remain_lexer_errors() {
-    for source in [
-        "void main() {\n    int a = 1;\n    a:b;\n}\n",
-        "void main() {\n    int a = 1;\n    a?b;\n}\n",
-    ] {
-        let lexed = lex("test.grf", source);
-        assert!(
-            lexed
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.kind == DiagnosticKind::UnexpectedCharacter)
-        );
-    }
+fn colon_is_a_slice_token_and_question_stays_lexical() {
+    let colon = lex("test.grf", "void main() {\n    int a = 1;\n    a:b;\n}\n");
+    assert!(colon.diagnostics.is_empty());
+    let parsed = parse("test.grf", &colon.tokens);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("';'"))
+    );
+    let question = lex("test.grf", "void main() {\n    int a = 1;\n    a?b;\n}\n");
+    assert!(
+        question
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.kind == DiagnosticKind::UnexpectedCharacter)
+    );
 }
 
 #[test]
@@ -576,6 +580,23 @@ import grf.io;
     assert_rejected(
         "int add(int value,) {\n    return value;\n}\n",
         "trailing comma",
+    );
+    assert_rejected(
+        "void main() {\n    int[] values = [1, 2,];\n}\n",
+        "trailing comma",
+    );
+    assert_rejected(
+        "void main() {\n    int[1.5] values = [];\n}\n",
+        "integer literal",
+    );
+    assert_rejected("void main() {\n    int[3 values = [];\n}\n", "expected ']'");
+    assert_rejected(
+        "void main() {\n    int a, int b, = [1, 2];\n}\n",
+        "trailing comma",
+    );
+    assert_rejected(
+        "void main() {\n    int a, auto int b = [1, 2];\n}\n",
+        "auto is not allowed",
     );
     assert_rejected(
         "\

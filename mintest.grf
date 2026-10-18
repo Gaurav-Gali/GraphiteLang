@@ -1,12 +1,7 @@
 import grf.io;
 
 void main(){
-    str num1 = "10";
-    int num2 = 5;
+    int[][] num = [[1,2], [3,4]];
 
-    io.println(div(num1, num2));
-}
-
-flt div(auto flt num1, auto flt num2) {
-    return num1/num2;
+    io.println(num);
 }

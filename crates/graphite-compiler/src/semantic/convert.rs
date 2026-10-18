@@ -46,6 +46,7 @@ pub enum ConvOp {
     CharToF64,
     CharToF32,
     CharToStr,
+    ArrayToStr,
 }
 
 pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
@@ -56,6 +57,7 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
                 Some(ConvOp::ToStr)
             }
             Chr => Some(ConvOp::CharToStr),
+            Array { .. } => Some(ConvOp::ArrayToStr),
             _ => None,
         };
     }

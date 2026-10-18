@@ -156,12 +156,7 @@ impl<'a> Scanner<'a> {
                     );
                 }
             }
-            ':' => self.error(
-                DiagnosticKind::UnexpectedCharacter,
-                start,
-                "unexpected character ':'",
-                Some("':' is not a v0.1 operator".to_string()),
-            ),
+            ':' => self.emit(TokenKind::Colon, start, None),
             '?' => self.error(
                 DiagnosticKind::UnexpectedCharacter,
                 start,

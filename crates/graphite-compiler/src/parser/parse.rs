@@ -322,9 +322,7 @@ impl<'a> Parser<'a> {
             return Some(self.parse_break_or_continue(false));
         }
         if self.starts_declaration() {
-            return self
-                .parse_variable_declaration(true)
-                .map(Stmt::VariableDecl);
+            return self.parse_declaration_statement();
         }
         let expression = self.parse_expression();
         let start = expression.span().start;
@@ -339,7 +337,15 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_variable_declaration(&mut self, require_semicolon: bool) -> Option<VariableDecl> {
+    fn parse_declaration_statement(&mut self) -> Option<Stmt> {
+        let head = self.parse_binding_head()?;
+        if self.check(TokenKind::Comma) {
+            return self.finish_destructure(head).map(Stmt::Destructure);
+        }
+        self.finish_variable(head, true).map(Stmt::VariableDecl)
+    }
+
+    fn parse_binding_head(&mut self) -> Option<BindingHead> {
         let start = self.current().span.start;
         let mutable = !self.check(TokenKind::KwConst);
         if !mutable {
@@ -357,6 +363,22 @@ impl<'a> Parser<'a> {
             self.skip_nested_function();
             return None;
         }
+        let end = name.span.end;
+        Some(BindingHead {
+            name,
+            ty,
+            conversion,
+            mutable,
+            span: Span { start, end },
+        })
+    }
+
+    fn finish_variable(
+        &mut self,
+        head: BindingHead,
+        require_semicolon: bool,
+    ) -> Option<VariableDecl> {
+        let start = head.span.start;
         if !self.consume(TokenKind::Equal, "expected '=' in variable declaration") {
             if require_semicolon {
                 self.synchronize_statement();
@@ -374,11 +396,65 @@ impl<'a> Parser<'a> {
             end = self.previous_end().unwrap_or(end);
         }
         Some(VariableDecl {
-            name,
-            ty,
-            conversion,
+            name: head.name,
+            ty: head.ty,
+            conversion: head.conversion,
             initializer,
-            mutable,
+            mutable: head.mutable,
+            span: Span { start, end },
+        })
+    }
+
+    fn finish_destructure(&mut self, first: BindingHead) -> Option<DestructureDecl> {
+        let start = first.span.start;
+        let mut bindings = vec![first];
+        while self.check(TokenKind::Comma) {
+            self.bump();
+            if self.check(TokenKind::Equal) || self.check(TokenKind::Semicolon) {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    self.current().span,
+                    "a trailing comma is not allowed in a destructuring declaration",
+                );
+                break;
+            }
+            let Some(binding) = self.parse_binding_head() else {
+                break;
+            };
+            if binding.conversion == ConversionMode::Auto {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    binding.span,
+                    "auto is not allowed in a destructuring declaration",
+                );
+            }
+            bindings.push(binding);
+        }
+        if bindings[0].conversion == ConversionMode::Auto {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                bindings[0].span,
+                "auto is not allowed in a destructuring declaration",
+            );
+        }
+        if !self.consume(
+            TokenKind::Equal,
+            "expected '=' in destructuring declaration",
+        ) {
+            self.synchronize_statement();
+            return None;
+        }
+        let initializer = self.parse_expression();
+        let mut end = initializer.span().end;
+        if self.consume(
+            TokenKind::Semicolon,
+            "expected ';' after destructuring declaration",
+        ) {
+            end = self.previous_end().unwrap_or(end);
+        }
+        Some(DestructureDecl {
+            bindings,
+            initializer,
             span: Span { start, end },
         })
     }
@@ -442,9 +518,34 @@ impl<'a> Parser<'a> {
             self.bump();
             self.parse_cstyle_tail(None)
         } else if self.starts_declaration() {
-            let initializer = self.parse_variable_declaration(false);
-            let _ = self.consume(TokenKind::Semicolon, "expected ';' after loop initializer");
-            self.parse_cstyle_tail(initializer)
+            if let Some(head) = self.parse_binding_head() {
+                if self.check(TokenKind::Comma) {
+                    self.parse_iteration(vec![head])
+                } else if self.consume(TokenKind::Equal, "expected '=' in loop binding") {
+                    let initializer = self.parse_expression();
+                    if self.check(TokenKind::Semicolon) {
+                        self.bump();
+                        let declaration = VariableDecl {
+                            name: head.name,
+                            ty: head.ty,
+                            conversion: head.conversion,
+                            initializer,
+                            mutable: head.mutable,
+                            span: head.span,
+                        };
+                        self.parse_cstyle_tail(Some(declaration))
+                    } else {
+                        LoopKind::Iteration {
+                            bindings: vec![head],
+                            iterable: initializer,
+                        }
+                    }
+                } else {
+                    self.parse_cstyle_tail(None)
+                }
+            } else {
+                self.parse_cstyle_tail(None)
+            }
         } else {
             let condition = self.parse_expression();
             if self.check(TokenKind::Semicolon) {
@@ -495,6 +596,47 @@ impl<'a> Parser<'a> {
             condition,
             update,
         }
+    }
+
+    fn parse_iteration(&mut self, mut bindings: Vec<BindingHead>) -> LoopKind {
+        while self.check(TokenKind::Comma) {
+            self.bump();
+            if self.check(TokenKind::Equal) || self.check(TokenKind::RightParen) {
+                self.error(
+                    ParserDiagnosticKind::InvalidStatement,
+                    self.current().span,
+                    "a trailing comma is not allowed in a loop binding",
+                );
+                break;
+            }
+            let Some(binding) = self.parse_binding_head() else {
+                break;
+            };
+            if binding.conversion == ConversionMode::Auto {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    binding.span,
+                    "auto is not allowed in a loop binding",
+                );
+            }
+            bindings.push(binding);
+        }
+        if bindings[0].conversion == ConversionMode::Auto {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                bindings[0].span,
+                "auto is not allowed in a loop binding",
+            );
+        }
+        let iterable = if self.consume(TokenKind::Equal, "expected '=' in loop binding") {
+            self.parse_expression()
+        } else {
+            Expr::Literal(LiteralExpr::Integer {
+                lexeme: "0".to_string(),
+                span: self.current().span,
+            })
+        };
+        LoopKind::Iteration { bindings, iterable }
     }
 
     fn parse_break_or_continue(&mut self, is_break: bool) -> Stmt {
@@ -688,6 +830,8 @@ impl<'a> Parser<'a> {
         loop {
             if self.check(TokenKind::LeftParen) {
                 expression = self.finish_call(expression);
+            } else if self.check(TokenKind::LeftBracket) {
+                expression = self.parse_subscript(expression);
             } else if self.check(TokenKind::Dot) {
                 let _dot = self.bump();
                 if let Some(member) = self.expect_identifier("expected a name after '.'") {
@@ -782,6 +926,119 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_array_literal(&mut self) -> Expr {
+        let start = self.bump().span.start;
+        let mut elements = Vec::new();
+        if !self.check(TokenKind::RightBracket) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::RightBracket) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidExpression,
+                        self.current().span,
+                        "a trailing comma is not allowed in an array literal",
+                    );
+                    break;
+                }
+                elements.push(self.parse_expression());
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightBracket) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ']' after array literal",
+            );
+            self.current().span.end
+        };
+        Expr::Array(ArrayExpr {
+            elements,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_subscript(&mut self, object: Expr) -> Expr {
+        let start = object.span().start;
+        self.bump();
+        let mut parts = Vec::<Option<Expr>>::new();
+        let mut colons = 0u8;
+        if !self.check(TokenKind::RightBracket) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::Colon) || self.check(TokenKind::RightBracket) {
+                    parts.push(None);
+                } else {
+                    parts.push(Some(self.parse_expression()));
+                }
+                if self.check(TokenKind::Colon) {
+                    let colon = self.bump();
+                    colons += 1;
+                    if colons > 2 {
+                        self.error(
+                            ParserDiagnosticKind::InvalidExpression,
+                            colon.span,
+                            "a slice has at most two ':' separators",
+                        );
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightBracket) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ']' after index",
+            );
+            self.current().span.end
+        };
+        let span = Span { start, end };
+        if colons == 0 {
+            if let Some(Some(index)) = parts.pop() {
+                if parts.is_empty() {
+                    return Expr::Index(IndexExpr {
+                        object: Box::new(object),
+                        index: Box::new(index),
+                        span,
+                    });
+                }
+            }
+            self.error(
+                ParserDiagnosticKind::InvalidExpression,
+                span,
+                "expected an index expression",
+            );
+            return Expr::Index(IndexExpr {
+                object: Box::new(object),
+                index: Box::new(Expr::Literal(LiteralExpr::Integer {
+                    lexeme: "0".to_string(),
+                    span,
+                })),
+                span,
+            });
+        }
+        let take = |parts: &mut Vec<Option<Expr>>, index: usize| {
+            parts.get_mut(index).and_then(Option::take).map(Box::new)
+        };
+        let mut parts = parts;
+        Expr::Slice(SliceExpr {
+            object: Box::new(object),
+            start: take(&mut parts, 0),
+            stop: take(&mut parts, 1),
+            step: take(&mut parts, 2),
+            span,
+        })
+    }
+
     fn parse_primary(&mut self) -> Expr {
         match self.current().kind {
             TokenKind::Identifier => {
@@ -821,6 +1078,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::InterpolatedStringStart => self.parse_interpolated_string(),
             kind if self.starts_conversion_at(kind) => self.parse_explicit_conversion(),
+            TokenKind::LeftBracket => self.parse_array_literal(),
             TokenKind::LeftParen => {
                 let open = self.bump();
                 let expression = self.parse_expression();
@@ -978,9 +1236,62 @@ impl<'a> Parser<'a> {
             return None;
         };
         let token = self.bump();
+        let mut bounds = Vec::new();
+        let mut end = token.span.end;
+        while self.check(TokenKind::LeftBracket) {
+            if bounds.len() == MAX_ARRAY_RANK {
+                self.error(
+                    ParserDiagnosticKind::InvalidTypeSyntax,
+                    self.current().span,
+                    "array type is too deeply nested",
+                );
+                break;
+            }
+            self.bump();
+            if self.check(TokenKind::RightBracket) {
+                end = self.bump().span.end;
+                bounds.push(None);
+                continue;
+            }
+            if !self.check(TokenKind::IntegerLiteral) {
+                self.error(
+                    ParserDiagnosticKind::InvalidTypeSyntax,
+                    self.current().span,
+                    "an array size must be an integer literal",
+                );
+                break;
+            }
+            let literal = self.bump();
+            let bound = match literal.lexeme.parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    self.error(
+                        ParserDiagnosticKind::InvalidTypeSyntax,
+                        literal.span,
+                        "array maximum does not fit in uint64",
+                    );
+                    0
+                }
+            };
+            if self.check(TokenKind::RightBracket) {
+                end = self.bump().span.end;
+            } else {
+                self.error(
+                    ParserDiagnosticKind::ExpectedToken,
+                    self.current().span,
+                    "expected ']'",
+                );
+                end = literal.span.end;
+            }
+            bounds.push(Some(bound));
+        }
         Some(TypeSyntax {
             kind,
-            span: token.span,
+            bounds,
+            span: Span {
+                start: token.span.start,
+                end,
+            },
         })
     }
 
@@ -1063,6 +1374,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::KwFalse
                     | TokenKind::InterpolatedStringStart
                     | TokenKind::LeftParen
+                    | TokenKind::LeftBracket
                     | TokenKind::Bang
                     | TokenKind::Minus
                     | TokenKind::Plus
@@ -1075,6 +1387,7 @@ impl<'a> Parser<'a> {
         let token = self.bump();
         let target = TypeSyntax {
             kind: type_kind(token.kind).expect("conversion target was checked"),
+            bounds: Vec::new(),
             span: token.span,
         };
         self.bump();
@@ -1308,6 +1621,7 @@ fn statement_span(statement: &Stmt) -> Span {
     match statement {
         Stmt::Block(block) => block.span,
         Stmt::VariableDecl(declaration) => declaration.span,
+        Stmt::Destructure(declaration) => declaration.span,
         Stmt::Return(return_statement) => return_statement.span,
         Stmt::If(if_statement) => if_statement.span,
         Stmt::Loop(loop_statement) => loop_statement.span,
