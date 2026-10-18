@@ -144,6 +144,7 @@ pub enum Expr {
     Binary(BinaryExpr),
     Assignment(AssignmentExpr),
     Call(CallExpr),
+    Conversion(ConversionExpr),
     Member(MemberExpr),
     Update(UpdateExpr),
     InterpolatedString(InterpolatedStringExpr),
@@ -159,6 +160,7 @@ impl Expr {
             Expr::Binary(binary) => binary.span,
             Expr::Assignment(assignment) => assignment.span,
             Expr::Call(call) => call.span,
+            Expr::Conversion(conversion) => conversion.span,
             Expr::Member(member) => member.span,
             Expr::Update(update) => update.span,
             Expr::InterpolatedString(interpolated) => interpolated.span,
@@ -234,6 +236,13 @@ pub struct AssignmentExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallExpr {
     pub callee: Box<Expr>,
+    pub arguments: Vec<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionExpr {
+    pub target: TypeSyntax,
     pub arguments: Vec<Expr>,
     pub span: Span,
 }

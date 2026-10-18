@@ -201,6 +201,22 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             write_expression(out, &child, false, &assignment.target);
             write_expression(out, &child, true, &assignment.value);
         }
+        Expr::Conversion(conversion) => {
+            write_line(
+                out,
+                prefix,
+                last,
+                &format!("Conversion {}", format_type(&conversion.target)),
+            );
+            let child = child_prefix(prefix, last);
+            for (index, argument) in conversion.arguments.iter().enumerate() {
+                let argument_last = index + 1 == conversion.arguments.len();
+                write_expression(out, &child, argument_last, argument);
+            }
+            if conversion.arguments.is_empty() {
+                write_line(out, &child, true, "Arguments");
+            }
+        }
         Expr::Call(call) => {
             write_line(out, prefix, last, "Call");
             let child = child_prefix(prefix, last);

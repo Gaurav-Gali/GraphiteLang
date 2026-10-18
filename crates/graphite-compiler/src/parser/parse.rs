@@ -321,7 +321,7 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::KwContinue) {
             return Some(self.parse_break_or_continue(false));
         }
-        if self.check(TokenKind::KwConst) || self.check(TokenKind::KwAuto) || self.starts_type() {
+        if self.starts_declaration() {
             return self
                 .parse_variable_declaration(true)
                 .map(Stmt::VariableDecl);
@@ -441,10 +441,7 @@ impl<'a> Parser<'a> {
         } else if self.check(TokenKind::Semicolon) {
             self.bump();
             self.parse_cstyle_tail(None)
-        } else if self.check(TokenKind::KwConst)
-            || self.check(TokenKind::KwAuto)
-            || self.starts_type()
-        {
+        } else if self.starts_declaration() {
             let initializer = self.parse_variable_declaration(false);
             let _ = self.consume(TokenKind::Semicolon, "expected ';' after loop initializer");
             self.parse_cstyle_tail(initializer)
@@ -823,6 +820,7 @@ impl<'a> Parser<'a> {
                 })
             }
             TokenKind::InterpolatedStringStart => self.parse_interpolated_string(),
+            kind if self.starts_conversion_at(kind) => self.parse_explicit_conversion(),
             TokenKind::LeftParen => {
                 let open = self.bump();
                 let expression = self.parse_expression();
@@ -1042,23 +1040,81 @@ impl<'a> Parser<'a> {
         type_kind(self.current().kind).is_some()
     }
 
+    fn starts_declaration(&self) -> bool {
+        if self.check(TokenKind::KwConst) || self.check(TokenKind::KwAuto) {
+            return true;
+        }
+        self.starts_type() && self.peek_kind() != TokenKind::LeftParen
+    }
+
+    fn starts_conversion_at(&self, kind: TokenKind) -> bool {
+        type_kind(kind).is_some() && self.peek_kind() == TokenKind::LeftParen
+    }
+
     fn can_start_expression(&self) -> bool {
-        matches!(
-            self.current().kind,
-            TokenKind::Identifier
-                | TokenKind::IntegerLiteral
-                | TokenKind::FloatLiteral
-                | TokenKind::StringLiteral
-                | TokenKind::KwTrue
-                | TokenKind::KwFalse
-                | TokenKind::InterpolatedStringStart
-                | TokenKind::LeftParen
-                | TokenKind::Bang
-                | TokenKind::Minus
-                | TokenKind::Plus
-                | TokenKind::PlusPlus
-                | TokenKind::MinusMinus
-        )
+        self.starts_conversion_at(self.current().kind)
+            || matches!(
+                self.current().kind,
+                TokenKind::Identifier
+                    | TokenKind::IntegerLiteral
+                    | TokenKind::FloatLiteral
+                    | TokenKind::StringLiteral
+                    | TokenKind::KwTrue
+                    | TokenKind::KwFalse
+                    | TokenKind::InterpolatedStringStart
+                    | TokenKind::LeftParen
+                    | TokenKind::Bang
+                    | TokenKind::Minus
+                    | TokenKind::Plus
+                    | TokenKind::PlusPlus
+                    | TokenKind::MinusMinus
+            )
+    }
+
+    fn parse_explicit_conversion(&mut self) -> Expr {
+        let token = self.bump();
+        let target = TypeSyntax {
+            kind: type_kind(token.kind).expect("conversion target was checked"),
+            span: token.span,
+        };
+        self.bump();
+        let mut arguments = Vec::new();
+        if !self.check(TokenKind::RightParen) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::RightParen) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidExpression,
+                        self.current().span,
+                        "a trailing comma is not allowed in an argument list",
+                    );
+                    break;
+                }
+                arguments.push(self.parse_expression());
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightParen) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ')' after conversion argument",
+            );
+            self.current().span.end
+        };
+        Expr::Conversion(ConversionExpr {
+            target,
+            arguments,
+            span: Span {
+                start: token.span.start,
+                end,
+            },
+        })
     }
 
     fn is_boundary(&self) -> bool {

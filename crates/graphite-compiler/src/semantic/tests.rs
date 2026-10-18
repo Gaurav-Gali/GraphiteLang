@@ -65,11 +65,15 @@ fn integer_and_float_auto_str_are_accepted() {
         accepted.diagnostics
     );
     let rust = generate(accepted.program.as_ref().unwrap());
-    assert!(rust.contains("grf_f64_text"), "{rust}");
-    assert_eq!(rust.matches("grf_f64_text(").count(), 3, "{rust}");
+    assert!(rust.contains("graphite_core::convert::f64_text"), "{rust}");
+    assert_eq!(
+        rust.matches("graphite_core::convert::f64_text(").count(),
+        2,
+        "{rust}"
+    );
 
-    let rejected = messages("void main() {\n    auto int value = \"12\";\n}\n");
-    assert!(rejected.contains("not specified"), "{rejected}");
+    let rejected = messages("void main() {\n    auto chr value = true;\n}\n");
+    assert!(rejected.contains("not supported"), "{rejected}");
 }
 
 #[test]
@@ -204,10 +208,7 @@ void main() {
     assert!(constants.contains("cannot modify constant"), "{constants}");
 
     let characters = messages("void main() {\n    chr letter = letter;\n}\n");
-    assert!(
-        characters.contains("character literals are not defined"),
-        "{characters}"
-    );
+    assert!(characters.contains("unknown name 'letter'"), "{characters}");
 
     let calls = messages(
         "\
@@ -373,6 +374,113 @@ void main() {
     assert!(
         messages("uint64 lengthOf(str value) {\n    return 0;\n}\n\nvoid main() {\n}\n")
             .contains("reserved built-in name")
+    );
+}
+
+#[test]
+fn conversions_share_one_registry() {
+    let accepted = analyze_source(
+        "\
+import grf.io;
+
+void take(auto int value) {
+    io.println(value);
+}
+
+chr letter(str text) {
+    return chr(text);
+}
+
+void main() {
+    int32 width = 10;
+    int16 depth = 8;
+    uint16 seeds = 3;
+    uint32 tickets = 4;
+    auto int parsed = \"123\";
+    auto int32 narrow = \"123\";
+    auto str label = width;
+    auto bln flag = \"true\";
+    str text = str(width);
+    str floatText = str(flt32(1));
+    chr mark = chr(\"A\");
+    int code = int(mark);
+    uint16 small = uint16(seeds);
+    take(\"456\");
+    flt reading = 1.5;
+    flt64 same = reading;
+    flt32 ratio = 1.5;
+    int32 still = width;
+    io.println(parsed);
+    io.println(narrow);
+    io.println(label);
+    io.println(flag);
+    io.println(text);
+    io.println(floatText);
+    io.println(code);
+    io.println(small);
+    io.println(letter(\"é\"));
+    io.println(depth);
+    io.println(tickets);
+    io.println(same);
+    io.println(ratio);
+    io.println(still);
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let rust = generate(accepted.program.as_ref().unwrap());
+    assert!(
+        rust.contains("graphite_core::convert::str_to_signed"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("graphite_core::convert::signed_text"),
+        "{rust}"
+    );
+
+    let literal = messages(
+        "void main() {\n    int32 width = 10;\n    int32 bad = 3000000000;\n    int64 height = width;\n}\n",
+    );
+    assert!(literal.contains("does not fit in 'int32'"), "{literal}");
+    assert!(literal.contains("type mismatch"), "{literal}");
+    assert!(!literal.contains("cannot convert"), "{literal}");
+
+    let unsupported = messages(
+        "\
+void main() {
+    chr mark = chr(\"A\");
+    bln flag = bln(mark);
+    chr other = chr(true);
+}
+",
+    );
+    assert!(
+        unsupported.contains("cannot convert 'chr' to 'bln'"),
+        "{unsupported}"
+    );
+    assert!(
+        unsupported.contains("cannot convert 'bln' to 'chr'"),
+        "{unsupported}"
+    );
+
+    assert!(messages("void main() {\n    int value = int();\n}\n").contains("expects 1 argument"));
+    assert!(
+        messages("void main() {\n    int value = void(1);\n}\n")
+            .contains("not a conversion target")
+    );
+    assert!(
+        analyze_source("void main() {\n    flt value = flt(\".5\");\n}\n")
+            .diagnostics
+            .is_empty()
+    );
+    assert!(
+        analyze_source("void main() {\n    auto int32 value = 40000;\n}\n")
+            .diagnostics
+            .is_empty()
     );
 }
 

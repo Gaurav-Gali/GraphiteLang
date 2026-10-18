@@ -390,6 +390,188 @@ mod tests {
     }
 
     #[test]
+    fn conversions_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-convert-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void take(auto int value) {
+    io.println(value);
+}
+
+void main() {
+    io.println(int("123"));
+    io.println(int(" -42 "));
+    io.println(int(" 123"));
+    io.println(int32("123"));
+    io.println(int32("40000"));
+    io.println(int32("-2147483648"));
+    io.println(int32("2147483647"));
+    io.println(int16("-32768"));
+    io.println(uint16("65535"));
+    io.println(uint32("4294967295"));
+    io.println(flt("12.5"));
+    io.println(flt("1e-2"));
+    io.println(flt("+1.5"));
+    io.println(flt32("1.5"));
+    io.println(bln("TRUE"));
+    io.println(str(chr("é")));
+    io.println(int(chr("A")));
+    io.println(str(flt32(1)));
+    io.println(int64("9"));
+    io.println(uint("8"));
+    io.println(uint64("8"));
+    io.println(flt64("2.5"));
+    io.println(flt64(flt32(1.5)));
+    io.println(flt32(flt(1.5)));
+    take("456");
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "123\n-42\n123\n123\n40000\n-2147483648\n2147483647\n-32768\n65535\n4294967295\n12.5\n0.01\n1.5\n1.5\ntrue\né\n65\n1\n9\n8\n8\n2.5\n1.5\n1.5\n456\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conversion_failures_terminate() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-convert-fail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid take(auto int value) {\n    io.println(value);\n}\n\nvoid main() {\n    take(\"abc\");\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "{}", output.stdout);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to int64: invalid decimal integer"),
+            "{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty(), "{}", output.stdout);
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(int32(\"2147483648\"));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to int32: out of range"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(int16(\"40000\"));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to int16: out of range"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(flt(\"1e309\"));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to flt64: out of range"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(flt32(\"1e-50\"));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to flt32: underflow"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    flt wide = 16777217.0;\n    io.println(flt32(wide));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert flt64 to flt32: not exactly representable"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(flt32(16777217));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert int64 to flt32: not exactly representable"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(flt(\".5\"));\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert str to flt64: invalid decimal number"),
+            "{}",
+            output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn const_copy_and_string_length_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-length-{}", std::process::id()));

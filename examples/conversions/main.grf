@@ -1,0 +1,58 @@
+import grf.io;
+
+// Explicit T(value) and auto T share one conversion registry.
+// A value outside the target range fails at runtime and stops the program.
+
+void take(auto int value) {
+    io.println(value);
+}
+
+void main() {
+    io.println("explicit");
+    io.println(int("123"));
+    io.println(int(" -42 "));
+    io.println(int32("40000"));
+    io.println(int32("-2147483648"));
+    io.println(int16("-32768"));
+    io.println(uint("8"));
+    io.println(uint16("65535"));
+    io.println(uint32("4294967295"));
+    io.println(flt("12.5"));
+    io.println(flt("1e-2"));
+    io.println(flt("+1.5"));
+    io.println(flt("-0.5"));
+    io.println(flt32("1.5"));
+    io.println(bln("TRUE"));
+    io.println(bln("false"));
+
+    io.println("characters");
+    io.println(str(chr("A")));
+    io.println(int(chr("A")));
+    io.println(str(chr("é")));
+
+    io.println("text");
+    int32 width = 10;
+    io.println(str(width));
+    io.println(str(int16(8)));
+    io.println(str(uint16(3)));
+    io.println(str(flt32(1)));
+
+    io.println("auto");
+    auto int parsed = "123";
+    auto int32 narrow = "123";
+    auto str label = width;
+    auto bln flag = "true";
+    io.println(parsed);
+    io.println(narrow);
+    io.println(label);
+    io.println(flag);
+    take("456");
+
+    io.println("numeric");
+    io.println(int32(64));
+    io.println(flt64(flt32(1.5)));
+    io.println(flt32(flt(1.5)));
+    io.println(int(true));
+    io.println(bln(0));
+    io.println(bln(1));
+}

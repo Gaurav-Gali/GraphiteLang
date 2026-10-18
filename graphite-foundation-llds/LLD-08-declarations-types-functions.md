@@ -178,6 +178,8 @@ uint64 unicodeLength = lengthOf("é"); // 1
 
 `lengthOf(str)` returns `uint64` and counts Unicode scalar values. Numeric arguments and `bln` are semantic errors. A variable, parameter, or function named `lengthOf` is a semantic error. Array, map, and record lengths are later stages.
 
+Explicit `T(value)` conversions and `auto T` at both local declarations and parameters share one registry. That registry includes every existing numeric width, `bln`, `str`, and `chr`. The rules are in LLD-09.
+
 ### 3.3 Function declarations
 
 ```grf

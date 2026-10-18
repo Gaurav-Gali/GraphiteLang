@@ -4,13 +4,11 @@
 //! call functions declared later in the same file. Alias normalization happens
 //! here. The parser keeps source spellings.
 //!
-//! `auto str` formatting is defined for `str` (unchanged), signed and unsigned
-//! integers (base-10, with a leading `-` when negative), `bln` (`true` or
-//! `false`), and floating-point values. Floating-point text uses Rust `Display`
-//! through one runtime helper, shared by `auto str` and string interpolation.
-//! `chr` stays mapped to Rust `char`, but a `chr` value cannot be constructed
-//! in this stage. Other `auto` conversions are rejected when their failure
-//! behavior is not specified.
+//! `auto T` and explicit `T(value)` share one conversion registry. Approved
+//! pairs become typed conversion nodes. Identity pairs stay unchanged.
+//! Formatting of numbers, booleans, and characters uses the same helpers as
+//! string interpolation. `chr` values are produced by conversion, not by a
+//! character literal.
 //!
 //! A numeric literal may initialize a narrower numeric type of the same family
 //! when the value fits exactly. Other expressions do not convert across
@@ -31,6 +29,10 @@ use std::collections::HashMap;
 use crate::manifest::{Manifest, ManifestType};
 use crate::parser::*;
 use crate::span::Span;
+
+pub(crate) mod convert;
+
+use convert::{ConvOp, conversion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalType {
@@ -97,13 +99,6 @@ impl CanonicalType {
 
     pub(crate) fn is_float(self) -> bool {
         matches!(self, CanonicalType::Flt32 | CanonicalType::Flt64)
-    }
-
-    fn formats_as_str(self) -> bool {
-        self == CanonicalType::Str
-            || self == CanonicalType::Bln
-            || self.is_integer()
-            || self.is_float()
     }
 
     fn is_numeric(self) -> bool {
@@ -263,10 +258,16 @@ pub enum CheckedExpr {
     LengthOf {
         expr: Box<CheckedExpr>,
     },
-    ConvertStr {
+    Convert {
         from: CanonicalType,
+        to: CanonicalType,
+        op: ConvOp,
         expr: Box<CheckedExpr>,
+        file: String,
+        line: u32,
+        column: u32,
     },
+    Char(char),
     Interpolated {
         parts: Vec<CheckedPart>,
     },
@@ -283,11 +284,11 @@ impl CheckedExpr {
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. } => *ty,
+            CheckedExpr::Convert { to, .. } => *to,
             CheckedExpr::LengthOf { .. } => CanonicalType::UInt64,
             CheckedExpr::Bool(_) => CanonicalType::Bln,
-            CheckedExpr::Str(_)
-            | CheckedExpr::ConvertStr { .. }
-            | CheckedExpr::Interpolated { .. } => CanonicalType::Str,
+            CheckedExpr::Char(_) => CanonicalType::Chr,
+            CheckedExpr::Str(_) | CheckedExpr::Interpolated { .. } => CanonicalType::Str,
         }
     }
 }
@@ -435,7 +436,7 @@ impl<'a> Checker<'a> {
                 if ty == CanonicalType::Void {
                     self.error(parameter.ty.span, "a parameter cannot have type void");
                 }
-                self.reject_unspecified_type(ty, parameter.ty.span);
+                let _ = self.reject_unspecified_type(ty, parameter.ty.span);
                 if names
                     .insert(parameter.name.name.clone(), parameter.span)
                     .is_some()
@@ -531,7 +532,7 @@ impl<'a> Checker<'a> {
             if name == "lengthOf" {
                 continue;
             }
-            if *ty != CanonicalType::Void && *ty != CanonicalType::Chr {
+            if *ty != CanonicalType::Void {
                 self.scopes.last_mut().unwrap().insert(
                     name.clone(),
                     Binding {
@@ -775,6 +776,7 @@ impl<'a> Checker<'a> {
             Expr::Assignment(expr) => self.check_assignment(expr),
             Expr::Update(expr) => self.check_update(expr),
             Expr::Call(expr) => self.check_call(expr, allow_void),
+            Expr::Conversion(expr) => self.check_conversion(expr),
             Expr::Member(expr) => {
                 self.error(
                     expr.span,
@@ -1152,47 +1154,71 @@ impl<'a> Checker<'a> {
         checked
     }
 
+    fn check_conversion(&mut self, expr: &ConversionExpr) -> CheckedExpr {
+        let target = canonical_type(expr.target.kind);
+        if target == CanonicalType::Void {
+            self.error(expr.target.span, "void is not a conversion target");
+            return self.dummy(None);
+        }
+        if expr.arguments.len() != 1 {
+            self.error(
+                expr.span,
+                format!(
+                    "a conversion expects 1 argument, found {}",
+                    expr.arguments.len()
+                ),
+            );
+            for argument in &expr.arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(Some(target));
+        }
+        let argument = &expr.arguments[0];
+        let value = self.check_expr(argument, None, false);
+        self.apply_conversion(value, target, true, expr.span)
+    }
+
     fn apply_conversion(
         &mut self,
         expr: CheckedExpr,
         target: CanonicalType,
-        auto: bool,
+        allow: bool,
         span: Span,
     ) -> CheckedExpr {
         let from = expr.ty();
         if from == target {
             return expr;
         }
-        if auto && target == CanonicalType::Str && from.formats_as_str() {
-            return CheckedExpr::ConvertStr {
-                from,
-                expr: Box::new(expr),
-            };
-        }
-        if from == CanonicalType::Chr || target == CanonicalType::Chr {
-            self.error(
-                span,
-                "chr values cannot be constructed because character literals are not defined",
-            );
-        } else if auto {
+        if allow {
+            if let Some(op) = conversion(from, target) {
+                return CheckedExpr::Convert {
+                    from,
+                    to: target,
+                    op,
+                    expr: Box::new(expr),
+                    file: self.source_name.to_string(),
+                    line: span.start.line,
+                    column: span.start.column,
+                };
+            }
             self.error(
                 span,
                 format!(
-                    "cannot convert '{}' to '{}' because that conversion is not specified",
+                    "cannot convert '{}' to '{}' because that conversion is not supported",
                     from.spelling(),
                     target.spelling()
                 ),
             );
-        } else {
-            self.error(
-                span,
-                format!(
-                    "type mismatch: expected '{}', found '{}'",
-                    target.spelling(),
-                    from.spelling()
-                ),
-            );
+            return expr;
         }
+        self.error(
+            span,
+            format!(
+                "type mismatch: expected '{}', found '{}'",
+                target.spelling(),
+                from.spelling()
+            ),
+        );
         expr
     }
 
@@ -1318,16 +1344,8 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn reject_unspecified_type(&mut self, ty: CanonicalType, span: Span) -> bool {
-        if ty == CanonicalType::Chr {
-            self.error(
-                span,
-                "chr values cannot be constructed because character literals are not defined",
-            );
-            true
-        } else {
-            false
-        }
+    fn reject_unspecified_type(&mut self, _ty: CanonicalType, _span: Span) -> bool {
+        false
     }
 
     fn dummy(&self, expected: Option<CanonicalType>) -> CheckedExpr {
@@ -1338,7 +1356,8 @@ impl<'a> Checker<'a> {
                 lexeme: "0.0".to_string(),
                 ty: expected.unwrap_or(CanonicalType::Flt64),
             },
-            CanonicalType::Void | CanonicalType::Chr => CheckedExpr::Int {
+            CanonicalType::Chr => CheckedExpr::Char('\0'),
+            CanonicalType::Void => CheckedExpr::Int {
                 value: 0,
                 ty: CanonicalType::Int64,
             },

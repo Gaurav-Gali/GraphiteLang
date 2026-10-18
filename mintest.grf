@@ -1,15 +1,12 @@
 import grf.io;
 
 void main(){
-    str a = io.input("wazzuhhhh : ");
-    io.print(f"hello {a}\n");
+    str num1 = "10";
+    int num2 = 5;
 
-    loop(int i = 0 ; i < 3 ; i++){
-        if(i==2){
-            io.println("nigga");
-            break;
-        }
+    io.println(div(num1, num2));
+}
 
-        io.println(i);
-    }
+flt div(auto flt num1, auto flt num2) {
+    return num1/num2;
 }
