@@ -92,6 +92,7 @@ pub struct VariableDecl {
     pub ty: TypeSyntax,
     pub conversion: ConversionMode,
     pub initializer: Expr,
+    pub mutable: bool,
     pub span: Span,
 }
 

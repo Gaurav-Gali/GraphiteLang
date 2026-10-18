@@ -108,7 +108,13 @@ impl<'a> Parser<'a> {
         while !self.is_at_end() {
             let before = self.index;
             if self.check(TokenKind::KwConst) {
-                self.reject_const();
+                let token = self.bump();
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    token.span,
+                    "a constant must be declared inside a function",
+                );
+                self.synchronize_statement();
             } else if self.check(TokenKind::KwImport) {
                 self.error(
                     ParserDiagnosticKind::InvalidImport,
@@ -300,10 +306,6 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::LeftBrace) {
             return Some(Stmt::Block(self.parse_block()));
         }
-        if self.check(TokenKind::KwConst) {
-            self.reject_const();
-            return None;
-        }
         if self.check(TokenKind::KwReturn) {
             return Some(self.parse_return());
         }
@@ -319,7 +321,7 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::KwContinue) {
             return Some(self.parse_break_or_continue(false));
         }
-        if self.check(TokenKind::KwAuto) || self.starts_type() {
+        if self.check(TokenKind::KwConst) || self.check(TokenKind::KwAuto) || self.starts_type() {
             return self
                 .parse_variable_declaration(true)
                 .map(Stmt::VariableDecl);
@@ -339,6 +341,10 @@ impl<'a> Parser<'a> {
 
     fn parse_variable_declaration(&mut self, require_semicolon: bool) -> Option<VariableDecl> {
         let start = self.current().span.start;
+        let mutable = !self.check(TokenKind::KwConst);
+        if !mutable {
+            self.bump();
+        }
         let conversion = self.parse_conversion();
         let ty = self.parse_type()?;
         let name = self.expect_identifier("expected a variable name")?;
@@ -372,6 +378,7 @@ impl<'a> Parser<'a> {
             ty,
             conversion,
             initializer,
+            mutable,
             span: Span { start, end },
         })
     }
@@ -434,7 +441,10 @@ impl<'a> Parser<'a> {
         } else if self.check(TokenKind::Semicolon) {
             self.bump();
             self.parse_cstyle_tail(None)
-        } else if self.check(TokenKind::KwAuto) || self.starts_type() {
+        } else if self.check(TokenKind::KwConst)
+            || self.check(TokenKind::KwAuto)
+            || self.starts_type()
+        {
             let initializer = self.parse_variable_declaration(false);
             let _ = self.consume(TokenKind::Semicolon, "expected ';' after loop initializer");
             self.parse_cstyle_tail(initializer)
@@ -990,16 +1000,6 @@ impl<'a> Parser<'a> {
             message,
         );
         None
-    }
-
-    fn reject_const(&mut self) {
-        let token = self.bump();
-        self.error(
-            ParserDiagnosticKind::InvalidDeclaration,
-            token.span,
-            "const declarations are not supported in v0.1",
-        );
-        self.synchronize_statement();
     }
 
     fn reject_compound_or_arrow(&mut self) -> bool {

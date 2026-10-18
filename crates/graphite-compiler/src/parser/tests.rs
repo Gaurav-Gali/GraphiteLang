@@ -396,15 +396,28 @@ fn current_programs_parse() {
 }
 
 #[test]
-fn rejects_const() {
-    assert_rejected(
+fn local_const_parses_and_top_level_const_is_rejected() {
+    let lexed = lex(
+        "test.grf",
         "\
 void main() {
     const int value = 1;
+    const auto str label = 42;
+    loop (const int step = 0; step < 1; step++) {
+    }
 }
 ",
-        "const",
     );
+    let parsed = parse("test.grf", &lexed.tokens);
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Stmt::VariableDecl(declaration) = &parsed.program.as_ref().unwrap().functions[0]
+        .body
+        .statements[0]
+    else {
+        panic!("expected a constant declaration");
+    };
+    assert!(!declaration.mutable);
+
     let lexed = lex(
         "test.grf",
         "\
@@ -419,7 +432,7 @@ void main() {
         parsed
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("const"))
+            .any(|diagnostic| diagnostic.message.contains("inside a function"))
     );
     assert!(
         parsed

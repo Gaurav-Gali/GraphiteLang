@@ -63,7 +63,12 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 prefix,
                 last,
                 &format!(
-                    "Variable {} {}",
+                    "{} {} {}",
+                    if declaration.mutable {
+                        "Variable"
+                    } else {
+                        "Constant"
+                    },
                     format_typed_name(
                         declaration.conversion,
                         &declaration.ty,

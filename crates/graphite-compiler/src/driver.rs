@@ -390,6 +390,95 @@ mod tests {
     }
 
     #[test]
+    fn const_copy_and_string_length_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-length-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void change(int value) {
+    value = 4;
+}
+
+void rename(str value) {
+    value = "other";
+}
+
+void main() {
+    const int limit = 3;
+    const str name = "Graphite";
+    int copy = limit;
+    str text = name;
+    change(limit);
+    rename(name);
+    io.println(limit);
+    io.println(copy);
+    io.println(name);
+    io.println(text);
+    io.println(lengthOf(name));
+    io.println(lengthOf("é"));
+    io.println(lengthOf("𐍈"));
+    io.println(lengthOf(""));
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "3\n3\nGraphite\nGraphite\n8\n1\n1\n0\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stage4_values_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-stage4-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+int add(int left, int right) {
+    return left + right;
+}
+
+void main() {
+    int add = 1;
+    io.println(add);
+    io.println(add(2, 3));
+    auto str value = 12.433;
+    io.println(value);
+    flt reading = 12.433;
+    io.println(f"Reading: {reading}");
+    flt32 ratio = 1.5;
+    io.println(ratio);
+    flt infinite = 1.0 / 0.0;
+    flt missing = 0.0 / 0.0;
+    io.println(infinite);
+    io.println(missing);
+    io.println(missing < missing);
+    io.println(missing == missing);
+    io.println(missing != missing);
+    const int MAX_RETRIES = 3;
+    io.println(MAX_RETRIES);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "1\n5\n12.433\nReading: 12.433\n1.5\ninf\nNaN\nfalse\nfalse\ntrue\n3\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn input_failure_does_not_invent_a_string() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-input-{}", std::process::id()));

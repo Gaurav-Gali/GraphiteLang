@@ -4,7 +4,10 @@
 //! text. Library calls use the Rust path stored on each call, which semantic
 //! analysis copied from `grf.json`. Integer arithmetic is checked and aborts
 //! on overflow instead of wrapping. That abort is a guard until the overflow
-//! policy is frozen.
+//! policy is frozen. Floating-point arithmetic uses Rust's operators.
+//! `grf_f64_text` and `grf_f32_text` format values with Rust `Display`
+//! (`to_string`). `auto str` and string interpolation both call those helpers.
+//! `grf_str_length` counts Unicode scalar values for the `lengthOf` built-in.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +28,27 @@ pub fn generate(program: &CheckedProgram) -> String {
         tmps: 0,
         loop_ids: 0,
     };
+    let mut others = Vec::new();
+    let mut entry = Vec::new();
     for function in &program.functions {
+        if function.name == "main" {
+            entry.push(function);
+        } else {
+            others.push(function);
+        }
+    }
+    if !others.is_empty() {
+        emitter.line("mod grf_fns {");
+        emitter.indent += 1;
+        emitter.line("use super::*;");
+        for function in others {
+            emitter.emit_function(function);
+        }
+        emitter.indent -= 1;
+        emitter.line("}");
+        emitter.out.push('\n');
+    }
+    for function in entry {
         emitter.emit_function(function);
     }
     emitter.out
@@ -42,6 +65,11 @@ struct Emitter {
 impl Emitter {
     fn emit_function(&mut self, function: &CheckedFn) {
         let name = rust_ident(&function.name);
+        let visibility = if function.name == "main" {
+            ""
+        } else {
+            "pub(crate) "
+        };
         let params = function
             .params
             .iter()
@@ -49,10 +77,10 @@ impl Emitter {
             .collect::<Vec<_>>()
             .join(", ");
         if function.ret == CanonicalType::Void {
-            self.line(&format!("fn {name}({params}) {{"));
+            self.line(&format!("{visibility}fn {name}({params}) {{"));
         } else {
             self.line(&format!(
-                "fn {name}({params}) -> {} {{",
+                "{visibility}fn {name}({params}) -> {} {{",
                 function.ret.rust_name()
             ));
         }
@@ -67,10 +95,16 @@ impl Emitter {
 
     fn emit_stmt(&mut self, stmt: &CheckedStmt) {
         match stmt {
-            CheckedStmt::Let { name, ty, value } => {
+            CheckedStmt::Let {
+                name,
+                ty,
+                value,
+                mutable,
+            } => {
                 let value = self.emit_expr(value);
+                let binding = if *mutable { "let mut" } else { "let" };
                 self.line(&format!(
-                    "let mut {}: {} = {value};",
+                    "{binding} {}: {} = {value};",
                     rust_ident(name),
                     ty.rust_name()
                 ));
@@ -190,7 +224,8 @@ impl Emitter {
 
     fn emit_expr(&mut self, expr: &CheckedExpr) -> String {
         match expr {
-            CheckedExpr::Int { value, ty } => format!("{value}{}", int_suffix(*ty)),
+            CheckedExpr::Int { value, ty } => emit_int(*value, *ty),
+            CheckedExpr::Float { lexeme, ty } => emit_float(lexeme, *ty),
             CheckedExpr::Bool(value) => value.to_string(),
             CheckedExpr::Str(value) => format!("String::from({})", rust_string(value)),
             CheckedExpr::Load { name, ty } => {
@@ -201,18 +236,37 @@ impl Emitter {
                     name
                 }
             }
-            CheckedExpr::Unary { op, expr, .. } => {
+            CheckedExpr::Unary { op, expr, ty } => {
                 let inner = self.emit_expr(expr);
                 match op {
                     UnaryOperator::Not => format!("(!{inner})"),
+                    UnaryOperator::Negate if ty.is_float() => format!("(-({inner}))"),
                     UnaryOperator::Negate => format!("grf_neg!({inner})"),
                 }
             }
             CheckedExpr::Binary {
                 op, left, right, ..
             } => {
+                let float_operand = left.ty().is_float();
                 let left = self.emit_expr(left);
                 let right = self.emit_expr(right);
+                if float_operand {
+                    return match op {
+                        BinaryOperator::Add => format!("({left} + {right})"),
+                        BinaryOperator::Subtract => format!("({left} - {right})"),
+                        BinaryOperator::Multiply => format!("({left} * {right})"),
+                        BinaryOperator::Divide => format!("({left} / {right})"),
+                        BinaryOperator::Less => format!("({left} < {right})"),
+                        BinaryOperator::LessEqual => format!("({left} <= {right})"),
+                        BinaryOperator::Greater => format!("({left} > {right})"),
+                        BinaryOperator::GreaterEqual => format!("({left} >= {right})"),
+                        BinaryOperator::Equal => format!("({left} == {right})"),
+                        BinaryOperator::NotEqual => format!("({left} != {right})"),
+                        BinaryOperator::Remainder | BinaryOperator::And | BinaryOperator::Or => {
+                            "false".to_string()
+                        }
+                    };
+                }
                 match op {
                     BinaryOperator::Add => format!("grf_add!({left}, {right})"),
                     BinaryOperator::Subtract => format!("grf_sub!({left}, {right})"),
@@ -252,11 +306,17 @@ impl Emitter {
                     format!("{{ let {tmp} = {name}; {name} = {op}!({name}, 1); {tmp} }}")
                 }
             }
+            CheckedExpr::LengthOf { expr } => {
+                let inner = self.emit_expr(expr);
+                format!("grf_str_length(&({inner}))")
+            }
             CheckedExpr::Call { path, args, .. } => {
                 let path = if path.contains("::") {
                     path.clone()
+                } else if path == "main" {
+                    "crate::main".to_string()
                 } else {
-                    rust_ident(path)
+                    format!("crate::grf_fns::{}", rust_ident(path))
                 };
                 let args = args
                     .iter()
@@ -275,6 +335,8 @@ impl Emitter {
                         format!("grf_unsigned_text(u128::from({inner}))")
                     }
                     CanonicalType::Bln => format!("grf_bln_text({inner})"),
+                    CanonicalType::Flt32 => format!("grf_f32_text({inner})"),
+                    CanonicalType::Flt64 => format!("grf_f64_text({inner})"),
                     CanonicalType::Str => inner,
                     _ => "String::new()".to_string(),
                 }
@@ -340,6 +402,27 @@ pub fn rust_ident(name: &str) -> String {
         format!("r#{name}")
     } else {
         name.to_string()
+    }
+}
+
+fn emit_int(value: i128, ty: CanonicalType) -> String {
+    if value < 0 {
+        format!("({value}i128 as {})", ty.rust_name())
+    } else {
+        format!("{value}{}", int_suffix(ty))
+    }
+}
+
+fn emit_float(lexeme: &str, ty: CanonicalType) -> String {
+    let suffix = if ty == CanonicalType::Flt32 {
+        "f32"
+    } else {
+        "f64"
+    };
+    if let Some(rest) = lexeme.strip_prefix('-') {
+        format!("(-{rest}{suffix})")
+    } else {
+        format!("{lexeme}{suffix}")
     }
 }
 
@@ -432,17 +515,17 @@ macro_rules! grf_neg {
     };
 }
 
-fn grf_overflow() -> ! {
+pub(crate) fn grf_overflow() -> ! {
     eprintln!("graphite: integer overflow");
     std::process::exit(1);
 }
 
-fn grf_div_zero() -> ! {
+pub(crate) fn grf_div_zero() -> ! {
     eprintln!("graphite: division by zero");
     std::process::exit(1);
 }
 
-fn grf_signed_text(value: i128) -> String {
+pub(crate) fn grf_signed_text(value: i128) -> String {
     let negative = value < 0;
     let mut digits = value.unsigned_abs();
     if digits == 0 {
@@ -460,7 +543,7 @@ fn grf_signed_text(value: i128) -> String {
     String::from_utf8(text).unwrap()
 }
 
-fn grf_unsigned_text(value: u128) -> String {
+pub(crate) fn grf_unsigned_text(value: u128) -> String {
     if value == 0 {
         return "0".to_string();
     }
@@ -474,12 +557,24 @@ fn grf_unsigned_text(value: u128) -> String {
     String::from_utf8(text).unwrap()
 }
 
-fn grf_bln_text(value: bool) -> String {
+pub(crate) fn grf_bln_text(value: bool) -> String {
     if value {
         "true".to_string()
     } else {
         "false".to_string()
     }
+}
+
+pub(crate) fn grf_f64_text(value: f64) -> String {
+    value.to_string()
+}
+
+pub(crate) fn grf_f32_text(value: f32) -> String {
+    value.to_string()
+}
+
+pub(crate) fn grf_str_length(value: &str) -> u64 {
+    value.chars().count() as u64
 }
 
 "#;

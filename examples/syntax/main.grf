@@ -1,0 +1,196 @@
+import grf.io;
+
+// Imports come first. Comments are ignored.
+/* Block comments are ignored too. */
+
+void main() {
+    io.println("functions");
+    int add = 1;
+    io.println(add);
+    io.println(add(2, 3));
+    io.println(greet(123));
+    io.println(greet("Ada"));
+    note(true);
+
+    io.println("types");
+    int age = 21;
+    int64 same = age;
+    same = same + 1;
+    age = same;
+    io.println(age);
+
+    int32 width = 10;
+    int32 height = 4;
+    io.println(width * height);
+
+    int16 depth = 8;
+    depth++;
+    io.println(depth);
+
+    uint items = 2;
+    uint64 more = items + 1;
+    io.println(more);
+
+    uint32 tickets = 4;
+    io.println(tickets - 1);
+
+    uint16 seeds = 3;
+    seeds--;
+    io.println(seeds);
+
+    flt reading = 12.433;
+    flt64 sameReading = reading;
+    io.println(sameReading);
+    flt32 ratio = 1.5;
+    io.println(ratio);
+
+    bln ready = true;
+    bln paused = !ready;
+    io.println(ready);
+    io.println(paused);
+
+    str city = "Pune";
+    io.println(city);
+
+    io.println("const");
+    const int MAX_RETRIES = 3;
+    const auto str label = 42;
+    io.println(MAX_RETRIES);
+    io.println(label);
+    {
+        const str APP_NAME = "Graphite";
+        io.println(APP_NAME);
+    }
+
+    io.println("assignment");
+    int first = 1;
+    int second = 2;
+    first = second = 5;
+    io.println(first);
+    io.println(second);
+
+    int outer = 1;
+    {
+        int outer = outer + 1;
+        io.println(outer);
+    }
+    io.println(outer);
+
+    io.println("auto str");
+    auto str fromInt = 123;
+    auto str fromNeg = -7;
+    auto str fromBool = false;
+    auto str fromStr = city;
+    auto str fromFlt = 12.433;
+    io.println(fromInt);
+    io.println(fromNeg);
+    io.println(fromBool);
+    io.println(fromStr);
+    io.println(fromFlt);
+    io.println(f"Reading: {reading}");
+
+    io.println("arithmetic");
+    int sum = 8 + 2;
+    int difference = 8 - 2;
+    int product = 8 * 2;
+    int quotient = 7 / 2;
+    int remainder = 7 % 2;
+    int negative = -4;
+    int grouped = (2 + 3) * 4;
+    int bare = 2 + 3 * 4;
+    io.println(sum);
+    io.println(difference);
+    io.println(product);
+    io.println(quotient);
+    io.println(remainder);
+    io.println(negative);
+    io.println(grouped);
+    io.println(bare);
+
+    flt left = 1.5;
+    flt right = 2.5;
+    io.println(left + right);
+    io.println(right - left);
+    io.println(left * right);
+    io.println(right / left);
+    io.println(left < right);
+    io.println(left == right);
+    io.println(left != right);
+
+    io.println("update");
+    int index = 5;
+    int previous = index++;
+    int bumped = ++index;
+    int dropped = index--;
+    int lowered = --index;
+    io.println(previous);
+    io.println(bumped);
+    io.println(dropped);
+    io.println(lowered);
+    io.println(index);
+
+    io.println("comparison");
+    str hi = "Hi";
+    str also = "Hi";
+    io.println(hi == also);
+    io.println(hi != "Ho");
+    if (age >= 18) {
+        io.println("adult");
+    }
+
+    io.println("if");
+    int score = 85;
+    if (score >= 90) {
+        io.println("A");
+    } else if (score >= 80) {
+        io.println("B");
+    } else {
+        io.println("C");
+    }
+
+    io.println("loops");
+    int cursor = 0;
+    loop (cursor < 3) {
+        io.println(cursor);
+        cursor++;
+    }
+
+    int32 limit = 3;
+    loop (int32 step = 0; step < limit; step++) {
+        if (step == 1) {
+            continue;
+        }
+        io.println(step);
+    }
+
+    loop (const int once = 0; once < 1;) {
+        io.println(once);
+        break;
+    }
+
+    int hops = 0;
+    loop () {
+        hops++;
+        if (hops == 3) {
+            break;
+        }
+    }
+    io.println(hops);
+
+    io.println("console");
+    io.print("print ");
+    io.println("then println");
+}
+
+int add(int left, int right) {
+    return left + right;
+}
+
+str greet(auto str msg) {
+    return f"Hello {msg}";
+}
+
+void note(auto str msg) {
+    io.println(msg);
+    return;
+}

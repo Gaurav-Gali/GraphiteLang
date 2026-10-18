@@ -4,16 +4,27 @@
 //! call functions declared later in the same file. Alias normalization happens
 //! here. The parser keeps source spellings.
 //!
-//! `auto str` formatting in this milestone is defined for `str` (unchanged),
-//! signed and unsigned integers (base-10, with a leading `-` when negative),
-//! and `bln` (`true` or `false`). Floating-point and `chr` spellings are not
-//! frozen, so those conversions are rejected. Other `auto` conversions are
-//! rejected when their failure behavior is not specified.
+//! `auto str` formatting is defined for `str` (unchanged), signed and unsigned
+//! integers (base-10, with a leading `-` when negative), `bln` (`true` or
+//! `false`), and floating-point values. Floating-point text uses Rust `Display`
+//! through one runtime helper, shared by `auto str` and string interpolation.
+//! `chr` stays mapped to Rust `char`, but a `chr` value cannot be constructed
+//! in this stage. Other `auto` conversions are rejected when their failure
+//! behavior is not specified.
+//!
+//! A numeric literal may initialize a narrower numeric type of the same family
+//! when the value fits exactly. Other expressions do not convert across
+//! canonical numeric types.
 //!
 //! `&&` and `||` are parsed, then rejected here because short-circuit behavior
 //! is not frozen. Integer overflow is not wrapped: code generation uses checked
 //! arithmetic and aborts if an operation overflows. That abort is a guard, not
-//! the frozen overflow policy.
+//! the frozen overflow policy. Floating-point arithmetic uses Rust's IEEE-754
+//! operators.
+//!
+//! `lengthOf` is a reserved built-in. A call takes one `str` and yields
+//! `uint64`, counting Unicode scalar values. A variable, parameter, or function
+//! named `lengthOf` is rejected.
 
 use std::collections::HashMap;
 
@@ -72,7 +83,7 @@ impl CanonicalType {
         }
     }
 
-    fn is_integer(self) -> bool {
+    pub(crate) fn is_integer(self) -> bool {
         matches!(
             self,
             CanonicalType::Int16
@@ -84,12 +95,19 @@ impl CanonicalType {
         )
     }
 
-    fn is_float(self) -> bool {
+    pub(crate) fn is_float(self) -> bool {
         matches!(self, CanonicalType::Flt32 | CanonicalType::Flt64)
     }
 
     fn formats_as_str(self) -> bool {
-        self == CanonicalType::Str || self == CanonicalType::Bln || self.is_integer()
+        self == CanonicalType::Str
+            || self == CanonicalType::Bln
+            || self.is_integer()
+            || self.is_float()
+    }
+
+    fn is_numeric(self) -> bool {
+        self.is_integer() || self.is_float()
     }
 }
 
@@ -170,6 +188,7 @@ pub enum CheckedStmt {
         name: String,
         ty: CanonicalType,
         value: CheckedExpr,
+        mutable: bool,
     },
     Return(Option<CheckedExpr>),
     Expr(CheckedExpr),
@@ -202,6 +221,10 @@ pub enum CheckedStmt {
 pub enum CheckedExpr {
     Int {
         value: i128,
+        ty: CanonicalType,
+    },
+    Float {
+        lexeme: String,
         ty: CanonicalType,
     },
     Bool(bool),
@@ -237,6 +260,9 @@ pub enum CheckedExpr {
         args: Vec<CheckedExpr>,
         ty: CanonicalType,
     },
+    LengthOf {
+        expr: Box<CheckedExpr>,
+    },
     ConvertStr {
         from: CanonicalType,
         expr: Box<CheckedExpr>,
@@ -250,12 +276,14 @@ impl CheckedExpr {
     pub fn ty(&self) -> CanonicalType {
         match self {
             CheckedExpr::Int { ty, .. }
+            | CheckedExpr::Float { ty, .. }
             | CheckedExpr::Load { ty, .. }
             | CheckedExpr::Unary { ty, .. }
             | CheckedExpr::Binary { ty, .. }
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. } => *ty,
+            CheckedExpr::LengthOf { .. } => CanonicalType::UInt64,
             CheckedExpr::Bool(_) => CanonicalType::Bln,
             CheckedExpr::Str(_)
             | CheckedExpr::ConvertStr { .. }
@@ -288,8 +316,10 @@ struct ImportBinding {
     library: String,
 }
 
+#[derive(Clone, Copy)]
 struct Binding {
     ty: CanonicalType,
+    mutable: bool,
 }
 
 pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Analysis {
@@ -415,6 +445,12 @@ impl<'a> Checker<'a> {
                         format!("duplicate parameter '{}'", parameter.name.name),
                     );
                 }
+                if parameter.name.name == "lengthOf" {
+                    self.error(
+                        parameter.name.span,
+                        "'lengthOf' is a reserved built-in name",
+                    );
+                }
                 params.push(ParamInfo {
                     name: parameter.name.name.clone(),
                     ty,
@@ -422,6 +458,10 @@ impl<'a> Checker<'a> {
                 });
             }
             self.reject_unspecified_type(ret, function.return_type.span);
+            if function.name.name == "lengthOf" {
+                self.error(function.name.span, "'lengthOf' is a reserved built-in name");
+                continue;
+            }
             if let Some(previous) = self.functions.get(&function.name.name) {
                 if function.name.name == "main" {
                     self.error(
@@ -488,11 +528,17 @@ impl<'a> Checker<'a> {
         self.current_return = ret;
         self.scopes.push(HashMap::new());
         for (name, ty) in &params {
-            if *ty != CanonicalType::Void && !ty.is_float() && *ty != CanonicalType::Chr {
-                self.scopes
-                    .last_mut()
-                    .unwrap()
-                    .insert(name.clone(), Binding { ty: *ty });
+            if name == "lengthOf" {
+                continue;
+            }
+            if *ty != CanonicalType::Void && *ty != CanonicalType::Chr {
+                self.scopes.last_mut().unwrap().insert(
+                    name.clone(),
+                    Binding {
+                        ty: *ty,
+                        mutable: true,
+                    },
+                );
             }
         }
         let mut body = Vec::new();
@@ -675,6 +721,10 @@ impl<'a> Checker<'a> {
             decl.conversion == ConversionMode::Auto,
             initializer.span(),
         );
+        if decl.name.name == "lengthOf" {
+            self.error(decl.name.span, "'lengthOf' is a reserved built-in name");
+            return None;
+        }
         if self
             .scopes
             .last()
@@ -686,14 +736,18 @@ impl<'a> Checker<'a> {
             );
             return None;
         }
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(decl.name.name.clone(), Binding { ty });
+        self.scopes.last_mut().unwrap().insert(
+            decl.name.name.clone(),
+            Binding {
+                ty,
+                mutable: decl.mutable,
+            },
+        );
         Some(CheckedStmt::Let {
             name: decl.name.name.clone(),
             ty,
             value,
+            mutable: decl.mutable,
         })
     }
 
@@ -710,12 +764,8 @@ impl<'a> Checker<'a> {
             Expr::Literal(LiteralExpr::Integer { lexeme, span }) => {
                 self.integer_literal(lexeme, expected, *span)
             }
-            Expr::Literal(LiteralExpr::Float { span, .. }) => {
-                self.error(
-                    *span,
-                    "floating-point values are not supported in this milestone because their exact spelling is not specified",
-                );
-                self.dummy(expected)
+            Expr::Literal(LiteralExpr::Float { lexeme, span }) => {
+                self.float_literal(lexeme, expected, *span)
             }
             Expr::Literal(LiteralExpr::Boolean { value, .. }) => CheckedExpr::Bool(*value),
             Expr::Literal(LiteralExpr::String { value, .. }) => CheckedExpr::Str(value.clone()),
@@ -757,9 +807,14 @@ impl<'a> Checker<'a> {
     }
 
     fn check_unary(&mut self, expr: &UnaryExpr, expected: Option<CanonicalType>) -> CheckedExpr {
+        if expr.operator == UnaryOperator::Negate {
+            if let Some(folded) = self.negated_literal(&expr.operand, expected, expr.span) {
+                return folded;
+            }
+        }
         let operand_expected = match expr.operator {
             UnaryOperator::Not => Some(CanonicalType::Bln),
-            UnaryOperator::Negate => expected.filter(|ty| ty.is_integer()),
+            UnaryOperator::Negate => expected.filter(|ty| ty.is_numeric()),
         };
         let operand = self.check_expr(&expr.operand, operand_expected, false);
         match expr.operator {
@@ -774,8 +829,8 @@ impl<'a> Checker<'a> {
                 }
             }
             UnaryOperator::Negate => {
-                if !operand.ty().is_integer() {
-                    self.error(expr.span, "unary '-' requires an integer operand");
+                if !operand.ty().is_numeric() {
+                    self.error(expr.span, "unary '-' requires a numeric operand");
                 }
                 CheckedExpr::Unary {
                     op: UnaryOperator::Negate,
@@ -813,9 +868,9 @@ impl<'a> Checker<'a> {
         let operand_expected = if comparison {
             None
         } else {
-            expected.filter(|ty| ty.is_integer())
+            expected.filter(|ty| ty.is_numeric())
         };
-        let (left, right) = if is_int_literal(&expr.left) && !is_int_literal(&expr.right) {
+        let (left, right) = if is_numeric_literal(&expr.left) && !is_numeric_literal(&expr.right) {
             let right = self.check_expr(&expr.right, operand_expected, false);
             let left = self.check_expr(&expr.left, Some(right.ty()), false);
             (left, right)
@@ -826,7 +881,7 @@ impl<'a> Checker<'a> {
         };
         let same = left.ty() == right.ty();
         let comparable = same
-            && (left.ty().is_integer()
+            && (left.ty().is_numeric()
                 || left.ty() == CanonicalType::Bln
                 || left.ty() == CanonicalType::Str);
         if comparison {
@@ -839,11 +894,18 @@ impl<'a> Checker<'a> {
                     ),
                 );
             }
-        } else if !same || !left.ty().is_integer() {
+        } else if expr.operator == BinaryOperator::Remainder {
+            if !same || !left.ty().is_integer() {
+                self.error(
+                    expr.span,
+                    "operator '%' requires two operands of the same integer type",
+                );
+            }
+        } else if !same || !left.ty().is_numeric() {
             self.error(
                 expr.span,
                 format!(
-                    "operator '{}' requires two operands of the same integer type",
+                    "operator '{}' requires two operands of the same numeric type",
                     operator_token(expr.operator)
                 ),
             );
@@ -869,10 +931,17 @@ impl<'a> Checker<'a> {
             );
             return self.dummy(None);
         };
-        let Some(ty) = self.lookup(&ident.name) else {
+        let Some(binding) = self.lookup(&ident.name) else {
             self.error(ident.span, format!("unknown name '{}'", ident.name));
             return self.dummy(None);
         };
+        if !binding.mutable {
+            self.error(
+                ident.span,
+                format!("cannot assign to constant '{}'", ident.name),
+            );
+        }
+        let ty = binding.ty;
         let value = self.check_expr(&expr.value, Some(ty), false);
         let value = self.apply_conversion(value, ty, false, expr.value.span());
         CheckedExpr::Assign {
@@ -890,11 +959,16 @@ impl<'a> Checker<'a> {
             );
             return self.dummy(None);
         };
-        let Some(ty) = self.lookup(&ident.name) else {
+        let Some(binding) = self.lookup(&ident.name) else {
             self.error(ident.span, format!("unknown name '{}'", ident.name));
             return self.dummy(None);
         };
-        if !ty.is_integer() {
+        if !binding.mutable {
+            self.error(
+                ident.span,
+                format!("cannot modify constant '{}'", ident.name),
+            );
+        } else if !binding.ty.is_integer() {
             self.error(
                 expr.span,
                 "increment and decrement require a mutable integer variable",
@@ -904,7 +978,7 @@ impl<'a> Checker<'a> {
             prefix: expr.position == UpdatePosition::Prefix,
             increment: expr.operator == UpdateOperator::Increment,
             name: ident.name.clone(),
-            ty,
+            ty: binding.ty,
         }
     }
 
@@ -913,6 +987,9 @@ impl<'a> Checker<'a> {
             return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
         }
         if let Expr::Identifier(ident) = &*expr.callee {
+            if ident.name == "lengthOf" {
+                return self.check_length_of(&expr.arguments, expr.span);
+            }
             return self.check_user_call(ident, &expr.arguments, expr.span);
         }
         self.error(expr.span, "unsupported call target");
@@ -980,6 +1057,40 @@ impl<'a> Checker<'a> {
             path,
             args,
             ty: ret,
+        }
+    }
+
+    fn check_length_of(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+        if arguments.len() != 1 {
+            self.error(
+                span,
+                format!("lengthOf expects 1 argument, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return CheckedExpr::Int {
+                value: 0,
+                ty: CanonicalType::UInt64,
+            };
+        }
+        let argument = &arguments[0];
+        let value = self.check_expr(argument, Some(CanonicalType::Str), false);
+        if value.ty() != CanonicalType::Str {
+            self.error(
+                argument.span(),
+                format!(
+                    "lengthOf requires a str value; '{}' has no defined length",
+                    value.ty().spelling()
+                ),
+            );
+            return CheckedExpr::Int {
+                value: 0,
+                ty: CanonicalType::UInt64,
+            };
+        }
+        CheckedExpr::LengthOf {
+            expr: Box::new(value),
         }
     }
 
@@ -1058,15 +1169,10 @@ impl<'a> Checker<'a> {
                 expr: Box::new(expr),
             };
         }
-        if from.is_float() || target.is_float() {
+        if from == CanonicalType::Chr || target == CanonicalType::Chr {
             self.error(
                 span,
-                "cannot convert a floating-point value because its exact spelling and numeric rules are not specified",
-            );
-        } else if from == CanonicalType::Chr || target == CanonicalType::Chr {
-            self.error(
-                span,
-                "cannot convert a character value because its formatting is not specified",
+                "chr values cannot be constructed because character literals are not defined",
             );
         } else if auto {
             self.error(
@@ -1092,9 +1198,9 @@ impl<'a> Checker<'a> {
 
     fn load(&mut self, ident: &Identifier) -> CheckedExpr {
         match self.lookup(&ident.name) {
-            Some(ty) => CheckedExpr::Load {
+            Some(binding) => CheckedExpr::Load {
                 name: ident.name.clone(),
-                ty,
+                ty: binding.ty,
             },
             None => {
                 self.error(ident.span, format!("unknown name '{}'", ident.name));
@@ -1116,6 +1222,10 @@ impl<'a> Checker<'a> {
             self.error(span, "integer literal is out of range");
             return CheckedExpr::Int { value: 0, ty };
         };
+        self.finish_integer(value, ty, span)
+    }
+
+    fn finish_integer(&mut self, value: i128, ty: CanonicalType, span: Span) -> CheckedExpr {
         if let Some((min, max)) = int_bounds(ty) {
             if value < min || value > max {
                 self.error(
@@ -1127,26 +1237,92 @@ impl<'a> Checker<'a> {
         CheckedExpr::Int { value, ty }
     }
 
-    fn lookup(&self, name: &str) -> Option<CanonicalType> {
+    fn float_literal(
+        &mut self,
+        lexeme: &str,
+        expected: Option<CanonicalType>,
+        span: Span,
+    ) -> CheckedExpr {
+        let ty = expected
+            .filter(|ty| ty.is_float())
+            .unwrap_or(CanonicalType::Flt64);
+        self.finish_float(lexeme, ty, span)
+    }
+
+    fn finish_float(&mut self, lexeme: &str, ty: CanonicalType, span: Span) -> CheckedExpr {
+        let parsed = lexeme.parse::<f64>().ok().filter(|value| value.is_finite());
+        match parsed {
+            Some(value) => match float_problem(value, ty) {
+                None => CheckedExpr::Float {
+                    lexeme: lexeme.to_string(),
+                    ty,
+                },
+                Some(problem) => {
+                    self.error(
+                        span,
+                        format!("floating-point literal {problem} '{}'", ty.spelling()),
+                    );
+                    CheckedExpr::Float {
+                        lexeme: "0.0".to_string(),
+                        ty,
+                    }
+                }
+            },
+            None => {
+                self.error(span, "floating-point literal is out of range");
+                CheckedExpr::Float {
+                    lexeme: "0.0".to_string(),
+                    ty,
+                }
+            }
+        }
+    }
+
+    fn negated_literal(
+        &mut self,
+        operand: &Expr,
+        expected: Option<CanonicalType>,
+        span: Span,
+    ) -> Option<CheckedExpr> {
+        match unwrap_parens(operand) {
+            Expr::Literal(LiteralExpr::Integer { lexeme, .. }) => {
+                let ty = expected
+                    .filter(|ty| ty.is_integer())
+                    .unwrap_or(CanonicalType::Int64);
+                let Some(magnitude) = parse_i128(lexeme) else {
+                    self.error(span, "integer literal is out of range");
+                    return Some(CheckedExpr::Int { value: 0, ty });
+                };
+                let Some(value) = magnitude.checked_neg() else {
+                    self.error(span, "integer literal is out of range");
+                    return Some(CheckedExpr::Int { value: 0, ty });
+                };
+                Some(self.finish_integer(value, ty, span))
+            }
+            Expr::Literal(LiteralExpr::Float { lexeme, .. }) => {
+                let ty = expected
+                    .filter(|ty| ty.is_float())
+                    .unwrap_or(CanonicalType::Flt64);
+                Some(self.finish_float(&format!("-{lexeme}"), ty, span))
+            }
+            _ => None,
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<Binding> {
         for scope in self.scopes.iter().rev() {
             if let Some(binding) = scope.get(name) {
-                return Some(binding.ty);
+                return Some(*binding);
             }
         }
         None
     }
 
     fn reject_unspecified_type(&mut self, ty: CanonicalType, span: Span) -> bool {
-        if ty.is_float() {
+        if ty == CanonicalType::Chr {
             self.error(
                 span,
-                "floating-point types are not supported in this milestone because their exact spelling is not specified",
-            );
-            true
-        } else if ty == CanonicalType::Chr {
-            self.error(
-                span,
-                "character types are not supported in this milestone because their formatting is not specified",
+                "chr values cannot be constructed because character literals are not defined",
             );
             true
         } else {
@@ -1158,7 +1334,11 @@ impl<'a> Checker<'a> {
         match expected.unwrap_or(CanonicalType::Int64) {
             CanonicalType::Str => CheckedExpr::Str(String::new()),
             CanonicalType::Bln => CheckedExpr::Bool(false),
-            CanonicalType::Void => CheckedExpr::Int {
+            CanonicalType::Flt32 | CanonicalType::Flt64 => CheckedExpr::Float {
+                lexeme: "0.0".to_string(),
+                ty: expected.unwrap_or(CanonicalType::Flt64),
+            },
+            CanonicalType::Void | CanonicalType::Chr => CheckedExpr::Int {
                 value: 0,
                 ty: CanonicalType::Int64,
             },
@@ -1193,15 +1373,35 @@ fn manifest_type(ty: &ManifestType) -> Option<CanonicalType> {
     canonical_name(&ty.name)
 }
 
-fn is_int_literal(expr: &Expr) -> bool {
-    match expr {
-        Expr::Literal(LiteralExpr::Integer { .. }) => true,
-        Expr::Parenthesized { expression, .. } => is_int_literal(expression),
+fn is_numeric_literal(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Literal(LiteralExpr::Integer { .. } | LiteralExpr::Float { .. }) => true,
         Expr::Unary(expr) if expr.operator == UnaryOperator::Negate => {
-            is_int_literal(&expr.operand)
+            is_numeric_literal(&expr.operand)
         }
         _ => false,
     }
+}
+
+fn unwrap_parens(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Parenthesized { expression, .. } => unwrap_parens(expression),
+        other => other,
+    }
+}
+
+fn float_problem(value: f64, ty: CanonicalType) -> Option<&'static str> {
+    if ty != CanonicalType::Flt32 {
+        return None;
+    }
+    let narrow = value as f32;
+    if !narrow.is_finite() {
+        return Some("does not fit in");
+    }
+    if narrow as f64 != value {
+        return Some("is not exactly representable as");
+    }
+    None
 }
 
 fn operator_token(op: BinaryOperator) -> &'static str {

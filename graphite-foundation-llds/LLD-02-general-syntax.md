@@ -246,7 +246,7 @@ Positive tests must cover `auto str` with `str`, integer, floating-point, and bo
 const flt pi = 3.14159;
 ```
 
-A `const` binding cannot be reassigned. The language must define whether `const` means compile-time constant evaluation, immutable binding, or a specific combination. Do not equate it automatically with Rust `const` or `let`.
+A `const` binding cannot be reassigned. In Stage 4, `const` is an immutable local binding inside a function, block, or loop initializer. It is not a top-level declaration and it does not require compile-time evaluation. Do not equate it with Rust `const`.
 
 ## 9. Expressions and operators
 
@@ -274,7 +274,7 @@ The parser distinguishes prefix and postfix positions. The lexer emits one `Plus
 
 The parser must use an explicit precedence and associativity table. At minimum, grouping must bind more tightly than unary operators; unary operators, including prefix `++` and `--`, must bind more tightly than multiplicative operators; multiplicative operators more tightly than additive operators; comparisons more tightly than logical conjunction; and logical conjunction more tightly than logical disjunction. Postfix `++` and `--` bind more tightly than prefix operators. The exact table, including assignment associativity, must be frozen in the parser specification.
 
-`&&` and `||` are proposed to short-circuit. This must be covered by tests before the behavior is frozen.
+`&&` and `||` are proposed to short-circuit. Stage 4 rejects them until that behavior is frozen. Unary `!` remains available for `bln` values.
 
 ## 10. Conditional statements
 
