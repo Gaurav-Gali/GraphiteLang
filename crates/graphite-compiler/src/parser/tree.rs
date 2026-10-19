@@ -136,12 +136,16 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 }
                 LoopKind::CStyle {
                     initializer,
+                    init_expr,
                     condition,
                     update,
                 } => {
                     write_line(out, &child, false, "CStyle");
                     let header = child_prefix(&child, false);
                     write_line(out, &header, false, "Initializer");
+                    if let Some(expression) = init_expr {
+                        write_expression(out, &child_prefix(&header, false), true, expression);
+                    }
                     if let Some(declaration) = initializer {
                         write_line(
                             out,

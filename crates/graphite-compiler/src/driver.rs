@@ -622,6 +622,194 @@ void main() {
     }
 
     #[test]
+    fn numeric_promotion_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-numeric-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    int a = 10;
+    uint b = 5;
+    flt c = 2.5;
+    io.println(a + b);
+    io.println(a - b);
+    io.println(a * b);
+    io.println(a / b);
+    io.println(a + c);
+    io.println(b * c);
+    io.println(c / a);
+    int neg = -10;
+    uint pos = 5;
+    io.println(neg < pos);
+    io.println(neg == pos);
+    io.println(neg != pos);
+    flt x = 10.5;
+    int y = 10;
+    io.println(x > y);
+    io.println(x == y);
+    int[] arr = [1, 2, 3, 4];
+    int16 i16 = 0;
+    int32 i32 = 1;
+    int64 i64v = 2;
+    uint16 u16 = 3;
+    uint32 u32 = 0;
+    uint64 u64v = 1;
+    int16 back = -1;
+    io.println(arr[i16]);
+    io.println(arr[i32]);
+    io.println(arr[i64v]);
+    io.println(arr[u16]);
+    io.println(arr[u32]);
+    io.println(arr[u64v]);
+    io.println(arr[back]);
+    loop (uint64 i = 0; i < lengthOf(arr); i++) {
+        if (arr[i] % 2 == 0) {
+            io.println(arr[i]);
+        }
+    }
+    int i = 0;
+    uint64 n = lengthOf(arr);
+    loop (i = 0; i < n; i++) {
+        io.println(i);
+    }
+    int huge = 9007199254740993;
+    flt approx = 9007199254740992.0;
+    io.println(huge == approx);
+    flt nan = 0.0 / 0.0;
+    io.println(nan == nan);
+    io.println(nan != 1.0);
+    io.println(nan < 1.0);
+    flt inf = 1.0 / 0.0;
+    io.println(inf > 10);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "15\n5\n50\n2\n12.5\n12.5\n0.25\ntrue\nfalse\ntrue\ntrue\nfalse\n1\n2\n3\n4\n1\n2\n4\n2\n4\n0\n1\n2\n3\nfalse\nfalse\ntrue\nfalse\ntrue\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn numeric_failures_terminate() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-numeric-fail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        let cases = [
+            (
+                "import grf.io;\n\nvoid main() {\n    int16 a = 32767;\n    int16 b = 1;\n    io.println(a + b);\n}\n",
+                "integer overflow",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    int a = 1;\n    int b = 0;\n    io.println(a / b);\n}\n",
+                "division by zero",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    int worst = -9223372036854775808;\n    io.println(worst / -1);\n}\n",
+                "integer overflow",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    io.println(1 % 0);\n}\n",
+                "division by zero",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    uint big = 9223372036854775808;\n    int small = 1;\n    io.println(small + big);\n}\n",
+                "does not fit in 'int64'",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    int[] arr = [1];\n    uint64 index = 5;\n    io.println(arr[index]);\n}\n",
+                "array index out of bounds",
+            ),
+        ];
+        for (source, diagnostic) in cases {
+            fs::write(&path, source).unwrap();
+            let output = run_captured(&path);
+            assert_ne!(output.status, 0, "{source}\n{}", output.stdout);
+            assert!(
+                output.stderr.contains(diagnostic),
+                "{diagnostic} missing from {}\n{source}",
+                output.stderr
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_reassignment_converts_to_the_declared_type() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-auto-assign-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void take(auto int value) {
+    value = "9";
+    io.println(value);
+}
+
+void main() {
+    auto int age = "21";
+    age = "12";
+    age = 25;
+    io.println(age);
+    auto uint count = "12";
+    count = "13";
+    io.println(count);
+    auto flt price = "12.5";
+    price = "13.5";
+    io.println(price);
+    auto int32 width = "40000";
+    width = "7";
+    io.println(width);
+    take("123");
+    io.println(age + 1);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "25\n13\n13.5\n7\n9\n26\n");
+
+        let failures = [
+            (
+                "import grf.io;\n\nvoid main() {\n    auto int age = \"21\";\n    age = \"hello\";\n}\n",
+                "invalid decimal integer",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    auto int16 age = \"1\";\n    age = \"40000\";\n}\n",
+                "out of range",
+            ),
+            (
+                "import grf.io;\n\nvoid main() {\n    auto int age = \"1\";\n    age = 1.5;\n}\n",
+                "not an integer",
+            ),
+        ];
+        for (source, diagnostic) in failures {
+            fs::write(&path, source).unwrap();
+            let output = run_captured(&path);
+            assert_ne!(output.status, 0, "{source}");
+            assert!(
+                output.stderr.contains(diagnostic),
+                "{diagnostic} missing from {}\n{source}",
+                output.stderr
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn conversions_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-convert-{}", std::process::id()));

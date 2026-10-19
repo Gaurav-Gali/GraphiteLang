@@ -136,7 +136,10 @@ declaration grammar already accepted by the parser. `auto T` is not
 inference, dynamic typing, or permission to accept an arbitrary value.
 It requests the same conversion represented by `T(value)`. The same
 registry applies to `auto T` parameters. Conversion runs at the call
-site, before the function body executes.
+site, before the function body executes. Later assignments to that same
+`auto T` binding, including an `auto T` parameter, use the same
+registry and the declared target type. An ordinary typed variable does
+not gain that conversion on assignment.
 
 If a target/source pair is not approved by the conversion matrix,
 compilation fails. If the pair is approved but the actual value is

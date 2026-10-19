@@ -153,6 +153,7 @@ pub enum LoopKind {
     },
     CStyle {
         initializer: Option<VariableDecl>,
+        init_expr: Option<Expr>,
         condition: Option<Expr>,
         update: Option<Expr>,
     },

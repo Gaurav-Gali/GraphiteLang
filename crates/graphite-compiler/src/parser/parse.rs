@@ -549,13 +549,12 @@ impl<'a> Parser<'a> {
         } else {
             let condition = self.parse_expression();
             if self.check(TokenKind::Semicolon) {
-                self.error(
-                    ParserDiagnosticKind::InvalidStatement,
-                    condition.span(),
-                    "a C-style loop initializer must be a variable declaration",
-                );
                 self.bump();
-                self.parse_cstyle_tail(None)
+                let mut kind = self.parse_cstyle_tail(None);
+                if let LoopKind::CStyle { init_expr, .. } = &mut kind {
+                    *init_expr = Some(condition);
+                }
+                kind
             } else {
                 LoopKind::Condition { condition }
             }
@@ -593,6 +592,7 @@ impl<'a> Parser<'a> {
         }
         LoopKind::CStyle {
             initializer,
+            init_expr: None,
             condition,
             update,
         }

@@ -502,7 +502,7 @@ fn significand_is_zero(text: &str) -> bool {
     saw_digit
 }
 
-fn exact_signed_f64(value: i128) -> Option<f64> {
+pub(crate) fn exact_signed_f64(value: i128) -> Option<f64> {
     let converted = value as f64;
     if !converted.is_finite() {
         return None;
@@ -514,7 +514,7 @@ fn exact_signed_f64(value: i128) -> Option<f64> {
     }
 }
 
-fn exact_unsigned_f64(value: u128) -> Option<f64> {
+pub(crate) fn exact_unsigned_f64(value: u128) -> Option<f64> {
     let converted = value as f64;
     if !converted.is_finite() {
         return None;
@@ -526,7 +526,7 @@ fn exact_unsigned_f64(value: u128) -> Option<f64> {
     }
 }
 
-fn integral_i128(value: f64) -> Option<i128> {
+pub(crate) fn integral_i128(value: f64) -> Option<i128> {
     if !value.is_finite() || value.fract() != 0.0 {
         return None;
     }

@@ -1,0 +1,51 @@
+import grf.io;
+
+void main() {
+    int a = 10;
+    uint b = 5;
+    flt c = 2.5;
+    io.println(a + b);
+    io.println(a - b);
+    io.println(a * b);
+    io.println(a / b);
+    io.println(a + c);
+    io.println(b * c);
+    io.println(c / a);
+
+    int neg = -10;
+    uint pos = 5;
+    io.println(neg < pos);
+    io.println(neg == pos);
+    io.println(neg != pos);
+
+    flt x = 10.5;
+    int y = 10;
+    io.println(x > y);
+    io.println(x == y);
+
+    int[] arr = [1, 2, 3, 4];
+    int16 i16 = 0;
+    int32 i32 = 1;
+    int64 i64 = 2;
+    uint16 u16 = 3;
+    uint32 u32 = 0;
+    uint64 u64 = 1;
+    io.println(arr[i16]);
+    io.println(arr[i32]);
+    io.println(arr[i64]);
+    io.println(arr[u16]);
+    io.println(arr[u32]);
+    io.println(arr[u64]);
+
+    loop (uint64 i = 0; i < lengthOf(arr); i++) {
+        if (arr[i] % 2 == 0) {
+            io.println(arr[i]);
+        }
+    }
+
+    int i = 0;
+    uint64 n = lengthOf(arr);
+    loop (i = 0; i < n; i++) {
+        io.println(i);
+    }
+}

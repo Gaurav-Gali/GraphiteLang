@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::parser::{BinaryOperator, UnaryOperator};
 use crate::semantic::convert::ConvOp;
+use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
     ArrayMethod, ArrayPlace, CanonicalType, CheckedExpr, CheckedFn, CheckedPart, CheckedProgram,
     CheckedStmt,
@@ -157,6 +158,7 @@ impl Emitter {
             }
             CheckedStmt::CStyle {
                 initializer,
+                init_expr,
                 condition,
                 update,
                 body,
@@ -165,6 +167,10 @@ impl Emitter {
                 self.indent += 1;
                 if let Some(initializer) = initializer {
                     self.emit_stmt(initializer);
+                }
+                if let Some(init_expr) = init_expr {
+                    let init_expr = self.emit_expr(init_expr);
+                    self.line(&format!("{init_expr};"));
                 }
                 let outer = self.fresh_label();
                 let inner = self.fresh_label();
@@ -329,12 +335,29 @@ impl Emitter {
                 match op {
                     UnaryOperator::Not => format!("(!{inner})"),
                     UnaryOperator::Negate if ty.is_float() => format!("(-({inner}))"),
+                    UnaryOperator::Negate if ty.is_unsigned() => {
+                        let zero = match ty {
+                            CanonicalType::UInt16 => "0u16",
+                            CanonicalType::UInt32 => "0u32",
+                            _ => "0u64",
+                        };
+                        format!(
+                            "{{ if u128::from({inner}) != 0 {{ grf_overflow() }} else {{ {zero} }} }}"
+                        )
+                    }
                     UnaryOperator::Negate => format!("grf_neg!({inner})"),
                 }
             }
             CheckedExpr::Binary {
-                op, left, right, ..
+                op,
+                left,
+                right,
+                compare,
+                ..
             } => {
+                if let Some(mode) = compare {
+                    return self.emit_compare(*op, left, right, *mode);
+                }
                 let float_operand = left.ty().is_float();
                 let left = self.emit_expr(left);
                 let right = self.emit_expr(right);
@@ -493,6 +516,19 @@ impl Emitter {
                     .join(", ");
                 format!("{path}({args})")
             }
+            CheckedExpr::NumCast {
+                from,
+                to,
+                check,
+                expr,
+                file,
+                line,
+                column,
+            } => {
+                let inner = self.emit_expr(expr);
+                let site = site_expr(file, *line, *column);
+                emit_num_cast(*from, *to, *check, &inner, &site)
+            }
             CheckedExpr::Convert {
                 from,
                 to,
@@ -529,6 +565,52 @@ impl Emitter {
                 lines.push("}".to_string());
                 lines.join(" ")
             }
+        }
+    }
+
+    fn emit_compare(
+        &mut self,
+        op: BinaryOperator,
+        left: &CheckedExpr,
+        right: &CheckedExpr,
+        mode: CompareMode,
+    ) -> String {
+        let (left_text, right_text) = match mode {
+            CompareMode::Same => (self.emit_expr(left), self.emit_expr(right)),
+            CompareMode::Integers => (self.emit_i128(left), self.emit_i128(right)),
+            CompareMode::Floats => (self.emit_f64(left), self.emit_f64(right)),
+            CompareMode::IntFloat => {
+                let int_on_left = !left.ty().is_float();
+                let (integer, float) = if int_on_left {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                let order = format!(
+                    "graphite_core::numeric::cmp_int_f64({}, {})",
+                    self.emit_i128(integer),
+                    self.emit_f64(float)
+                );
+                return int_float_op(op, &order, int_on_left);
+            }
+        };
+        match op {
+            BinaryOperator::Less => format!("({left_text} < {right_text})"),
+            BinaryOperator::LessEqual => format!("({left_text} <= {right_text})"),
+            BinaryOperator::Greater => format!("({left_text} > {right_text})"),
+            BinaryOperator::GreaterEqual => format!("({left_text} >= {right_text})"),
+            BinaryOperator::Equal => format!("({left_text} == {right_text})"),
+            BinaryOperator::NotEqual => format!("({left_text} != {right_text})"),
+            _ => "false".to_string(),
+        }
+    }
+
+    fn emit_f64(&mut self, expr: &CheckedExpr) -> String {
+        let inner = self.emit_expr(expr);
+        if expr.ty() == CanonicalType::Flt32 {
+            format!("f64::from({inner})")
+        } else {
+            inner
         }
     }
 
@@ -1052,6 +1134,94 @@ fn unsigned_bound(ty: CanonicalType) -> u128 {
         CanonicalType::Int32 => i32::MAX as u128,
         CanonicalType::Int64 => i64::MAX as u128,
         _ => u128::from(u64::MAX),
+    }
+}
+
+fn int_float_op(op: BinaryOperator, order: &str, int_on_left: bool) -> String {
+    let less = if int_on_left {
+        format!("{order} < 0")
+    } else {
+        format!("{order} > 0")
+    };
+    let greater = if int_on_left {
+        format!("{order} > 0")
+    } else {
+        format!("{order} < 0")
+    };
+    match op {
+        BinaryOperator::Less => format!("({less})"),
+        BinaryOperator::Greater => format!("({greater})"),
+        BinaryOperator::LessEqual => format!("({less} || {order} == 0)"),
+        BinaryOperator::GreaterEqual => format!("({greater} || {order} == 0)"),
+        BinaryOperator::Equal => format!("({order} == 0)"),
+        BinaryOperator::NotEqual => format!("({order} != 0)"),
+        _ => "false".to_string(),
+    }
+}
+
+fn emit_num_cast(
+    from: CanonicalType,
+    to: CanonicalType,
+    check: bool,
+    inner: &str,
+    site: &str,
+) -> String {
+    let rust = to.rust_name();
+    if !check {
+        return match (from, to) {
+            (CanonicalType::Int16, CanonicalType::Int32) => format!("i32::from({inner})"),
+            (CanonicalType::Int16 | CanonicalType::Int32, CanonicalType::Int64) => {
+                format!("i64::from({inner})")
+            }
+            (CanonicalType::UInt16, CanonicalType::UInt32) => format!("u32::from({inner})"),
+            (CanonicalType::UInt16 | CanonicalType::UInt32, CanonicalType::UInt64) => {
+                format!("u64::from({inner})")
+            }
+            (CanonicalType::UInt16, CanonicalType::Int32) => format!("i32::from({inner})"),
+            (CanonicalType::UInt16 | CanonicalType::UInt32, CanonicalType::Int64) => {
+                format!("i64::from({inner})")
+            }
+            (CanonicalType::Int16 | CanonicalType::UInt16, CanonicalType::Flt32) => {
+                format!("f32::from({inner})")
+            }
+            (
+                CanonicalType::Int16
+                | CanonicalType::Int32
+                | CanonicalType::UInt16
+                | CanonicalType::UInt32,
+                CanonicalType::Flt64,
+            ) => format!("f64::from({inner})"),
+            (CanonicalType::Flt32, CanonicalType::Flt64) => format!("f64::from({inner})"),
+            _ => format!("({inner} as {rust})"),
+        };
+    }
+    let to_name = rust_string(&to.spelling());
+    let max = match to {
+        CanonicalType::Int16 => i128::from(i16::MAX),
+        CanonicalType::Int32 => i128::from(i32::MAX),
+        _ => i128::from(i64::MAX),
+    };
+    match (
+        from.is_unsigned(),
+        to.is_float(),
+        to == CanonicalType::Flt32,
+    ) {
+        (true, false, _) => format!(
+            "(graphite_core::numeric::unsigned_to_signed(u128::from({inner}), {max}, {to_name}, {site}) as {rust})"
+        ),
+        (false, true, true) => {
+            format!("graphite_core::numeric::signed_to_f32(i128::from({inner}), {to_name}, {site})")
+        }
+        (true, true, true) => format!(
+            "graphite_core::numeric::unsigned_to_f32(u128::from({inner}), {to_name}, {site})"
+        ),
+        (false, true, false) => {
+            format!("graphite_core::numeric::signed_to_f64(i128::from({inner}), {to_name}, {site})")
+        }
+        (true, true, false) => format!(
+            "graphite_core::numeric::unsigned_to_f64(u128::from({inner}), {to_name}, {site})"
+        ),
+        (false, false, _) => format!("({inner} as {rust})"),
     }
 }
 

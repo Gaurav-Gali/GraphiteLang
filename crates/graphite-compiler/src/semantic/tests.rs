@@ -187,7 +187,7 @@ void main() {
 ",
     );
     assert!(mixed.contains("type mismatch"), "{mixed}");
-    assert!(mixed.contains("same integer type"), "{mixed}");
+    assert!(mixed.contains("integer operands"), "{mixed}");
 
     let constants = messages(
         "\
@@ -485,6 +485,61 @@ void main() {
 }
 
 #[test]
+fn auto_reassignment_uses_the_declared_target() {
+    let source = "\
+import grf.io;
+
+void take(auto int value) {
+    value = \"9\";
+    io.println(value);
+}
+
+void main() {
+    auto int age = \"21\";
+    age = \"12\";
+    age = 25;
+    int next = age + 1;
+    auto uint count = \"12\";
+    count = \"13\";
+    auto flt price = \"12.5\";
+    price = \"13.5\";
+    auto int64 alias = \"8\";
+    alias = \"9\";
+    take(\"123\");
+    io.println(age);
+    io.println(next);
+    io.println(count);
+    io.println(price);
+    io.println(alias);
+}
+";
+    let accepted = analyze_source(source);
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let rust = generate(accepted.program.as_ref().unwrap());
+    assert!(
+        rust.matches("graphite_core::convert::str_to_signed")
+            .count()
+            >= 2,
+        "{rust}"
+    );
+    assert!(rust.contains("let mut age: i64"), "{rust}");
+
+    let ordinary = messages("void main() {\n    int age = 21;\n    age = \"12\";\n}\n");
+    assert!(ordinary.contains("type mismatch"), "{ordinary}");
+    assert!(!ordinary.contains("cannot convert"), "{ordinary}");
+
+    let unsupported = messages("void main() {\n    auto int age = \"21\";\n    age = [1];\n}\n");
+    assert!(
+        unsupported.contains("cannot convert 'int64[]' to 'int64'"),
+        "{unsupported}"
+    );
+}
+
+#[test]
 fn arrays_keep_static_element_types() {
     let accepted = analyze_source(
         "\
@@ -610,6 +665,93 @@ void main() {
     );
     let too_wide = messages("void main() {\n    int32[] values = [4000000000];\n}\n");
     assert!(too_wide.contains("does not fit"), "{too_wide}");
+}
+
+#[test]
+fn numeric_operators_accept_mixed_families() {
+    let accepted = analyze_source(
+        "\
+import grf.io;
+
+void main() {
+    int a = 10;
+    uint b = 5;
+    flt c = 2.5;
+    int32 sum = 1 + 2;
+    io.println(a + b);
+    io.println(a - b);
+    io.println(a * b);
+    io.println(a / b);
+    io.println(a + c);
+    io.println(b * c);
+    io.println(c / a);
+    io.println(a < b);
+    io.println(c > a);
+    io.println(c == a);
+    int16 i16 = 0;
+    int32 i32 = 0;
+    int64 i64 = 0;
+    uint16 u16 = 0;
+    uint32 u32 = 0;
+    uint64 u64 = 0;
+    int[] arr = [1, 2, 3, 4];
+    io.println(arr[i16]);
+    io.println(arr[i32]);
+    io.println(arr[i64]);
+    io.println(arr[u16]);
+    io.println(arr[u32]);
+    io.println(arr[u64]);
+    io.println(arr[-1]);
+    loop (uint64 i = 0; i < lengthOf(arr); i++) {
+        if (arr[i] % 2 == 0) {
+            io.println(arr[i]);
+        }
+    }
+    int i = 0;
+    uint64 n = lengthOf(arr);
+    loop (i = 0; i < n; i++) {
+        io.println(i);
+    }
+    int16 low = 1;
+    int64 high = 2;
+    int64 wide = 0;
+    wide = low + high;
+    io.println(sum);
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+
+    let destination = messages(
+        "\
+void main() {
+    int a = 1;
+    int b = 2;
+    flt sum = a + b;
+}
+",
+    );
+    assert!(destination.contains("type mismatch"), "{destination}");
+    let float_index = messages(
+        "\
+void main() {
+    int[] arr = [1];
+    flt index = 0.0;
+    int value = arr[index];
+}
+",
+    );
+    assert!(
+        float_index.contains("an index must be an integer"),
+        "{float_index}"
+    );
+    let remainder =
+        messages("void main() {\n    int a = 1;\n    flt b = 2.0;\n    flt c = a % b;\n}\n");
+    assert!(remainder.contains("integer operands"), "{remainder}");
 }
 
 #[test]

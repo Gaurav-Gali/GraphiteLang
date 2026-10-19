@@ -321,6 +321,7 @@ void main() {
         initializer: Some(initializer),
         condition: Some(_),
         update: Some(update),
+        ..
     } = &c_style.kind
     else {
         panic!("expected a declaration initializer");
@@ -477,7 +478,7 @@ void main() {
 
 #[test]
 fn rejects_bad_loop_headers() {
-    assert_rejected(
+    let assigned = parse_clean(
         "\
 void main() {
     int index = 0;
@@ -485,8 +486,17 @@ void main() {
     }
 }
 ",
-        "variable declaration",
     );
+    let Stmt::Loop(assigned_loop) = &function(&assigned, "main").body.statements[1] else {
+        panic!("expected an assignment initializer");
+    };
+    assert!(matches!(
+        assigned_loop.kind,
+        LoopKind::CStyle {
+            init_expr: Some(_),
+            ..
+        }
+    ));
     let source = "\
 void main() {
     loop (;;) {

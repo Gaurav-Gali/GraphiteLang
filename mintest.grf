@@ -1,7 +1,22 @@
 import grf.io;
 
 void main(){
-    int[][] num = [[1,2], [3,4]];
 
-    io.println(num);
+    auto int a = 10;
+
+    int[] arr = [1,2,3,4];
+
+    if(arr[2]%2 == 0) {
+        io.println("even");
+    } else {
+        io.println("odd");
+    }
+
+    io.println(arr[-1]);
+
+    loop(auto int i = 0; i < lengthOf(arr); i++) {
+        if(arr[i]%2 == 0) {
+            io.println(arr[i]);
+        }
+    }
 }

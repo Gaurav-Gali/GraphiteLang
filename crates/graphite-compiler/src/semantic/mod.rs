@@ -31,8 +31,10 @@ use crate::parser::*;
 use crate::span::Span;
 
 pub(crate) mod convert;
+pub(crate) mod numeric;
 
 use convert::{ConvOp, conversion};
+use numeric::{CompareMode, NumericError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalType {
@@ -411,6 +413,7 @@ pub enum CheckedStmt {
     },
     CStyle {
         initializer: Option<Box<CheckedStmt>>,
+        init_expr: Option<CheckedExpr>,
         condition: CheckedExpr,
         update: Option<CheckedExpr>,
         body: Vec<CheckedStmt>,
@@ -483,6 +486,16 @@ pub enum CheckedExpr {
         left: Box<CheckedExpr>,
         right: Box<CheckedExpr>,
         ty: CanonicalType,
+        compare: Option<CompareMode>,
+    },
+    NumCast {
+        from: CanonicalType,
+        to: CanonicalType,
+        check: bool,
+        expr: Box<CheckedExpr>,
+        file: String,
+        line: u32,
+        column: u32,
     },
     Assign {
         name: String,
@@ -585,7 +598,7 @@ impl CheckedExpr {
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. } => *ty,
-            CheckedExpr::Convert { to, .. } => *to,
+            CheckedExpr::Convert { to, .. } | CheckedExpr::NumCast { to, .. } => *to,
             CheckedExpr::Array { ty, .. }
             | CheckedExpr::IndexGet { ty, .. }
             | CheckedExpr::SliceGet { ty, .. }
@@ -628,6 +641,7 @@ struct ImportBinding {
 struct Binding {
     ty: CanonicalType,
     mutable: bool,
+    auto: bool,
 }
 
 pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Analysis {
@@ -850,12 +864,12 @@ impl<'a> Checker<'a> {
         let params = signature
             .params
             .iter()
-            .map(|param| (param.name.clone(), param.ty))
+            .map(|param| (param.name.clone(), param.ty, param.auto))
             .collect::<Vec<_>>();
         let ret = signature.ret;
         self.current_return = ret;
         self.scopes.push(HashMap::new());
-        for (name, ty) in &params {
+        for (name, ty, auto) in &params {
             if name == "lengthOf" {
                 continue;
             }
@@ -865,10 +879,15 @@ impl<'a> Checker<'a> {
                     Binding {
                         ty: *ty,
                         mutable: true,
+                        auto: *auto,
                     },
                 );
             }
         }
+        let params = params
+            .into_iter()
+            .map(|(name, ty, _)| (name, ty))
+            .collect::<Vec<_>>();
         let mut body = Vec::new();
         for statement in &function.body.statements {
             if let Some(checked) = self.check_stmt(statement) {
@@ -998,6 +1017,7 @@ impl<'a> Checker<'a> {
             }
             LoopKind::CStyle {
                 initializer,
+                init_expr,
                 condition,
                 update,
             } => {
@@ -1006,6 +1026,9 @@ impl<'a> Checker<'a> {
                     .as_ref()
                     .and_then(|decl| self.check_variable(decl))
                     .map(Box::new);
+                let init_expr = init_expr
+                    .as_ref()
+                    .map(|expr| self.check_expr(expr, None, true));
                 let checked_condition = if let Some(condition) = condition {
                     let checked = self.check_expr(condition, Some(CanonicalType::Bln), false);
                     if checked.ty() != CanonicalType::Bln {
@@ -1025,6 +1048,7 @@ impl<'a> Checker<'a> {
                 self.scopes.pop();
                 Some(CheckedStmt::CStyle {
                     initializer: init,
+                    init_expr,
                     condition: checked_condition,
                     update: checked_update,
                     body,
@@ -1077,6 +1101,7 @@ impl<'a> Checker<'a> {
             Binding {
                 ty,
                 mutable: decl.mutable,
+                auto: decl.conversion == ConversionMode::Auto,
             },
         );
         Some(CheckedStmt::Let {
@@ -1194,6 +1219,7 @@ impl<'a> Checker<'a> {
                 ty: CanonicalType::Bln,
                 left: Box::new(left),
                 right: Box::new(right),
+                compare: None,
             };
         }
         let comparison = matches!(
@@ -1205,61 +1231,139 @@ impl<'a> Checker<'a> {
                 | BinaryOperator::Equal
                 | BinaryOperator::NotEqual
         );
-        let operand_expected = if comparison {
-            None
+        let (left, right) = self.check_numeric_operands(&expr.left, &expr.right, expected);
+        if comparison {
+            self.finish_comparison(expr, left, right)
         } else {
-            expected.filter(|ty| ty.is_numeric())
-        };
-        let (left, right) = if is_numeric_literal(&expr.left) && !is_numeric_literal(&expr.right) {
-            let right = self.check_expr(&expr.right, operand_expected, false);
-            let left = self.check_expr(&expr.left, Some(right.ty()), false);
+            self.finish_arithmetic(expr, left, right)
+        }
+    }
+
+    fn check_numeric_operands(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        expected: Option<CanonicalType>,
+    ) -> (CheckedExpr, CheckedExpr) {
+        if is_numeric_literal(left) && is_numeric_literal(right) {
+            let literal_type = expected.filter(|ty| ty.is_numeric());
+            let left = self.check_expr(left, literal_type, false);
+            let right = self.check_expr(right, Some(left.ty()), false);
+            (left, right)
+        } else if is_numeric_literal(left) {
+            let right = self.check_expr(right, None, false);
+            let left = self.check_expr(left, Some(right.ty()), false);
             (left, right)
         } else {
-            let left = self.check_expr(&expr.left, operand_expected, false);
-            let right = self.check_expr(&expr.right, Some(left.ty()), false);
+            let left = self.check_expr(left, None, false);
+            let right_type = if is_numeric_literal(right) {
+                Some(left.ty())
+            } else {
+                None
+            };
+            let right = self.check_expr(right, right_type, false);
             (left, right)
-        };
-        let same = left.ty() == right.ty();
-        let comparable = same
+        }
+    }
+
+    fn finish_comparison(
+        &mut self,
+        expr: &BinaryExpr,
+        left: CheckedExpr,
+        right: CheckedExpr,
+    ) -> CheckedExpr {
+        let compare = if left.ty() == right.ty()
             && (left.ty().is_numeric()
                 || left.ty() == CanonicalType::Bln
-                || left.ty() == CanonicalType::Str);
-        if comparison {
-            if !comparable {
-                self.error(
-                    expr.span,
-                    format!(
-                        "operator '{}' requires two operands of the same comparable type",
-                        operator_token(expr.operator)
-                    ),
-                );
-            }
-        } else if expr.operator == BinaryOperator::Remainder {
-            if !same || !left.ty().is_integer() {
-                self.error(
-                    expr.span,
-                    "operator '%' requires two operands of the same integer type",
-                );
-            }
-        } else if !same || !left.ty().is_numeric() {
+                || left.ty() == CanonicalType::Str)
+        {
+            Some(CompareMode::Same)
+        } else {
+            numeric::compare(left.ty(), right.ty())
+        };
+        if compare.is_none() {
             self.error(
                 expr.span,
                 format!(
-                    "operator '{}' requires two operands of the same numeric type",
+                    "operator '{}' requires two operands of the same comparable type",
                     operator_token(expr.operator)
                 ),
             );
         }
-        let ty = if comparison {
-            CanonicalType::Bln
-        } else {
-            left.ty()
-        };
         CheckedExpr::Binary {
             op: expr.operator,
-            ty,
+            ty: CanonicalType::Bln,
             left: Box::new(left),
             right: Box::new(right),
+            compare,
+        }
+    }
+
+    fn finish_arithmetic(
+        &mut self,
+        expr: &BinaryExpr,
+        left: CheckedExpr,
+        right: CheckedExpr,
+    ) -> CheckedExpr {
+        let remainder = expr.operator == BinaryOperator::Remainder;
+        match numeric::arithmetic(left.ty(), right.ty(), remainder) {
+            Ok(ty) => {
+                let left = self.promote(left, ty, expr.left.span());
+                let right = self.promote(right, ty, expr.right.span());
+                CheckedExpr::Binary {
+                    op: expr.operator,
+                    ty,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                }
+            }
+            Err(NumericError::Remainder) => {
+                self.error(expr.span, "operator '%' requires integer operands");
+                self.binary_error(expr, left, right)
+            }
+            Err(NumericError::Incompatible) => {
+                self.error(
+                    expr.span,
+                    format!(
+                        "operator '{}' requires two operands of the same numeric type",
+                        operator_token(expr.operator)
+                    ),
+                );
+                self.binary_error(expr, left, right)
+            }
+        }
+    }
+
+    fn binary_error(
+        &self,
+        expr: &BinaryExpr,
+        left: CheckedExpr,
+        right: CheckedExpr,
+    ) -> CheckedExpr {
+        CheckedExpr::Binary {
+            op: expr.operator,
+            ty: left.ty(),
+            left: Box::new(left),
+            right: Box::new(right),
+            compare: None,
+        }
+    }
+
+    fn promote(&mut self, expr: CheckedExpr, to: CanonicalType, span: Span) -> CheckedExpr {
+        let from = expr.ty();
+        if from == to {
+            return expr;
+        }
+        let (file, line, column) = self.located(span);
+        CheckedExpr::NumCast {
+            from,
+            to,
+            check: numeric::needs_check(from, to),
+            expr: Box::new(expr),
+            file,
+            line,
+            column,
         }
     }
 
@@ -1285,8 +1389,9 @@ impl<'a> Checker<'a> {
         };
         self.reject_binding_write(&ident.name, ident.span, false);
         let ty = binding.ty;
+        let auto = binding.auto;
         let value = self.check_expr(&expr.value, Some(ty), false);
-        let value = self.apply_conversion(value, ty, false, expr.value.span());
+        let value = self.apply_conversion(value, ty, auto, expr.value.span());
         CheckedExpr::Assign {
             name: ident.name.clone(),
             ty,
@@ -2059,6 +2164,7 @@ impl<'a> Checker<'a> {
                 Binding {
                     ty: *ty,
                     mutable: *mutable,
+                    auto: false,
                 },
             );
         }
@@ -2167,6 +2273,7 @@ impl<'a> Checker<'a> {
                 Binding {
                     ty: *ty,
                     mutable: *mutable,
+                    auto: false,
                 },
             );
         }
