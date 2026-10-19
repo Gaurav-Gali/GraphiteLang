@@ -85,7 +85,15 @@ impl<'a> Scanner<'a> {
             '[' => self.emit(TokenKind::LeftBracket, start, None),
             ']' => self.emit(TokenKind::RightBracket, start, None),
             ',' => self.emit(TokenKind::Comma, start, None),
-            '.' => self.emit(TokenKind::Dot, start, None),
+            '.' => {
+                if self.peek() == Some('.') && self.peek_second() == Some('.') {
+                    self.bump();
+                    self.bump();
+                    self.emit(TokenKind::DotDotDot, start, None);
+                } else {
+                    self.emit(TokenKind::Dot, start, None);
+                }
+            }
             ';' => self.emit(TokenKind::Semicolon, start, None),
             '*' => self.emit(TokenKind::Star, start, None),
             '%' => self.emit(TokenKind::Percent, start, None),

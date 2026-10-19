@@ -47,6 +47,8 @@ pub enum ConvOp {
     CharToF32,
     CharToStr,
     ArrayToStr,
+    RecordToStr,
+    MapToStr,
 }
 
 pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
@@ -58,6 +60,8 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
             }
             Chr => Some(ConvOp::CharToStr),
             Array { .. } => Some(ConvOp::ArrayToStr),
+            Record(_) => Some(ConvOp::RecordToStr),
+            Map(_) => Some(ConvOp::MapToStr),
             _ => None,
         };
     }

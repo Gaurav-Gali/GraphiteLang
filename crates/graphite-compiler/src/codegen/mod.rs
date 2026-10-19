@@ -16,7 +16,7 @@ use crate::semantic::convert::ConvOp;
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
     ArrayMethod, ArrayPlace, CanonicalType, CheckedExpr, CheckedFn, CheckedPart, CheckedProgram,
-    CheckedStmt,
+    CheckedRecord, CheckedStmt, Leaf, LoopSourceKind, MapEntry, MapMethod, MapShape, RecordId,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -30,7 +30,13 @@ pub fn generate(program: &CheckedProgram) -> String {
         loops: Vec::new(),
         tmps: 0,
         loop_ids: 0,
+        records: &program.records,
+        maps: &program.maps,
     };
+    for index in record_order(&program.records) {
+        emitter.emit_record(&program.records[index]);
+        emitter.out.push('\n');
+    }
     let mut others = Vec::new();
     let mut entry = Vec::new();
     for function in &program.functions {
@@ -57,15 +63,17 @@ pub fn generate(program: &CheckedProgram) -> String {
     emitter.out
 }
 
-struct Emitter {
+struct Emitter<'a> {
     out: String,
     indent: usize,
     loops: Vec<(String, String)>,
     tmps: u32,
     loop_ids: u32,
+    records: &'a [CheckedRecord],
+    maps: &'a [MapShape],
 }
 
-impl Emitter {
+impl Emitter<'_> {
     fn emit_function(&mut self, function: &CheckedFn) {
         let name = rust_ident(&function.name);
         let visibility = if function.name == "main" {
@@ -76,7 +84,7 @@ impl Emitter {
         let params = function
             .params
             .iter()
-            .map(|(name, ty)| format!("mut {}: {}", rust_ident(name), ty.rust_name()))
+            .map(|(name, ty)| format!("mut {}: {}", rust_ident(name), self.ty_name(*ty)))
             .collect::<Vec<_>>()
             .join(", ");
         if function.ret == CanonicalType::Void {
@@ -84,7 +92,7 @@ impl Emitter {
         } else {
             self.line(&format!(
                 "{visibility}fn {name}({params}) -> {} {{",
-                function.ret.rust_name()
+                self.ty_name(function.ret)
             ));
         }
         self.indent += 1;
@@ -109,7 +117,7 @@ impl Emitter {
                 self.line(&format!(
                     "{binding} {}: {} = {value};",
                     rust_ident(name),
-                    ty.rust_name()
+                    self.ty_name(*ty)
                 ));
             }
             CheckedStmt::Return(None) => self.line("return;"),
@@ -239,14 +247,14 @@ impl Emitter {
                     self.line(&format!(
                         "{binding} {}: {} = {values}[{index}].clone();",
                         rust_ident(name),
-                        ty.rust_name()
+                        self.ty_name(*ty)
                     ));
                 }
             }
             CheckedStmt::Iterate {
                 bindings,
                 source,
-                enumerate,
+                kind,
                 body,
             } => {
                 let outer = self.fresh_label();
@@ -268,13 +276,13 @@ impl Emitter {
                 self.line(&format!("'{inner}: loop {{"));
                 self.indent += 1;
                 self.loops.push((outer.clone(), inner.clone()));
-                if *enumerate {
+                if *kind == LoopSourceKind::Enumerate {
                     if let Some((name, ty, mutable)) = bindings.first() {
                         let binding = if *mutable { "let mut" } else { "let" };
                         self.line(&format!(
                             "{binding} {}: {ty} = grf_i;",
                             rust_ident(name),
-                            ty = ty.rust_name()
+                            ty = self.ty_name(*ty)
                         ));
                     }
                     if let Some((name, ty, mutable)) = bindings.get(1) {
@@ -282,7 +290,26 @@ impl Emitter {
                         self.line(&format!(
                             "{binding} {}: {} = grf_src[grf_i as usize].clone();",
                             rust_ident(name),
-                            ty.rust_name()
+                            self.ty_name(*ty)
+                        ));
+                    }
+                } else if *kind == LoopSourceKind::Entries {
+                    let pair = self.fresh_tmp();
+                    self.line(&format!("let {pair} = grf_src[grf_i as usize].clone();"));
+                    if let Some((name, ty, mutable)) = bindings.first() {
+                        let binding = if *mutable { "let mut" } else { "let" };
+                        self.line(&format!(
+                            "{binding} {}: {} = {pair}.0;",
+                            rust_ident(name),
+                            self.ty_name(*ty)
+                        ));
+                    }
+                    if let Some((name, ty, mutable)) = bindings.get(1) {
+                        let binding = if *mutable { "let mut" } else { "let" };
+                        self.line(&format!(
+                            "{binding} {}: {} = {pair}.1;",
+                            rust_ident(name),
+                            self.ty_name(*ty)
                         ));
                     }
                 } else if let Some((name, ty, mutable)) = bindings.first() {
@@ -290,7 +317,7 @@ impl Emitter {
                     self.line(&format!(
                         "{binding} {}: {} = grf_src[grf_i as usize].clone();",
                         rust_ident(name),
-                        ty.rust_name()
+                        self.ty_name(*ty)
                     ));
                 }
                 self.emit_body(body);
@@ -417,13 +444,81 @@ impl Emitter {
                     format!("{{ let {tmp} = {name}; {name} = {op}!({name}, 1); {tmp} }}")
                 }
             }
-            CheckedExpr::LengthOf { expr } => {
-                if expr.ty().is_array() {
+            CheckedExpr::LengthOf { expr, count } => {
+                if let Some(count) = count {
+                    let inner = self.emit_expr(expr);
+                    format!("{{ let _ = {inner}; {count}u64 }}")
+                } else if expr.ty().is_array() {
                     let inner = self.emit_array_ref(expr);
+                    format!("(({inner}).len() as u64)")
+                } else if expr.ty().is_map() {
+                    let inner = self.emit_map_ref(expr);
                     format!("(({inner}).len() as u64)")
                 } else {
                     let inner = self.emit_expr(expr);
                     format!("grf_str_length(&({inner}))")
+                }
+            }
+            CheckedExpr::Record { id, fields, .. } => self.emit_record_literal(*id, fields),
+            CheckedExpr::MapLiteral { entries, ty } => self.emit_map_literal(entries, *ty),
+            CheckedExpr::MapGet {
+                object,
+                key,
+                type_name,
+                file,
+                line,
+                column,
+                ..
+            } => self.emit_map_get(object, key, type_name, file, *line, *column),
+            CheckedExpr::MapInsert {
+                place,
+                key,
+                value,
+                file,
+                line,
+                column,
+                ..
+            } => self.emit_map_insert(place, key, value, file, *line, *column),
+            CheckedExpr::MapCall {
+                place,
+                object,
+                method,
+                args,
+                key_ty,
+                value_ty,
+                type_name,
+                file,
+                line,
+                column,
+                ..
+            } => self.emit_map_call(
+                place, object, *method, args, *key_ty, *value_ty, type_name, file, *line, *column,
+            ),
+            CheckedExpr::FieldGet {
+                object,
+                record,
+                field,
+                ty,
+            } => {
+                let object = self.emit_expr(object);
+                let field = self.field_name(*record, *field);
+                if ty.is_heap() {
+                    format!("({object}).{field}.clone()")
+                } else {
+                    format!("({object}).{field}")
+                }
+            }
+            CheckedExpr::FieldSet { place, value, ty } => {
+                let value = self.emit_expr(value);
+                let (setup, container) = self.emit_container(place);
+                if ty.is_heap() {
+                    format!(
+                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored.clone(); grf_stored }}"
+                    )
+                } else {
+                    format!(
+                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored; grf_stored }}"
+                    )
                 }
             }
             CheckedExpr::Array { elements, .. } => {
@@ -543,7 +638,12 @@ impl Emitter {
                     "graphite_core::convert::Site {{ file: {}, line: {line}, column: {column} }}",
                     rust_string(file)
                 );
-                emit_conv(*op, *from, *to, &inner, &site)
+                match op {
+                    ConvOp::RecordToStr => self.record_to_str(*from, &inner),
+                    ConvOp::ArrayToStr => self.array_to_str(*from, &inner),
+                    ConvOp::MapToStr => self.map_to_str(*from, &inner),
+                    other => emit_conv(*other, *from, *to, &inner, &site),
+                }
             }
             CheckedExpr::Interpolated { parts } => {
                 let mut lines = vec![
@@ -621,6 +721,203 @@ impl Emitter {
             }
         }
         format!("&({})", self.emit_expr(expr))
+    }
+
+    fn emit_map_ref(&mut self, expr: &CheckedExpr) -> String {
+        if let CheckedExpr::Load { name, ty } = expr {
+            if ty.is_map() {
+                return format!("&{}", rust_ident(name));
+            }
+        }
+        format!("&({})", self.emit_expr(expr))
+    }
+
+    fn emit_map_literal(&mut self, entries: &[MapEntry], ty: CanonicalType) -> String {
+        let CanonicalType::Map(id) = ty else {
+            return "std::collections::HashMap::new()".to_string();
+        };
+        let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
+            key: CanonicalType::Void,
+            value: CanonicalType::Void,
+        });
+        let map_ty = format!(
+            "std::collections::HashMap::<{}, {}>",
+            self.ty_name(shape.key),
+            self.ty_name(shape.value)
+        );
+        let mut body = format!("let mut grf_map = {map_ty}::new();");
+        for entry in entries {
+            match entry {
+                MapEntry::Pair(key, value) => {
+                    let key = self.emit_expr(key);
+                    let value = self.emit_expr(value);
+                    body.push_str(&format!(
+                        "let grf_key = {key}; let grf_val = {value}; grf_map.insert(grf_key, grf_val);"
+                    ));
+                }
+                MapEntry::Spread(source) => {
+                    let source = self.emit_expr(source);
+                    let source_tmp = self.fresh_tmp();
+                    body.push_str(&format!(
+                        "let {source_tmp} = {source}; for (grf_key, grf_val) in {source_tmp}.iter() {{ grf_map.insert(grf_key.clone(), grf_val.clone()); }}"
+                    ));
+                }
+            }
+        }
+        format!("{{ {body} grf_map }}")
+    }
+
+    fn emit_map_get(
+        &mut self,
+        object: &CheckedExpr,
+        key: &CheckedExpr,
+        type_name: &str,
+        file: &str,
+        line: u32,
+        column: u32,
+    ) -> String {
+        let map_ref = self.emit_map_ref(object);
+        let key = self.emit_expr(key);
+        let site = site_expr(file, line, column);
+        let map_type = rust_string(type_name);
+        format!(
+            "{{ let grf_map = {map_ref}; let grf_key = {key}; graphite_core::map::get(grf_map, &grf_key, {site}, {map_type}) }}"
+        )
+    }
+
+    fn emit_map_insert(
+        &mut self,
+        place: &ArrayPlace,
+        key: &CheckedExpr,
+        value: &CheckedExpr,
+        file: &str,
+        line: u32,
+        column: u32,
+    ) -> String {
+        let (setup, container) = self.emit_container(place);
+        let key = self.emit_expr(key);
+        let value = self.emit_expr(value);
+        let _ = (file, line, column);
+        format!(
+            "{{ {setup} let grf_key = {key}; let grf_val = {value}; graphite_core::map::assign(&mut {container}, grf_key, grf_val.clone()) }}"
+        )
+    }
+
+    fn emit_map_call(
+        &mut self,
+        place: &Option<ArrayPlace>,
+        object: &Option<Box<CheckedExpr>>,
+        method: MapMethod,
+        args: &[CheckedExpr],
+        key_ty: CanonicalType,
+        value_ty: CanonicalType,
+        type_name: &str,
+        file: &str,
+        line: u32,
+        column: u32,
+    ) -> String {
+        let site = site_expr(file, line, column);
+        let map_type = rust_string(type_name);
+        let (setup, container, borrowed) = if let Some(place) = place {
+            let (setup, container) = self.emit_container(place);
+            (setup, container, false)
+        } else if let Some(object) = object {
+            let map_ref = self.emit_map_ref(object);
+            (String::new(), map_ref, true)
+        } else {
+            (
+                String::new(),
+                "&std::collections::HashMap::new()".to_string(),
+                true,
+            )
+        };
+        let arg = |index: usize, this: &mut Self| {
+            args.get(index)
+                .map(|arg| this.emit_expr(arg))
+                .unwrap_or_else(|| "Default::default()".to_string())
+        };
+        let map_expr = if borrowed {
+            format!("({container})")
+        } else {
+            format!("(&{container})")
+        };
+        let map_mut = if borrowed {
+            format!("&mut ({container}).clone()")
+        } else {
+            format!("&mut {container}")
+        };
+        let key_name = self.ty_name(key_ty);
+        let value_name = self.ty_name(value_ty);
+        let call = match method {
+            MapMethod::Get => {
+                let key = arg(0, self);
+                format!(
+                    "{{ let grf_map = {map_expr}; let grf_key = {key}; graphite_core::map::get(grf_map, &grf_key, {site}, {map_type}) }}"
+                )
+            }
+            MapMethod::GetOrDefault => {
+                let key = arg(0, self);
+                let default = arg(1, self);
+                format!(
+                    "{{ let grf_map = {map_expr}; let grf_key = {key}; let grf_default = {default}; graphite_core::map::get_or_default(grf_map, &grf_key, grf_default) }}"
+                )
+            }
+            MapMethod::ContainsKey => {
+                let key = arg(0, self);
+                format!(
+                    "{{ let grf_map = {map_expr}; let grf_key = {key}; graphite_core::map::contains(grf_map, &grf_key) }}"
+                )
+            }
+            MapMethod::Set => {
+                let key = arg(0, self);
+                let value = arg(1, self);
+                format!(
+                    "{{ {setup} let grf_key = {key}; let grf_val = {value}; graphite_core::map::insert({map_mut}, grf_key, grf_val); }}"
+                )
+            }
+            MapMethod::Remove => {
+                let key = arg(0, self);
+                format!(
+                    "{{ {setup} let grf_key = {key}; graphite_core::map::remove({map_mut}, &grf_key) }}"
+                )
+            }
+            MapMethod::Length => format!("({map_expr}.len() as u64)"),
+            MapMethod::Keys => format!(
+                "{{ let grf_map = {map_expr}; let mut grf_out: Vec<{key_name}> = Vec::new(); for grf_key in grf_map.keys() {{ grf_out.push(grf_key.clone()); }} grf_out }}"
+            ),
+            MapMethod::Values => format!(
+                "{{ let grf_map = {map_expr}; let mut grf_out: Vec<{value_name}> = Vec::new(); for grf_val in grf_map.values() {{ grf_out.push(grf_val.clone()); }} grf_out }}"
+            ),
+            MapMethod::Entries => format!(
+                "{{ let grf_map = {map_expr}; let mut grf_out: Vec<({key_name}, {value_name})> = Vec::new(); for (grf_key, grf_val) in grf_map.iter() {{ grf_out.push((grf_key.clone(), grf_val.clone())); }} grf_out }}"
+            ),
+        };
+        if method == MapMethod::Set || method == MapMethod::Remove {
+            return call;
+        }
+        if setup.is_empty() {
+            call
+        } else {
+            format!("{{ {setup} {call} }}")
+        }
+    }
+
+    fn map_to_str(&mut self, ty: CanonicalType, inner: &str) -> String {
+        let CanonicalType::Map(id) = ty else {
+            return "String::new()".to_string();
+        };
+        let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
+            key: CanonicalType::Void,
+            value: CanonicalType::Void,
+        });
+        let binding = self.fresh_tmp();
+        let output = self.fresh_tmp();
+        let first = self.fresh_tmp();
+        let key_text = self.display_value(shape.key, "grf_key", true);
+        let value_text = self.display_value(shape.value, "grf_val", true);
+        format!(
+            "{{ let {binding} = &({inner}); let mut {output} = String::from(\"{{\"); let mut {first} = true; for (grf_key, grf_val) in {binding}.iter() {{ if {first} {{ {output}.push(' '); }} else {{ {output}.push_str(\", \"); }} {first} = false; {output}.push_str(&({key_text})); {output}.push_str(\": \"); {output}.push_str(&({value_text})); }} if !{first} {{ {output}.push(' '); }} {output}.push('}}'); {output} }}"
+        )
     }
 
     fn emit_bound(&mut self, bound: &Option<Box<CheckedExpr>>) -> String {
@@ -725,6 +1022,31 @@ impl Emitter {
     fn emit_container(&mut self, place: &ArrayPlace) -> (String, String) {
         match place {
             ArrayPlace::Var(name) => (String::new(), rust_ident(name)),
+            ArrayPlace::Field { object, field, .. } => {
+                let (setup, parent) = self.emit_container(object);
+                (setup, format!("{parent}.{}", rust_ident(field)))
+            }
+            ArrayPlace::MapIndex {
+                object,
+                key,
+                type_name,
+                file,
+                line,
+                column,
+                ..
+            } => {
+                let (setup, parent) = self.emit_container(object);
+                let key_expr = self.emit_expr(key);
+                let tmp = self.fresh_tmp();
+                let site = site_expr(file, *line, *column);
+                let map_type = rust_string(type_name);
+                (
+                    format!("{setup} let {tmp} = {key_expr};"),
+                    format!(
+                        "(*graphite_core::map::get_mut(&mut {parent}, &{tmp}, {site}, {map_type}))"
+                    ),
+                )
+            }
             ArrayPlace::Index {
                 object,
                 index,
@@ -899,6 +1221,180 @@ impl Emitter {
         self.out.push('\n');
     }
 
+    fn emit_record(&mut self, record: &CheckedRecord) {
+        self.line("#[derive(Clone)]");
+        self.line(&format!("struct {} {{", record_struct(&record.name)));
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            self.line(&format!("{}: {},", rust_ident(name), self.ty_name(*ty)));
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_record_literal(&mut self, id: RecordId, fields: &[(usize, CheckedExpr)]) -> String {
+        let record = self
+            .records
+            .get(id.0 as usize)
+            .expect("record id is resolved before code generation");
+        let mut temps = vec![String::new(); record.fields.len()];
+        let mut setup = String::new();
+        for (field_index, value) in fields {
+            let temp = self.fresh_tmp();
+            let value = self.emit_expr(value);
+            setup.push_str(&format!("let {temp} = {value}; "));
+            if let Some(slot) = temps.get_mut(*field_index) {
+                *slot = temp;
+            }
+        }
+        let inits = record
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| {
+                format!(
+                    "{}: {}",
+                    rust_ident(name),
+                    temps
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("Default::default()")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{{ {setup}{} {{ {inits} }} }}", record_struct(&record.name))
+    }
+
+    fn array_to_str(&mut self, ty: CanonicalType, inner: &str) -> String {
+        let Some(element) = ty.element() else {
+            return "String::new()".to_string();
+        };
+        let body = self.display_value(element, "grf_item", true);
+        format!("graphite_core::convert::array_text(&({inner}), |grf_item| {{ {body} }})")
+    }
+
+    fn record_to_str(&mut self, ty: CanonicalType, inner: &str) -> String {
+        let CanonicalType::Record(id) = ty else {
+            return "String::new()".to_string();
+        };
+        let fields = self
+            .records
+            .get(id.0 as usize)
+            .map(|record| record.fields.clone())
+            .unwrap_or_default();
+        let binding = self.fresh_tmp();
+        let output = self.fresh_tmp();
+        let mut body =
+            format!("let {binding} = &({inner}); let mut {output} = String::from(\"{{ \");");
+        for (index, (name, field_ty)) in fields.iter().enumerate() {
+            if index > 0 {
+                body.push_str(&format!("{output}.push_str(\", \");"));
+            }
+            body.push_str(&format!(
+                "{output}.push_str({});",
+                rust_string(&format!("{name}: "))
+            ));
+            let access = format!("{binding}.{}", rust_ident(name));
+            let text = self.display_value(*field_ty, &access, false);
+            body.push_str(&format!("{output}.push_str(&({text}));"));
+        }
+        body.push_str(&format!("{output}.push_str(\" }}\"); {output}"));
+        format!("{{ {body} }}")
+    }
+
+    fn display_value(&mut self, ty: CanonicalType, expr: &str, referenced: bool) -> String {
+        if ty.is_array() {
+            return self.array_to_str(ty, expr);
+        }
+        if ty.is_record() {
+            return self.record_to_str(ty, expr);
+        }
+        if ty.is_map() {
+            return self.map_to_str(ty, expr);
+        }
+        let value = if referenced {
+            format!("*{expr}")
+        } else {
+            expr.to_string()
+        };
+        let text = if referenced {
+            expr.to_string()
+        } else {
+            format!("&({expr})")
+        };
+        match ty {
+            CanonicalType::Int16 | CanonicalType::Int32 | CanonicalType::Int64 => {
+                format!("graphite_core::convert::signed_text(i128::from({value}))")
+            }
+            CanonicalType::UInt16 | CanonicalType::UInt32 | CanonicalType::UInt64 => {
+                format!("graphite_core::convert::unsigned_text(u128::from({value}))")
+            }
+            CanonicalType::Flt32 => format!("graphite_core::convert::f32_text({value})"),
+            CanonicalType::Flt64 => format!("graphite_core::convert::f64_text({value})"),
+            CanonicalType::Bln => format!("graphite_core::convert::bln_text({value})"),
+            CanonicalType::Chr => {
+                format!(
+                    "graphite_core::convert::quoted_str(&graphite_core::convert::char_to_str({value}))"
+                )
+            }
+            CanonicalType::Str => format!("graphite_core::convert::quoted_str({text})"),
+            _ => "String::new()".to_string(),
+        }
+    }
+
+    fn field_name(&self, id: RecordId, field: usize) -> String {
+        self.records
+            .get(id.0 as usize)
+            .and_then(|record| record.fields.get(field))
+            .map(|(name, _)| rust_ident(name))
+            .unwrap_or_else(|| "missing".to_string())
+    }
+
+    fn ty_name(&self, ty: CanonicalType) -> String {
+        match ty {
+            CanonicalType::Record(id) => self
+                .records
+                .get(id.0 as usize)
+                .map(|record| record_struct(&record.name))
+                .unwrap_or_else(|| "GrfUnknown".to_string()),
+            CanonicalType::Map(id) => {
+                let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
+                    key: CanonicalType::Void,
+                    value: CanonicalType::Void,
+                });
+                format!(
+                    "std::collections::HashMap<{}, {}>",
+                    self.ty_name(shape.key),
+                    self.ty_name(shape.value)
+                )
+            }
+            CanonicalType::Array {
+                leaf: Leaf::Map(id),
+                depth,
+                ..
+            } => {
+                let mut name = self.ty_name(CanonicalType::Map(id));
+                for _ in 0..depth {
+                    name = format!("Vec<{name}>");
+                }
+                name
+            }
+            CanonicalType::Array {
+                leaf: Leaf::Record(id),
+                depth,
+                ..
+            } => {
+                let mut name = self.ty_name(CanonicalType::Record(id));
+                for _ in 0..depth {
+                    name = format!("Vec<{name}>");
+                }
+                name
+            }
+            other => other.rust_name(),
+        }
+    }
+
     fn fresh_label(&mut self) -> String {
         let id = self.loop_ids;
         self.loop_ids += 1;
@@ -910,6 +1406,43 @@ impl Emitter {
         self.tmps += 1;
         format!("grf_tmp_{id}")
     }
+}
+
+fn record_struct(name: &str) -> String {
+    format!("Grf{name}")
+}
+
+fn record_order(records: &[CheckedRecord]) -> Vec<usize> {
+    fn dependencies(ty: CanonicalType, found: &mut Vec<usize>) {
+        match ty {
+            CanonicalType::Record(id) => found.push(id.0 as usize),
+            CanonicalType::Array {
+                leaf: Leaf::Record(id),
+                ..
+            } => found.push(id.0 as usize),
+            _ => {}
+        }
+    }
+    fn visit(index: usize, records: &[CheckedRecord], seen: &mut [bool], order: &mut Vec<usize>) {
+        if index >= records.len() || seen[index] {
+            return;
+        }
+        seen[index] = true;
+        for (_, ty) in &records[index].fields {
+            let mut deps = Vec::new();
+            dependencies(*ty, &mut deps);
+            for dep in deps {
+                visit(dep, records, seen, order);
+            }
+        }
+        order.push(index);
+    }
+    let mut seen = vec![false; records.len()];
+    let mut order = Vec::new();
+    for index in 0..records.len() {
+        visit(index, records, &mut seen, &mut order);
+    }
+    order
 }
 
 fn int_suffix(ty: CanonicalType) -> &'static str {
@@ -979,7 +1512,7 @@ fn emit_conv(
             _ => "String::new()".to_string(),
         },
         ConvOp::CharToStr => format!("graphite_core::convert::char_to_str({inner})"),
-        ConvOp::ArrayToStr => array_to_str(from, inner),
+        ConvOp::ArrayToStr | ConvOp::RecordToStr | ConvOp::MapToStr => String::new(),
         ConvOp::StrToSigned => format!(
             "(graphite_core::convert::str_to_signed(&({inner}), {signed_min}, {signed_max}, {to_name}, {site}) as {rust})"
         ),
@@ -1080,38 +1613,6 @@ fn emit_conv(
         ),
         ConvOp::CharToF64 => format!("graphite_core::convert::char_to_f64({inner})"),
         ConvOp::CharToF32 => format!("graphite_core::convert::char_to_f32({inner}, {site})"),
-    }
-}
-
-fn array_to_str(ty: CanonicalType, inner: &str) -> String {
-    let Some(element) = ty.element() else {
-        return "String::new()".to_string();
-    };
-    let body = element_to_str(element, "grf_item");
-    format!("graphite_core::convert::array_text(&({inner}), |grf_item| {{ {body} }})")
-}
-
-fn element_to_str(ty: CanonicalType, name: &str) -> String {
-    if ty.is_array() {
-        return array_to_str(ty, name);
-    }
-    match ty {
-        CanonicalType::Int16 | CanonicalType::Int32 | CanonicalType::Int64 => {
-            format!("graphite_core::convert::signed_text(i128::from(*{name}))")
-        }
-        CanonicalType::UInt16 | CanonicalType::UInt32 | CanonicalType::UInt64 => {
-            format!("graphite_core::convert::unsigned_text(u128::from(*{name}))")
-        }
-        CanonicalType::Flt32 => format!("graphite_core::convert::f32_text(*{name})"),
-        CanonicalType::Flt64 => format!("graphite_core::convert::f64_text(*{name})"),
-        CanonicalType::Bln => format!("graphite_core::convert::bln_text(*{name})"),
-        CanonicalType::Chr => {
-            format!(
-                "graphite_core::convert::quoted_str(&graphite_core::convert::char_to_str(*{name}))"
-            )
-        }
-        CanonicalType::Str => format!("graphite_core::convert::quoted_str({name})"),
-        _ => "String::new()".to_string(),
     }
 }
 

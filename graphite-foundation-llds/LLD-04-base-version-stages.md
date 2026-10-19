@@ -34,7 +34,7 @@ This is a regression baseline. Negative cases, boundary cases, and all semantic 
 
 Implement source reading, tokenization, token kinds, source positions, whitespace, comments, literals, identifiers, keywords, operators, punctuation, and lexical diagnostics.
 
-The v0.1 keyword inventory includes `auto` and excludes `class`, `private`, `this`, `public`, `new`, and `constructor`. `PlusPlus` and `MinusMinus` are recognized. Syntax punctuation required by approved features must be deliberately specified and implemented rather than rejected by an outdated token inventory. In particular, `:` is required in record/map literals and array slice expressions, and `...` is required for map spread; the parser must accept these only in their specified grammar contexts.
+The v0.1 keyword inventory includes `auto` and excludes `class`, `private`, `this`, `public`, `new`, and `constructor`. Stage 7 reserves `type` for named record declarations. Stage 8 reserves `map` for the built-in map type. `PlusPlus` and `MinusMinus` are recognized. Syntax punctuation required by approved features must be deliberately specified and implemented rather than rejected by an outdated token inventory. In particular, `:` is required in record/map literals and array slice expressions, and `...` is required for map spread; the parser must accept these only in their specified grammar contexts.
 
 **Outcome:** Reliable tokens, source spans, and lexical errors, with tests for `import grf.io;` and `io.println(...)`.
 
@@ -247,6 +247,10 @@ Requirements:
 - Do not provide positional slicing for maps. Use explicit key lookup, `keys()`/`values()`/`entries()`, and future filtering APIs instead. Lambda-based filtering is deferred.
 - Enforce `const` on every mutation path, including index assignment, `set`, `remove`, and any future mutating map methods. Read-only operations, including `getOrDefault`, remain permitted.
 - Define key equality/hash requirements and support custom record values only where ownership and type rules permit them.
+- Reserve `map` as a keyword. Brace literals are record literals when the expected type is a named record and map literals when it is `map<K, V>`. `...` is valid only in a map literal.
+- Print maps through `io.println`, `str(...)`, and interpolation. Display order is unspecified. Use the standard randomized map hasher; do not promise stable iteration.
+- Reject `==` and `!=` for maps. Do not include the missing key's text in the runtime diagnostic.
+- Evaluate the `getOrDefault` default expression once on every call, including when the key is already present.
 
 Do not use `any` or equivalent untyped escape hatches.
 

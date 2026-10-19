@@ -45,6 +45,8 @@ pub enum TokenKind {
     KwBreak,
     KwContinue,
     KwReturn,
+    KwType,
+    KwMap,
     KwTrue,
     KwFalse,
 
@@ -56,6 +58,7 @@ pub enum TokenKind {
     RightBracket,
     Comma,
     Dot,
+    DotDotDot,
     Colon,
     Semicolon,
 
@@ -132,6 +135,8 @@ pub fn keyword(ident: &str) -> Option<TokenKind> {
         "break" => TokenKind::KwBreak,
         "continue" => TokenKind::KwContinue,
         "return" => TokenKind::KwReturn,
+        "type" => TokenKind::KwType,
+        "map" => TokenKind::KwMap,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,
         _ => return None,

@@ -768,3 +768,418 @@ fn codegen_uses_the_manifest_rust_path() {
     assert!(rust.contains(path), "{rust}");
     assert!(!rust.contains("graphite_core::io::println"));
 }
+
+#[test]
+fn records_keep_nominal_identity() {
+    let source = "\
+import grf.io;
+
+type Address {
+    city: str,
+    country: str,
+}
+
+type Profile {
+    name: str,
+    age: int,
+    scores: int[],
+    address: Address,
+}
+
+type Customer {
+    name: str,
+    age: int,
+}
+
+Profile make() {
+    return {
+        name: \"Ada\",
+        age: 36,
+        scores: [10, 20],
+        address: { city: \"London\", country: \"UK\" },
+    };
+}
+
+void take(Profile value) {
+    io.println(value.name);
+}
+
+void main() {
+    Profile first = make();
+    const Profile fixed = first;
+    Profile copy = fixed;
+    copy.age = 37;
+    copy.scores[0] = 99;
+    copy.address.city = \"Paris\";
+    Profile[] people = [first];
+    people[0].name = \"Grace\";
+    uint64 count = lengthOf(fixed);
+    uint64 nested = lengthOf(first.address);
+    take(first);
+    io.println(first.name);
+    io.println(first.age);
+    io.println(count);
+    io.println(nested);
+    io.println(copy.age);
+    io.println(people[0].name);
+}
+";
+    let accepted = analyze_source(source);
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let rust = generate(accepted.program.as_ref().unwrap());
+    assert!(rust.contains("struct GrfProfile"), "{rust}");
+    assert!(rust.contains("struct GrfAddress"), "{rust}");
+    assert!(rust.contains("4u64"), "{rust}");
+    assert!(!rust.contains("derive(PartialEq)"), "{rust}");
+
+    let mismatch = messages(
+        "\
+type User { name: str, age: int, }
+type Customer { name: str, age: int, }
+void main() {
+    User user = { name: \"Ada\", age: 36 };
+    Customer customer = user;
+}
+",
+    );
+    assert!(mismatch.contains("type mismatch"), "{mismatch}");
+    assert!(mismatch.contains("User"), "{mismatch}");
+    assert!(mismatch.contains("Customer"), "{mismatch}");
+
+    let converted = messages(
+        "\
+type User { name: str, age: int, }
+type Customer { name: str, age: int, }
+void main() {
+    Customer customer = { name: \"Ada\", age: 36 };
+    auto User user = customer;
+}
+",
+    );
+    assert!(
+        converted.contains("cannot convert 'Customer' to 'User'"),
+        "{converted}"
+    );
+
+    let call = messages(
+        "\
+type User { name: str, age: int, }
+void main() {
+    User user = User({ name: \"Ada\", age: 36 });
+}
+",
+    );
+    assert!(call.contains("unknown function 'User'"), "{call}");
+
+    let fields = messages(
+        "\
+type User { name: str, age: int, }
+void main() {
+    User missing = { name: \"Ada\" };
+    User unknown = { name: \"Ada\", age: 36, active: true };
+    User duplicate = { name: \"Ada\", name: \"Grace\", age: 36 };
+    User wrong = { name: 123, age: \"21\" };
+}
+",
+    );
+    assert!(fields.contains("missing field 'age'"), "{fields}");
+    assert!(fields.contains("unknown field 'active'"), "{fields}");
+    assert!(fields.contains("duplicate field 'name'"), "{fields}");
+    assert!(fields.contains("type mismatch"), "{fields}");
+
+    let declarations = messages(
+        "\
+type User { name: str, age: int, }
+type User { name: str, }
+type Empty { }
+type Node { next: Missing, }
+void main() {
+}
+",
+    );
+    assert!(
+        declarations.contains("already declared at line"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("at least one field"),
+        "{declarations}"
+    );
+    assert!(
+        declarations.contains("unknown type 'Missing'"),
+        "{declarations}"
+    );
+
+    let void_field = messages("type User {\n    value: void,\n}\n\nvoid main() {\n}\n");
+    assert!(
+        void_field.contains("void is not a valid field type"),
+        "{void_field}"
+    );
+
+    let direct = messages("type Node {\n    next: Node,\n}\n\nvoid main() {\n}\n");
+    assert!(
+        direct.contains("record type cycle: Node -> Node"),
+        "{direct}"
+    );
+    let indirect =
+        messages("type A {\n    child: B,\n}\n\ntype B {\n    parent: A,\n}\n\nvoid main() {\n}\n");
+    assert!(indirect.contains("record type cycle:"), "{indirect}");
+    let through_array = messages(
+        "type A {\n    items: B[],\n}\n\ntype B {\n    parent: A,\n}\n\nvoid main() {\n}\n",
+    );
+    assert!(
+        through_array.contains("record type cycle:"),
+        "{through_array}"
+    );
+
+    let writes = messages(
+        "\
+type User { name: str, age: int, scores: int[], }
+User make() {
+    return { name: \"Ada\", age: 36, scores: [1] };
+}
+void main() {
+    const User fixed = make();
+    fixed.age = 37;
+    fixed.scores[0] = 2;
+    make().age = 37;
+}
+",
+    );
+    assert!(
+        writes.contains("cannot assign to constant 'fixed'"),
+        "{writes}"
+    );
+    assert!(
+        writes.contains("a field assignment requires a mutable variable"),
+        "{writes}"
+    );
+
+    let equality = messages(
+        "\
+type User { name: str, age: int, }
+void main() {
+    User left = { name: \"Ada\", age: 36 };
+    User right = left;
+    bln same = left == right;
+    bln different = left != right;
+}
+",
+    );
+    assert!(
+        equality.contains("cannot compare record values"),
+        "{equality}"
+    );
+
+    let printing = analyze_source(
+        "\
+import grf.io;
+type User { name: str, age: int, }
+void main() {
+    User user = { name: \"Ada\", age: 36 };
+    io.println(user);
+    io.println(f\"{user}\");
+    str text = str(user);
+    io.println(text);
+}
+",
+    );
+    assert!(
+        printing.diagnostics.is_empty(),
+        "{:?}",
+        printing.diagnostics
+    );
+    let rust = generate(printing.program.as_ref().unwrap());
+    assert!(rust.contains("name: "), "{rust}");
+    assert!(rust.contains("age: "), "{rust}");
+
+    let not_numeric = messages(
+        "\
+type User { name: str, age: int, }
+void main() {
+    User user = { name: \"Ada\", age: 36 };
+    auto int value = user;
+}
+",
+    );
+    assert!(
+        not_numeric.contains("cannot convert 'User' to 'int64'"),
+        "{not_numeric}"
+    );
+}
+
+#[test]
+fn maps_keep_static_key_and_value_types() {
+    let program = analyze_source(
+        "\
+import grf.io;
+type User { name: str, age: int, }
+map<str, int> supply() { return {}; }
+void main() {
+    map<str, int> scores = { \"Ada\": 10, \"Linus\": 20, };
+    map<int64, str> same = {};
+    map<int, str> aliased = same;
+    map<str, map<str, int>> nested = { \"group\": { \"count\": 1 } };
+    map<str, int[3]> histories = { \"Ada\": [1, 2, 3] };
+    map<str, User> users = { \"Ada\": { name: \"Ada\", age: 20 } };
+    scores[\"Ada\"] = 11;
+    users[\"Ada\"].age = 22;
+    histories[\"Ada\"][0] = 9;
+    nested[\"group\"][\"count\"] = 3;
+    int kept = scores.getOrDefault(\"Ada\", 0);
+    str[] names = scores.keys();
+    int total = 0;
+    loop (str key, int value = scores.entries()) {
+        total = total + value;
+    }
+    io.println(scores);
+    io.println(str(scores));
+    io.println(f\"{scores}\");
+    io.println(lengthOf(scores));
+    io.println(kept);
+    io.println(lengthOf(names));
+    io.println(total);
+    io.println(aliased);
+}
+",
+    );
+    assert!(program.diagnostics.is_empty(), "{:?}", program.diagnostics);
+    let rust = generate(program.program.as_ref().unwrap());
+    assert!(rust.contains("std::collections::HashMap"), "{rust}");
+    assert!(!rust.contains("BuildHasher"), "{rust}");
+
+    let rejected = [
+        (
+            "void main() { map<void, int> bad = {}; }\n",
+            "'void' cannot be a map key",
+        ),
+        (
+            "void main() { map<str, void> bad = {}; }\n",
+            "void is not a valid map value type",
+        ),
+        (
+            "void main() { map<flt, int> bad = {}; }\n",
+            "'flt64' cannot be a map key",
+        ),
+        (
+            "void main() { map<int[], str> bad = {}; }\n",
+            "'int64[]' cannot be a map key",
+        ),
+        (
+            "void main() { map<map<str, int>, str> bad = {}; }\n",
+            "'map<str, int64>' cannot be a map key",
+        ),
+        (
+            "type User { name: str, } void main() { map<User, int> bad = {}; }\n",
+            "'User' cannot be a map key",
+        ),
+        (
+            "void main() { map<str, int> scores = { \"Ada\": 1, \"Bob\": true }; }\n",
+            "type mismatch: expected 'int64', found 'bln'",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; int value = scores[1]; }\n",
+            "type mismatch: expected 'str', found 'int64'",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; scores[\"Ada\"] = true; }\n",
+            "type mismatch: expected 'int64', found 'bln'",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; int value = scores.getOrDefault(\"Ada\", \"no\"); }\n",
+            "type mismatch: expected 'int64', found 'str'",
+        ),
+        (
+            "void main() { map<int, int> source = {}; map<str, int> scores = { ...source }; }\n",
+            "type mismatch: expected 'map<str, int64>', found 'map<int64, int64>'",
+        ),
+        (
+            "void main() { const map<str, int> scores = {}; scores[\"Ada\"] = 1; }\n",
+            "cannot assign to constant 'scores'",
+        ),
+        (
+            "void main() { const map<str, int> scores = {}; scores.set(\"Ada\", 1); }\n",
+            "cannot assign to constant 'scores'",
+        ),
+        (
+            "void main() { const map<str, int> scores = {}; bln removed = scores.remove(\"Ada\"); }\n",
+            "cannot assign to constant 'scores'",
+        ),
+        (
+            "type User { age: int, } void main() { const map<str, User> users = { \"Ada\": { age: 1 } }; users[\"Ada\"].age = 2; }\n",
+            "cannot assign to constant 'users'",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; map<str, int> slice = scores[0:1]; }\n",
+            "maps do not support slicing",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; loop (str key = scores.entries()) {} }\n",
+            "this loop expects 2 bindings, found 1",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; loop (int key, str value = scores.entries()) {} }\n",
+            "type mismatch: expected 'str', found 'int64'",
+        ),
+        (
+            "map<str, int> make() { return {}; } void main() { make()[\"Ada\"] = 1; }\n",
+            "a map assignment requires a mutable variable",
+        ),
+        (
+            "map<str, int> make() { return {}; } void main() { make().set(\"Ada\", 1); }\n",
+            "map method 'set' requires a mutable variable",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; scores.foo(); }\n",
+            "map has no method 'foo'",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; int value = scores.get(); }\n",
+            "method 'get' expects 1 argument, found 0",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; bln same = scores == scores; }\n",
+            "operator '==' cannot compare map values",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; bln different = scores != scores; }\n",
+            "operator '!=' cannot compare map values",
+        ),
+        (
+            "void main() { map<str, int> scores = {}; scores.entries(); }\n",
+            "entries() can only be used as a loop source",
+        ),
+        (
+            "type User { name: str, } void main() { User user = { ...user }; }\n",
+            "spread is only allowed in a map literal",
+        ),
+        (
+            "void main() { map<str, int> scores = { \"Ada\": 1 }; }\n",
+            "",
+        ),
+        (
+            "void main() { int value = { \"Ada\": 1 }; }\n",
+            "a brace literal needs an expected record or map type",
+        ),
+    ];
+    for (source, snippet) in rejected {
+        if snippet.is_empty() {
+            let analysis = analyze_source(source);
+            assert!(
+                analysis.diagnostics.is_empty(),
+                "{source}\n{:?}",
+                analysis.diagnostics
+            );
+            continue;
+        }
+        let text = messages(source);
+        assert!(
+            text.contains(snippet),
+            "{source}\nexpected {snippet}\n{text}"
+        );
+    }
+}

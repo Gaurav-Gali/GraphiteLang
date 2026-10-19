@@ -810,6 +810,132 @@ void main() {
     }
 
     #[test]
+    fn records_copy_and_keep_their_field_count() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-records-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type Address {
+    city: str,
+    country: str,
+}
+
+type Profile {
+    name: str,
+    age: int,
+    scores: int[],
+    address: Address,
+}
+
+int next(int label) {
+    io.println(label);
+    return label;
+}
+
+type Pair {
+    left: int,
+    right: int,
+}
+
+Profile make() {
+    return {
+        name: "Ada",
+        age: 36,
+        scores: [10, 20],
+        address: { city: "London", country: "UK" },
+    };
+}
+
+void main() {
+    Profile first = make();
+    io.println(first.name);
+    io.println(first.age);
+    io.println(lengthOf(first));
+    const Profile fixed = first;
+    io.println(lengthOf(fixed));
+    Profile copy = fixed;
+    copy.age = 37;
+    copy.scores[0] = 99;
+    copy.address.city = "Paris";
+    io.println(first.age);
+    io.println(first.scores[0]);
+    io.println(first.address.city);
+    io.println(copy.age);
+    io.println(copy.scores[0]);
+    io.println(copy.address.city);
+    Profile[] people = [first];
+    people[0].name = "Grace";
+    io.println(people[0].name);
+    io.println(first.name);
+    Pair value = { right: next(1), left: next(2) };
+    io.println(value.left);
+    io.println(value.right);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "Ada\n36\n4\n4\n36\n10\nLondon\n37\n99\nParis\nGrace\nAda\n1\n2\n2\n1\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn records_print() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-record-print-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type Address {
+    city: str,
+    country: str,
+}
+
+type User {
+    name: str,
+    age: int,
+    scores: int[],
+    address: Address,
+}
+
+void main() {
+    User user = {
+        name: "Krishnaa",
+        age: 20,
+        scores: [1, 2],
+        address: { city: "Pune", country: "IN" },
+    };
+    io.println(user);
+    io.println(str(user));
+    io.println(f"{user}");
+    User[] users = [user];
+    io.println(users);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let line = "{ name: \"Krishnaa\", age: 20, scores: [1, 2], address: { city: \"Pune\", country: \"IN\" } }\n";
+        assert_eq!(
+            output.stdout,
+            format!("{line}{line}{line}[{}]\n", line.trim_end())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn conversions_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-convert-{}", std::process::id()));
@@ -1099,6 +1225,253 @@ void main() {
             output.stderr
         );
         assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn maps_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-maps-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type User {
+    name: str,
+    age: int,
+}
+
+int next(int label) {
+    io.println(label);
+    return label;
+}
+
+int compute() {
+    io.println("default");
+    return 99;
+}
+
+void main() {
+    map<int, int> built = {
+        next(1): next(2),
+        next(3): next(4),
+    };
+    io.println(built.get(1));
+    io.println(built.get(3));
+
+    map<str, int> scores = {
+        "Ada": 10,
+        "Linus": 20,
+    };
+    io.println(scores);
+    io.println(str(scores));
+    io.println(f"Scores: {scores}");
+
+    scores["Grace"] = 30;
+    scores["Ada"] = 11;
+    io.println(scores.get("Ada"));
+    io.println(scores["Grace"]);
+    io.println(scores.containsKey("Ada"));
+    scores.set("Bob", 7);
+    scores.set("Bob", 8);
+    io.println(scores.get("Bob"));
+    io.println(scores.remove("Linus"));
+    io.println(scores.remove("missing"));
+    io.println(scores.containsKey("Linus"));
+    io.println(scores.length());
+    io.println(lengthOf(scores));
+
+    int kept = scores.getOrDefault("Ada", compute());
+    int filled = scores.getOrDefault("Nobody", compute());
+    io.println(kept);
+    io.println(filled);
+    io.println(scores.containsKey("Nobody"));
+    io.println(lengthOf(scores));
+
+    map<str, int> zeros = { "Ada": 0 };
+    io.println(zeros.getOrDefault("Ada", 5));
+    io.println(zeros.getOrDefault("Bob", 5));
+    io.println(zeros.containsKey("Bob"));
+
+    str[] names = scores.keys();
+    scores["Zoe"] = 1;
+    io.println(lengthOf(names));
+    int seen = 0;
+    loop (str name = names.iter()) {
+        if (name == "Ada") { seen = seen + 1; }
+        if (name == "Grace") { seen = seen + 1; }
+        if (name == "Bob") { seen = seen + 1; }
+    }
+    io.println(seen);
+    io.println(scores.containsKey("Zoe"));
+
+    int rounds = 0;
+    loop (str key, int value = scores.entries()) {
+        scores.set("Later", 9);
+        rounds = rounds + 1;
+        io.println(lengthOf(key) > 0);
+        io.println(value > 0);
+    }
+    io.println(rounds);
+    io.println(scores.containsKey("Later"));
+
+    map<str, int> extra = { "Lin": 5 };
+    map<str, int> copy = { "Ada": 1, ...extra, "Ada": 9, ...extra };
+    io.println(copy.get("Ada"));
+    io.println(copy.get("Lin"));
+    io.println(extra.containsKey("Ada"));
+    io.println(lengthOf(extra));
+
+    map<str, int> dups = { "Ada": next(5), "Ada": next(6) };
+    io.println(dups.get("Ada"));
+
+    map<str, int> left = { "Ada": 1 };
+    map<str, int> right = left;
+    right["Ada"] = 2;
+    io.println(left.get("Ada"));
+    io.println(right.get("Ada"));
+
+    map<int, str> labels = {};
+    labels[-1] = "tail";
+    io.println(labels[-1]);
+    io.println(labels.containsKey(-1));
+
+    const map<str, int> fixed = { "Ada": 4 };
+    io.println(fixed.get("Ada"));
+    io.println(fixed.containsKey("Ada"));
+    io.println(fixed.length());
+    io.println(lengthOf(fixed));
+    io.println(fixed.getOrDefault("No", 0));
+
+    map<str, User> users = { "Ada": { name: "Ada", age: 20 } };
+    users["Ada"].age = 22;
+    io.println(users["Ada"].age);
+    io.println(users["Ada"].name);
+
+    map<str, int[3]> histories = { "Ada": [1, 2, 3] };
+    histories["Ada"][0] = 9;
+    io.println(histories["Ada"][0]);
+
+    map<str, map<str, int>> nested = { "group": { "count": 1 } };
+    nested["group"]["count"] = 3;
+    io.println(nested["group"]["count"]);
+    io.println(nested);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let lines: Vec<&str> = output.stdout.lines().collect();
+        let prints: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| line.contains("Ada") && line.starts_with('{'))
+            .collect();
+        assert!(
+            prints.len() >= 2,
+            "expected map display lines, got {:?}",
+            output.stdout
+        );
+        for line in &prints {
+            assert!(line.contains("\"Ada\""), "{line}");
+            assert!(line.contains(": "), "{line}");
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\"Ada\": 10") || line.contains("\"Linus\": 20")),
+            "{:?}",
+            output.stdout
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("Scores: {")),
+            "{:?}",
+            output.stdout
+        );
+        assert!(lines.contains(&"default"), "{:?}", output.stdout);
+        let default_at = lines.iter().position(|line| *line == "default").unwrap();
+        assert_eq!(lines.get(default_at + 2), Some(&"11"));
+        assert!(lines.contains(&"99"));
+        assert!(lines.contains(&"tail"));
+        assert!(lines.contains(&"22"));
+        assert_eq!(lines.first(), Some(&"1"));
+        assert_eq!(lines.get(1), Some(&"2"));
+        assert_eq!(lines.get(2), Some(&"3"));
+        assert_eq!(lines.get(3), Some(&"4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn maps_missing_keys_and_default_evaluation_fail() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-map-miss-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("index.grf");
+        fs::write(
+            &index,
+            "import grf.io;\n\nvoid main() {\n    map<str, int> scores = { \"Ada\": 10 };\n    io.println(scores[\"Grace\"]);\n}\n",
+        )
+        .unwrap();
+        let indexed = run_captured(&index);
+        assert_eq!(indexed.status, 1, "{}", indexed.stderr);
+        assert!(
+            indexed
+                .stderr
+                .contains("missing key: lookup on 'map<str, int64>'"),
+            "{}",
+            indexed.stderr
+        );
+        assert!(indexed.stdout.is_empty(), "{:?}", indexed.stdout);
+
+        let get = dir.join("get.grf");
+        fs::write(
+            &get,
+            "import grf.io;\n\nvoid main() {\n    map<str, int> scores = { \"Ada\": 10 };\n    io.println(scores.get(\"Grace\"));\n}\n",
+        )
+        .unwrap();
+        let got = run_captured(&get);
+        assert_eq!(got.status, 1, "{}", got.stderr);
+        assert!(
+            got.stderr
+                .contains("missing key: lookup on 'map<str, int64>'"),
+            "{}",
+            got.stderr
+        );
+
+        let nested = dir.join("nested.grf");
+        fs::write(
+            &nested,
+            "import grf.io;\n\nvoid main() {\n    map<str, map<str, int>> nested = {};\n    nested[\"group\"][\"count\"] = 3;\n    io.println(\"wrote\");\n}\n",
+        )
+        .unwrap();
+        let missed = run_captured(&nested);
+        assert_eq!(missed.status, 1, "{}", missed.stderr);
+        assert!(
+            missed
+                .stderr
+                .contains("missing key: lookup on 'map<str, map<str, int64>>'"),
+            "{}",
+            missed.stderr
+        );
+        assert!(!missed.stdout.contains("wrote"), "{:?}", missed.stdout);
+
+        let boom = dir.join("boom.grf");
+        fs::write(
+            &boom,
+            "import grf.io;\n\nint boom() {\n    int16 bad = int16(\"40000\");\n    return int(bad);\n}\n\nvoid main() {\n    map<str, int> scores = { \"Ada\": 10 };\n    int result = scores.getOrDefault(\"Ada\", boom());\n    io.println(result);\n}\n",
+        )
+        .unwrap();
+        let failed = run_captured(&boom);
+        assert_ne!(failed.status, 0, "{}", failed.stdout);
+        assert!(
+            failed.stderr.contains("cannot convert str to int16"),
+            "{}",
+            failed.stderr
+        );
+        assert!(failed.stdout.is_empty(), "{:?}", failed.stdout);
         let _ = fs::remove_dir_all(&dir);
     }
 }

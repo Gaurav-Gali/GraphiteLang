@@ -7,14 +7,30 @@ pub fn format_ast(program: &Program) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Program");
     let import_count = program.imports.len();
+    let type_count = program.types.len();
     let function_count = program.functions.len();
     for (index, import) in program.imports.iter().enumerate() {
-        let last = index + 1 == import_count && function_count == 0;
+        let last = index + 1 == import_count && type_count == 0 && function_count == 0;
         write_line(
             &mut out,
             "",
             last,
             &format!("Import {}.{}", import.domain.name, import.library.name),
+        );
+    }
+    for (index, declaration) in program.types.iter().enumerate() {
+        let last = index + 1 == type_count && function_count == 0;
+        let fields = declaration
+            .fields
+            .iter()
+            .map(|field| format!("{}: {}", field.name.name, format_type(&field.ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write_line(
+            &mut out,
+            "",
+            last,
+            &format!("Type {} {{ {fields} }}", declaration.name.name),
         );
     }
     for (index, function) in program.functions.iter().enumerate() {
@@ -306,6 +322,29 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
                 }
             }
         }
+        Expr::Record(record) => {
+            write_line(out, prefix, last, "Brace");
+            let child = child_prefix(prefix, last);
+            let count = record.entries.len();
+            if count == 0 {
+                write_line(out, &child, true, "Empty");
+            }
+            for (index, entry) in record.entries.iter().enumerate() {
+                let entry_last = index + 1 == count;
+                match entry {
+                    BraceEntry::Pair { key, value, .. } => {
+                        write_line(out, &child, entry_last, "Entry");
+                        let entry_child = child_prefix(&child, entry_last);
+                        write_expression(out, &entry_child, false, key);
+                        write_expression(out, &entry_child, true, value);
+                    }
+                    BraceEntry::Spread { value, .. } => {
+                        write_line(out, &child, entry_last, "Spread");
+                        write_expression(out, &child_prefix(&child, entry_last), true, value);
+                    }
+                }
+            }
+        }
         Expr::Array(array) => {
             write_line(out, prefix, last, "Array");
             let child = child_prefix(prefix, last);
@@ -371,24 +410,40 @@ fn write_optional_expr(
 }
 
 fn format_type(ty: &TypeSyntax) -> String {
-    let mut name = match ty.kind {
-        TypeKind::Void => "void",
-        TypeKind::Int => "int",
-        TypeKind::UInt => "uint",
-        TypeKind::Flt => "flt",
-        TypeKind::Int16 => "int16",
-        TypeKind::Int32 => "int32",
-        TypeKind::Int64 => "int64",
-        TypeKind::UInt16 => "uint16",
-        TypeKind::UInt32 => "uint32",
-        TypeKind::UInt64 => "uint64",
-        TypeKind::Flt32 => "flt32",
-        TypeKind::Flt64 => "flt64",
-        TypeKind::Bln => "bln",
-        TypeKind::Chr => "chr",
-        TypeKind::Str => "str",
-    }
-    .to_string();
+    let mut name = if ty.kind == TypeKind::Map {
+        let key = ty
+            .arguments
+            .first()
+            .map(format_type)
+            .unwrap_or_else(|| "unknown".to_string());
+        let value = ty
+            .arguments
+            .get(1)
+            .map(format_type)
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("map<{key}, {value}>")
+    } else {
+        match ty.kind {
+            TypeKind::Void => "void",
+            TypeKind::Int => "int",
+            TypeKind::UInt => "uint",
+            TypeKind::Flt => "flt",
+            TypeKind::Int16 => "int16",
+            TypeKind::Int32 => "int32",
+            TypeKind::Int64 => "int64",
+            TypeKind::UInt16 => "uint16",
+            TypeKind::UInt32 => "uint32",
+            TypeKind::UInt64 => "uint64",
+            TypeKind::Flt32 => "flt32",
+            TypeKind::Flt64 => "flt64",
+            TypeKind::Bln => "bln",
+            TypeKind::Chr => "chr",
+            TypeKind::Str => "str",
+            TypeKind::Named => ty.name.as_str(),
+            TypeKind::Map => "map",
+        }
+        .to_string()
+    };
     for bound in &ty.bounds {
         match bound {
             None => name.push_str("[]"),

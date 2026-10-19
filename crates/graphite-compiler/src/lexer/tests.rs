@@ -151,11 +151,11 @@ fn auto_is_a_keyword_and_not_an_identifier_prefix() {
 fn v0_1_keywords_and_unreserved_class_words() {
     let keywords = "\
 auto const void int uint flt int16 int32 int64 uint16 uint32 uint64 \
-flt32 flt64 bln chr str if else loop break continue return import true false";
+flt32 flt64 bln chr str if else loop break continue return type map import true false";
     let result = kinds(keywords);
     assert!(result.iter().all(|kind| *kind != TokenKind::Identifier));
     assert_eq!(result.last(), Some(&TokenKind::Eof));
-    assert_eq!(result.len(), 27);
+    assert_eq!(result.len(), 29);
 
     let ordinary = "class private this public new constructor library";
     assert!(

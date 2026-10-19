@@ -1,0 +1,62 @@
+import grf.io;
+
+type User {
+    name: str,
+    age: int,
+}
+
+int next(int label) {
+    io.println(label);
+    return label;
+}
+
+void main() {
+    map<str, int> scores = {
+        "Ada": 10,
+        "Linus": 20,
+    };
+    scores["Grace"] = 30;
+    scores["Ada"] = 11;
+    io.println(scores);
+    io.println(str(scores));
+    io.println(f"Scores: {scores}");
+    io.println(scores.get("Ada"));
+    io.println(scores.getOrDefault("Nobody", 0));
+    io.println(scores.containsKey("Linus"));
+    io.println(scores.remove("Linus"));
+    io.println(lengthOf(scores));
+
+    map<str, int> extra = { "Lin": 5 };
+    map<str, int> copy = {
+        "Ada": next(1),
+        ...extra,
+        "Ada": next(2),
+    };
+    io.println(copy.get("Ada"));
+    io.println(copy.get("Lin"));
+    io.println(lengthOf(extra));
+
+    map<int, str> labels = {};
+    labels[-1] = "tail";
+    io.println(labels[-1]);
+
+    map<str, User> users = {
+        "Ada": { name: "Ada", age: 20 },
+    };
+    users["Ada"].age = 22;
+    io.println(users["Ada"].name);
+    io.println(users["Ada"].age);
+
+    map<str, map<str, int>> nested = {
+        "group": { "count": 1 },
+    };
+    nested["group"]["count"] = 3;
+    io.println(nested["group"]["count"]);
+
+    int total = 0;
+    loop (str key, int value = scores.entries()) {
+        total = total + value;
+        io.println(lengthOf(key) > 0);
+    }
+    io.println(total);
+}

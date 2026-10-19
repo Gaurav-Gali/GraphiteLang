@@ -1,0 +1,153 @@
+import grf.io;
+
+// Stage 7 named records. Each type has its own identity.
+// Values are copied. Fields stay the types declared on the record.
+
+type Address {
+    city: str,
+    country: str,
+}
+
+type Profile {
+    name: str,
+    age: int,
+    scores: int[],
+    address: Address,
+}
+
+type Reading {
+    ready: bln,
+    mark: chr,
+    ratio: flt,
+    count: uint,
+}
+
+type Tray {
+    slots: int[2],
+}
+
+type Cell {
+    value: int,
+}
+
+type Team {
+    lead: Person,
+}
+
+type Person {
+    name: str,
+}
+
+type Note {
+    text: str,
+}
+
+type Pair {
+    left: int,
+    right: int,
+}
+
+int next(int label) {
+    io.println(label);
+    return label;
+}
+
+Profile make() {
+    return {
+        name: "Ada",
+        age: 36,
+        scores: [10, 20],
+        address: { city: "London", country: "UK" },
+    };
+}
+
+void show(Profile value) {
+    io.println(value.name);
+    io.println(value.age);
+}
+
+void Note(int code) {
+    io.println(code);
+}
+
+void main() {
+    io.println("construct");
+    Profile first = make();
+    show(first);
+    io.println(first.address.city);
+    io.println(first.scores[1]);
+    io.println(lengthOf(first));
+    io.println(lengthOf(first.address));
+
+    io.println("mutate");
+    first.age = 37;
+    first.address.city = "Paris";
+    first.scores[0] = 99;
+    io.println(first.age);
+    io.println(first.address.city);
+    io.println(first.scores[0]);
+
+    io.println("copy");
+    const Profile fixed = first;
+    io.println(fixed.name);
+    io.println(lengthOf(fixed));
+    Profile copy = fixed;
+    copy.age = 40;
+    copy.scores[0] = 7;
+    copy.address.country = "FR";
+    io.println(first.age);
+    io.println(first.scores[0]);
+    io.println(first.address.country);
+    io.println(copy.age);
+    io.println(copy.scores[0]);
+    io.println(copy.address.country);
+
+    io.println("arrays");
+    Profile[] people = [first, copy];
+    people[0].name = "Grace";
+    io.println(people[0].name);
+    io.println(first.name);
+    Profile left, Profile right = people;
+    io.println(left.name);
+    io.println(right.age);
+    loop (Profile person = people.iter()) {
+        io.println(person.name);
+    }
+
+    io.println("nested");
+    Cell[][] board = [[{ value: 1 }], [{ value: 2 }, { value: 3 }]];
+    board[1][0].value = 8;
+    io.println(board[0][0].value);
+    io.println(board[1][0].value);
+    io.println(lengthOf(board[1][1]));
+
+    io.println("fields");
+    Reading reading = {
+        ready: true,
+        mark: chr("A"),
+        ratio: 1.5,
+        count: 4,
+    };
+    io.println(reading.ready);
+    io.println(reading.mark);
+    io.println(reading.ratio);
+    io.println(reading.count);
+    Tray tray = { slots: [4, 5] };
+    io.println(tray.slots[1]);
+    Team team = { lead: { name: "Lin" } };
+    io.println(team.lead.name);
+
+    io.println("order");
+    Pair value = { right: next(1), left: next(2) };
+    io.println(value.left);
+    io.println(value.right);
+
+    io.println("names");
+    Note(7);
+    Note page = { text: "saved" };
+    io.println(page.text);
+
+    io.println("print");
+    io.println(first);
+    io.println(people);
+}

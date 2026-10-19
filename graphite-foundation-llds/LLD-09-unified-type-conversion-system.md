@@ -38,7 +38,9 @@ represents them. It does not introduce dynamic typing, a general-purpose
 ### Non-goals
 
 -   Arrays, maps, named records, `Type`, classes, or user-defined
-    generics.
+    generics as conversion targets. Displaying an array, record, or map
+    through `str`, `io.println`, or interpolation is formatting, not a
+    conversion into or out of that collection.
 -   `any`, implicit dynamic typing, or runtime type discovery.
 -   User-defined conversion operators.
 -   Changes to the syntax or semantics of interpolation.

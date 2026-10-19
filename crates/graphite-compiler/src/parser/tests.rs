@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use crate::diagnostics::DiagnosticKind;
 use crate::lexer::lex;
 use crate::parser::{
-    BinaryOperator, ConversionMode, Expr, LiteralExpr, LoopKind, Stmt, TypeKind, UnaryOperator,
-    UpdatePosition,
+    BinaryOperator, BraceEntry, ConversionMode, Expr, LiteralExpr, LoopKind, Stmt, TypeKind,
+    UnaryOperator, UpdatePosition,
 };
 
 use super::{Program, parse};
@@ -670,5 +670,124 @@ void main() {
             .functions
             .iter()
             .any(|function| function.name.name == "main")
+    );
+}
+
+#[test]
+fn record_declarations_and_literals_parse() {
+    let program = parse_clean(
+        "\
+type User {
+    name: str,
+    scores: int[],
+}
+
+User make() {
+    return { name: \"Ada\", scores: [1, 2], };
+}
+
+void main() {
+    User user = make();
+    user.scores[0] = 3;
+}
+",
+    );
+    assert_eq!(program.types.len(), 1);
+    assert_eq!(program.types[0].name.name, "User");
+    assert_eq!(program.types[0].fields.len(), 2);
+    assert_eq!(program.types[0].fields[1].ty.kind, TypeKind::Int);
+    assert_eq!(program.types[0].fields[1].ty.bounds, vec![None]);
+    let function = function(&program, "make");
+    let Stmt::Return(statement) = &function.body.statements[0] else {
+        panic!("expected return");
+    };
+    assert!(matches!(statement.value.as_ref(), Some(Expr::Record(_))));
+    assert_rejected(
+        "\
+void main() {
+    type User {
+        name: str,
+    }
+}
+",
+        "top level",
+    );
+    assert_rejected(
+        "\
+type User {
+    age: auto int,
+}
+
+void main() {
+}
+",
+        "auto is not allowed",
+    );
+}
+
+#[test]
+fn map_is_a_keyword_and_brace_literals_keep_statement_blocks() {
+    let program = parse_clean(
+        "\
+void main() {
+    {}
+    map<str, int> scores = { \"Ada\": 1, ...other, };
+    map<str, map<int, str>> nested = {};
+}
+",
+    );
+    let function = function(&program, "main");
+    assert!(matches!(function.body.statements[0], Stmt::Block(_)));
+    let Stmt::VariableDecl(scores) = &function.body.statements[1] else {
+        panic!("expected a map declaration");
+    };
+    assert_eq!(scores.ty.kind, TypeKind::Map);
+    assert_eq!(scores.ty.arguments.len(), 2);
+    assert_eq!(scores.ty.arguments[0].kind, TypeKind::Str);
+    assert_eq!(scores.ty.arguments[1].kind, TypeKind::Int);
+    let Expr::Record(literal) = &scores.initializer else {
+        panic!("expected a brace literal");
+    };
+    assert!(matches!(literal.entries[1], BraceEntry::Spread { .. }));
+    let Stmt::VariableDecl(nested) = &function.body.statements[2] else {
+        panic!("expected a nested map declaration");
+    };
+    assert_eq!(nested.ty.arguments[1].kind, TypeKind::Map);
+
+    assert_rejected("void map() {\n}\n", "function name");
+    assert_rejected(
+        "\
+void main() {
+    int map = 1;
+}
+",
+        "variable name",
+    );
+    assert_rejected(
+        "\
+type Box {
+    map: int,
+}
+
+void main() {
+}
+",
+        "field name",
+    );
+    assert_rejected(
+        "\
+void main() {
+    int[] values = [...scores];
+}
+",
+        "spread is only allowed in a map literal",
+    );
+    assert_rejected(
+        "map scores;\n\nvoid main() {\n}\n",
+        "expected '<' after map",
+    );
+    assert_rejected(
+        "map<int> scores;\n\nvoid main() {\n}\n",
+        "map type requires a key type and a value type",
     );
 }

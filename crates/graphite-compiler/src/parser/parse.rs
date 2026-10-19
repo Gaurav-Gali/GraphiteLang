@@ -104,10 +104,15 @@ impl<'a> Parser<'a> {
             }
         }
 
+        let mut types = Vec::new();
         let mut functions = Vec::new();
         while !self.is_at_end() {
             let before = self.index;
-            if self.check(TokenKind::KwConst) {
+            if self.check(TokenKind::KwType) {
+                if let Some(declaration) = self.parse_type_decl() {
+                    types.push(declaration);
+                }
+            } else if self.check(TokenKind::KwConst) {
                 let token = self.bump();
                 self.error(
                     ParserDiagnosticKind::InvalidDeclaration,
@@ -122,7 +127,7 @@ impl<'a> Parser<'a> {
                     "imports must appear before declarations",
                 );
                 let _ = self.parse_import();
-            } else if self.starts_type() {
+            } else if self.starts_function() {
                 if let Some(function) = self.parse_function() {
                     functions.push(function);
                 }
@@ -146,9 +151,73 @@ impl<'a> Parser<'a> {
         let end = self.previous_end().unwrap_or(start);
         Program {
             imports,
+            types,
             functions,
             span: Span { start, end },
         }
+    }
+
+    fn parse_type_decl(&mut self) -> Option<TypeDecl> {
+        let start = self.bump().span.start;
+        let name = self.expect_identifier("expected a record type name")?;
+        if !self.consume(TokenKind::LeftBrace, "expected '{' after record type name") {
+            self.synchronize_top_level();
+            return None;
+        }
+        let mut fields = Vec::new();
+        if !self.check(TokenKind::RightBrace) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::RightBrace) {
+                    break;
+                }
+                let Some(field_name) = self.expect_identifier("expected a field name") else {
+                    break;
+                };
+                if !self.consume(TokenKind::Colon, "expected ':' after field name") {
+                    break;
+                }
+                if self.check(TokenKind::KwAuto) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidTypeSyntax,
+                        self.current().span,
+                        "auto is not allowed as a record field type",
+                    );
+                    self.bump();
+                }
+                let Some(ty) = self.parse_type() else {
+                    break;
+                };
+                let span = Span {
+                    start: field_name.span.start,
+                    end: ty.span.end,
+                };
+                fields.push(FieldDecl {
+                    name: field_name,
+                    ty,
+                    span,
+                });
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightBrace) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected '}' after record fields",
+            );
+            self.current().span.end
+        };
+        Some(TypeDecl {
+            name,
+            fields,
+            span: Span { start, end },
+        })
     }
 
     fn parse_import(&mut self) -> Option<ImportDecl> {
@@ -303,6 +372,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Stmt> {
+        if self.check(TokenKind::KwType) {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "a type declaration must be at the top level",
+            );
+            let _ = self.parse_type_decl();
+            return None;
+        }
         if self.check(TokenKind::LeftBrace) {
             return Some(Stmt::Block(self.parse_block()));
         }
@@ -801,6 +879,15 @@ impl<'a> Parser<'a> {
             self.bump();
             return self.parse_unary();
         }
+        if self.check(TokenKind::DotDotDot) {
+            self.error(
+                ParserDiagnosticKind::InvalidExpression,
+                self.current().span,
+                "spread is only allowed in a map literal",
+            );
+            self.bump();
+            return self.parse_unary();
+        }
         if self.check(TokenKind::Bang) || self.check(TokenKind::Minus) {
             let operator = if self.check(TokenKind::Bang) {
                 UnaryOperator::Not
@@ -963,6 +1050,57 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_record_literal(&mut self) -> Expr {
+        let start = self.bump().span.start;
+        let mut entries = Vec::new();
+        if !self.check(TokenKind::RightBrace) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::RightBrace) {
+                    break;
+                }
+                if self.check(TokenKind::DotDotDot) {
+                    let spread = self.bump();
+                    let value = self.parse_expression();
+                    let span = Span {
+                        start: spread.span.start,
+                        end: value.span().end,
+                    };
+                    entries.push(BraceEntry::Spread { value, span });
+                } else {
+                    let key = self.parse_expression();
+                    if !self.consume(TokenKind::Colon, "expected ':' in a brace literal") {
+                        break;
+                    }
+                    let value = self.parse_expression();
+                    let span = Span {
+                        start: key.span().start,
+                        end: value.span().end,
+                    };
+                    entries.push(BraceEntry::Pair { key, value, span });
+                }
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightBrace) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected '}' after brace literal",
+            );
+            self.current().span.end
+        };
+        Expr::Record(RecordExpr {
+            entries,
+            span: Span { start, end },
+        })
+    }
+
     fn parse_subscript(&mut self, object: Expr) -> Expr {
         let start = object.span().start;
         self.bump();
@@ -1079,6 +1217,7 @@ impl<'a> Parser<'a> {
             TokenKind::InterpolatedStringStart => self.parse_interpolated_string(),
             kind if self.starts_conversion_at(kind) => self.parse_explicit_conversion(),
             TokenKind::LeftBracket => self.parse_array_literal(),
+            TokenKind::LeftBrace => self.parse_record_literal(),
             TokenKind::LeftParen => {
                 let open = self.bump();
                 let expression = self.parse_expression();
@@ -1227,7 +1366,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Option<TypeSyntax> {
-        let Some(kind) = type_kind(self.current().kind) else {
+        let (kind, name, token) = if let Some(kind) = type_kind(self.current().kind) {
+            let token = self.bump();
+            (kind, String::new(), token)
+        } else if self.check(TokenKind::Identifier) {
+            let token = self.bump();
+            (TypeKind::Named, token.lexeme.clone(), token)
+        } else {
             self.error(
                 ParserDiagnosticKind::InvalidTypeSyntax,
                 self.current().span,
@@ -1235,9 +1380,32 @@ impl<'a> Parser<'a> {
             );
             return None;
         };
-        let token = self.bump();
+        let mut arguments = Vec::new();
         let mut bounds = Vec::new();
         let mut end = token.span.end;
+        if kind == TypeKind::Map {
+            if self.consume(TokenKind::Less, "expected '<' after map") {
+                if let Some(key) = self.parse_type() {
+                    arguments.push(key);
+                }
+                let _ = self.consume(
+                    TokenKind::Comma,
+                    "map type requires a key type and a value type",
+                );
+                if let Some(value) = self.parse_type() {
+                    arguments.push(value);
+                }
+                if self.check(TokenKind::Greater) {
+                    end = self.bump().span.end;
+                } else {
+                    self.error(
+                        ParserDiagnosticKind::ExpectedToken,
+                        self.current().span,
+                        "expected '>' after map type arguments",
+                    );
+                }
+            }
+        }
         while self.check(TokenKind::LeftBracket) {
             if bounds.len() == MAX_ARRAY_RANK {
                 self.error(
@@ -1287,7 +1455,9 @@ impl<'a> Parser<'a> {
         }
         Some(TypeSyntax {
             kind,
+            name,
             bounds,
+            arguments,
             span: Span {
                 start: token.span.start,
                 end,
@@ -1348,18 +1518,66 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_type(&self) -> bool {
-        type_kind(self.current().kind).is_some()
+        type_kind(self.current().kind).is_some() || self.check(TokenKind::Identifier)
+    }
+
+    fn starts_function(&self) -> bool {
+        if type_kind(self.current().kind).is_some() {
+            return true;
+        }
+        self.named_type_end()
+            .is_some_and(|index| self.kind_at(index) == TokenKind::LeftParen)
     }
 
     fn starts_declaration(&self) -> bool {
         if self.check(TokenKind::KwConst) || self.check(TokenKind::KwAuto) {
             return true;
         }
-        self.starts_type() && self.peek_kind() != TokenKind::LeftParen
+        if type_kind(self.current().kind).is_some() && self.peek_kind() != TokenKind::LeftParen {
+            return true;
+        }
+        self.looks_like_named_binding()
+    }
+
+    fn looks_like_named_binding(&self) -> bool {
+        self.named_type_end().is_some()
+    }
+
+    fn named_type_end(&self) -> Option<usize> {
+        if self.current().kind != TokenKind::Identifier {
+            return None;
+        }
+        let mut index = self.index + 1;
+        loop {
+            if self.kind_at(index) != TokenKind::LeftBracket {
+                break;
+            }
+            index += 1;
+            if self.kind_at(index) == TokenKind::IntegerLiteral {
+                index += 1;
+            }
+            if self.kind_at(index) != TokenKind::RightBracket {
+                return None;
+            }
+            index += 1;
+        }
+        if self.kind_at(index) != TokenKind::Identifier {
+            return None;
+        }
+        Some(index + 1)
+    }
+
+    fn kind_at(&self, index: usize) -> TokenKind {
+        self.tokens
+            .get(index)
+            .map(|token| token.kind)
+            .unwrap_or(TokenKind::Eof)
     }
 
     fn starts_conversion_at(&self, kind: TokenKind) -> bool {
-        type_kind(kind).is_some() && self.peek_kind() == TokenKind::LeftParen
+        type_kind(kind).is_some()
+            && kind != TokenKind::KwMap
+            && self.peek_kind() == TokenKind::LeftParen
     }
 
     fn can_start_expression(&self) -> bool {
@@ -1375,6 +1593,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::InterpolatedStringStart
                     | TokenKind::LeftParen
                     | TokenKind::LeftBracket
+                    | TokenKind::LeftBrace
                     | TokenKind::Bang
                     | TokenKind::Minus
                     | TokenKind::Plus
@@ -1387,7 +1606,9 @@ impl<'a> Parser<'a> {
         let token = self.bump();
         let target = TypeSyntax {
             kind: type_kind(token.kind).expect("conversion target was checked"),
+            name: String::new(),
             bounds: Vec::new(),
+            arguments: Vec::new(),
             span: token.span,
         };
         self.bump();
@@ -1478,7 +1699,11 @@ impl<'a> Parser<'a> {
     }
 
     fn synchronize_top_level(&mut self) {
-        while !self.is_at_end() && !self.starts_type() && !self.check(TokenKind::KwImport) {
+        while !self.is_at_end()
+            && !self.starts_type()
+            && !self.check(TokenKind::KwImport)
+            && !self.check(TokenKind::KwType)
+        {
             if self.check(TokenKind::RightBrace) {
                 self.bump();
                 continue;
@@ -1588,6 +1813,7 @@ fn type_kind(kind: TokenKind) -> Option<TypeKind> {
         TokenKind::KwBln => TypeKind::Bln,
         TokenKind::KwChr => TypeKind::Chr,
         TokenKind::KwStr => TypeKind::Str,
+        TokenKind::KwMap => TypeKind::Map,
         _ => return None,
     })
 }

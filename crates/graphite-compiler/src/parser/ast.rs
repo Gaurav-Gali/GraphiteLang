@@ -3,7 +3,22 @@ use crate::span::Span;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub imports: Vec<ImportDecl>,
+    pub types: Vec<TypeDecl>,
     pub functions: Vec<FunctionDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDecl {
+    pub name: Identifier,
+    pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDecl {
+    pub name: Identifier,
+    pub ty: TypeSyntax,
     pub span: Span,
 }
 
@@ -49,8 +64,12 @@ pub const MAX_ARRAY_RANK: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeSyntax {
     pub kind: TypeKind,
+    /// Set when `kind` is `Named`. Primitive types leave this empty.
+    pub name: String,
     /// One entry per dimension, innermost first. `None` is a dynamic array.
     pub bounds: Vec<Option<u64>>,
+    /// Key and value types when `kind` is `Map`.
+    pub arguments: Vec<TypeSyntax>,
     pub span: Span,
 }
 
@@ -71,6 +90,8 @@ pub enum TypeKind {
     Bln,
     Chr,
     Str,
+    Named,
+    Map,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +197,7 @@ pub enum Expr {
     Update(UpdateExpr),
     InterpolatedString(InterpolatedStringExpr),
     Array(ArrayExpr),
+    Record(RecordExpr),
     Index(IndexExpr),
     Slice(SliceExpr),
     Parenthesized { expression: Box<Expr>, span: Span },
@@ -195,6 +217,7 @@ impl Expr {
             Expr::Update(update) => update.span,
             Expr::InterpolatedString(interpolated) => interpolated.span,
             Expr::Array(array) => array.span,
+            Expr::Record(record) => record.span,
             Expr::Index(index) => index.span,
             Expr::Slice(slice) => slice.span,
             Expr::Parenthesized { span, .. } => *span,
@@ -225,6 +248,18 @@ impl LiteralExpr {
 pub struct ArrayExpr {
     pub elements: Vec<Expr>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordExpr {
+    pub entries: Vec<BraceEntry>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BraceEntry {
+    Pair { key: Expr, value: Expr, span: Span },
+    Spread { value: Expr, span: Span },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
