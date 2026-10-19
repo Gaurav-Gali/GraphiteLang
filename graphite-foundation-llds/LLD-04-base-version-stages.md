@@ -317,10 +317,15 @@ Requirements:
 - `Type` is a dedicated compiler-recognized type, not `any` or a string alias.
 - `typeOf(expression)` describes the expression's static type; it does not parse or convert its contents.
 - `Type.name()` returns the canonical type name as `str`.
-- Printing a descriptor uses `<class 'int64'>` for built-in types and `<type 'User'>` for custom record types.
+- Printing a descriptor uses `<class 'CanonicalName'>` for built-in and compound types. `<type 'Name'>` is only for a named record type itself.
+- `Type.name()` applies the existing canonical spelling recursively, so `int[]` is `int64[]` and `map<str, int>` is `map<str, int64>`.
 - Aliases report canonical names: `int`/`int64` → `int64`, `uint`/`uint64` → `uint64`, and `flt`/`flt64` → `flt64`.
-- Custom types report their declared names.
-- Descriptor equality compares type identity, not display strings.
+- Custom types report their declared names. `User[]` and `map<str, User>` are compound types and use the `<class '...'>` display.
+- `typeOf(typeOf(1))` describes `Type` and displays `<class 'Type'>`.
+- `io.println`, `str(...)`, and interpolation share that display. Ordinary `str` assignment rejects a `Type` value. `auto str` accepts it through the existing conversion path.
+- `Type` is reserved only as a type name. `typeOf` is reserved everywhere `lengthOf` is reserved.
+- A `Type` value may be stored in arrays, map values, and record fields. It is not a map key.
+- Descriptor equality compares canonical type identity. `<`, `<=`, `>`, and `>=` between descriptors are compile-time errors.
 - Initially support type identity and name/display behavior only. Further reflection, generic arguments, class metadata, and dynamic runtime discovery are deferred.
 - Type descriptors must not weaken static typing.
 

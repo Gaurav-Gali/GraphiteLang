@@ -109,6 +109,46 @@ impl fmt::Display for Token {
     }
 }
 
+impl TokenKind {
+    pub fn is_keyword(self) -> bool {
+        keyword_lexeme(self).is_some()
+    }
+}
+
+fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
+    Some(match kind {
+        TokenKind::KwImport => "import",
+        TokenKind::KwAuto => "auto",
+        TokenKind::KwConst => "const",
+        TokenKind::KwVoid => "void",
+        TokenKind::KwInt => "int",
+        TokenKind::KwUint => "uint",
+        TokenKind::KwFlt => "flt",
+        TokenKind::KwInt16 => "int16",
+        TokenKind::KwInt32 => "int32",
+        TokenKind::KwInt64 => "int64",
+        TokenKind::KwUint16 => "uint16",
+        TokenKind::KwUint32 => "uint32",
+        TokenKind::KwUint64 => "uint64",
+        TokenKind::KwFlt32 => "flt32",
+        TokenKind::KwFlt64 => "flt64",
+        TokenKind::KwBln => "bln",
+        TokenKind::KwChr => "chr",
+        TokenKind::KwStr => "str",
+        TokenKind::KwIf => "if",
+        TokenKind::KwElse => "else",
+        TokenKind::KwLoop => "loop",
+        TokenKind::KwBreak => "break",
+        TokenKind::KwContinue => "continue",
+        TokenKind::KwReturn => "return",
+        TokenKind::KwType => "type",
+        TokenKind::KwMap => "map",
+        TokenKind::KwTrue => "true",
+        TokenKind::KwFalse => "false",
+        _ => return None,
+    })
+}
+
 pub fn keyword(ident: &str) -> Option<TokenKind> {
     Some(match ident {
         "import" => TokenKind::KwImport,

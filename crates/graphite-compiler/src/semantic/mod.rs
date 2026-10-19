@@ -20,10 +20,13 @@
 //! the frozen overflow policy. Floating-point arithmetic uses Rust's IEEE-754
 //! operators.
 //!
-//! `lengthOf` is a reserved built-in. A call takes one `str`, array, or record
-//! and yields `uint64`. Strings count Unicode scalar values, arrays count
-//! elements, and records count the fields declared directly by their named
-//! type. A variable, parameter, or function named `lengthOf` is rejected.
+//! `lengthOf` and `typeOf` are reserved built-ins. `lengthOf` takes one `str`,
+//! array, record, or map and yields `uint64`. Strings count Unicode scalar
+//! values, arrays and maps count elements, and records count the fields
+//! declared directly by their named type. `typeOf` takes one value and yields
+//! a `Type` descriptor for that value's static type. A variable, parameter,
+//! function, field, or type named `lengthOf` or `typeOf` is rejected. `Type`
+//! itself is reserved only as a type name.
 //!
 //! Named records are nominal. A record literal needs an expected record type,
 //! and later assignments to an `auto` record do not convert another record
@@ -61,6 +64,7 @@ pub enum CanonicalType {
     Bln,
     Chr,
     Str,
+    Type,
     Record(RecordId),
     Map(MapId),
     Array {
@@ -85,6 +89,7 @@ pub enum Leaf {
     Bln,
     Chr,
     Str,
+    Type,
     Record(RecordId),
     Map(MapId),
 }
@@ -104,6 +109,7 @@ impl CanonicalType {
             CanonicalType::Bln => "bool".to_string(),
             CanonicalType::Chr => "char".to_string(),
             CanonicalType::Str => "String".to_string(),
+            CanonicalType::Type => "GrfType".to_string(),
             CanonicalType::Record(_) => "GrfRecord".to_string(),
             CanonicalType::Map(_) => "HashMap<(), ()>".to_string(),
             CanonicalType::Array { leaf, depth, .. } => {
@@ -130,6 +136,7 @@ impl CanonicalType {
             CanonicalType::Bln => "bln".to_string(),
             CanonicalType::Chr => "chr".to_string(),
             CanonicalType::Str => "str".to_string(),
+            CanonicalType::Type => "Type".to_string(),
             CanonicalType::Record(_) => "record".to_string(),
             CanonicalType::Map(_) => "map".to_string(),
             CanonicalType::Array {
@@ -271,6 +278,7 @@ impl CanonicalType {
             CanonicalType::Bln => Leaf::Bln,
             CanonicalType::Chr => Leaf::Chr,
             CanonicalType::Str => Leaf::Str,
+            CanonicalType::Type => Leaf::Type,
             CanonicalType::Record(id) => Leaf::Record(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
@@ -313,6 +321,7 @@ impl Leaf {
             Leaf::Bln => CanonicalType::Bln,
             Leaf::Chr => CanonicalType::Chr,
             Leaf::Str => CanonicalType::Str,
+            Leaf::Type => CanonicalType::Type,
             Leaf::Record(id) => CanonicalType::Record(id),
             Leaf::Map(id) => CanonicalType::Map(id),
         }
@@ -332,6 +341,7 @@ impl Leaf {
             Leaf::Bln => "bln",
             Leaf::Chr => "chr",
             Leaf::Str => "str",
+            Leaf::Type => "Type",
             Leaf::Record(_) => "record",
             Leaf::Map(_) => "map",
         }
@@ -611,6 +621,14 @@ pub enum CheckedExpr {
         expr: Box<CheckedExpr>,
         count: Option<u64>,
     },
+    TypeOf {
+        expr: Box<CheckedExpr>,
+        name: String,
+        record: bool,
+    },
+    TypeName {
+        object: Box<CheckedExpr>,
+    },
     Record {
         id: RecordId,
         fields: Vec<(usize, CheckedExpr)>,
@@ -759,6 +777,8 @@ impl CheckedExpr {
             | CheckedExpr::MapInsert { ty, .. }
             | CheckedExpr::MapCall { ty, .. } => *ty,
             CheckedExpr::LengthOf { .. } => CanonicalType::UInt64,
+            CheckedExpr::TypeOf { .. } => CanonicalType::Type,
+            CheckedExpr::TypeName { .. } => CanonicalType::Str,
             CheckedExpr::Bool(_) => CanonicalType::Bln,
             CheckedExpr::Char(_) => CanonicalType::Chr,
             CheckedExpr::Str(_) | CheckedExpr::Interpolated { .. } => CanonicalType::Str,
@@ -948,13 +968,26 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn reject_reserved_name(&mut self, name: &str, span: Span) -> bool {
+        if name == "lengthOf" || name == "typeOf" {
+            self.error(span, format!("'{name}' is a reserved built-in name"));
+            return true;
+        }
+        if matches!(name, "self" | "super" | "crate" | "Self") {
+            self.error(span, format!("'{name}' is a reserved name"));
+            return true;
+        }
+        false
+    }
+
     fn collect_records(&mut self, program: &Program) {
         for declaration in &program.types {
-            if declaration.name.name == "lengthOf" {
-                self.error(
-                    declaration.name.span,
-                    "'lengthOf' is a reserved built-in name",
-                );
+            if declaration.name.name == "Type" {
+                self.error(declaration.name.span, "'Type' is a built-in type");
+                continue;
+            }
+            if self.reject_reserved_name(&declaration.name.name, declaration.name.span) {
+                continue;
             }
             if self.record_names.contains_key(&declaration.name.name) {
                 let previous = self.record_names[&declaration.name.name];
@@ -977,9 +1010,7 @@ impl<'a> Checker<'a> {
             let mut seen = HashMap::new();
             let mut fields = Vec::new();
             for field in &declaration.fields {
-                if field.name.name == "lengthOf" {
-                    self.error(field.name.span, "'lengthOf' is a reserved built-in name");
-                }
+                let _ = self.reject_reserved_name(&field.name.name, field.name.span);
                 if seen.insert(field.name.name.clone(), field.span).is_some() {
                     self.error(
                         field.name.span,
@@ -1062,6 +1093,9 @@ impl<'a> Checker<'a> {
             self.validate_map(key, value, syntax.span);
             let id = self.intern_map(key, value);
             return self.with_bounds(CanonicalType::Map(id), &syntax.bounds);
+        }
+        if syntax.kind == TypeKind::Named && syntax.name == "Type" {
+            return self.with_bounds(CanonicalType::Type, &syntax.bounds);
         }
         let scalar = if syntax.kind == TypeKind::Named {
             let Some(id) = self.record_names.get(&syntax.name).copied() else {
@@ -1257,12 +1291,7 @@ impl<'a> Checker<'a> {
                         format!("duplicate parameter '{}'", parameter.name.name),
                     );
                 }
-                if parameter.name.name == "lengthOf" {
-                    self.error(
-                        parameter.name.span,
-                        "'lengthOf' is a reserved built-in name",
-                    );
-                }
+                let _ = self.reject_reserved_name(&parameter.name.name, parameter.name.span);
                 params.push(ParamInfo {
                     name: parameter.name.name.clone(),
                     ty,
@@ -1276,8 +1305,7 @@ impl<'a> Checker<'a> {
                     "void is not a valid array element type",
                 );
             }
-            if function.name.name == "lengthOf" {
-                self.error(function.name.span, "'lengthOf' is a reserved built-in name");
+            if self.reject_reserved_name(&function.name.name, function.name.span) {
                 continue;
             }
             if let Some(previous) = self.functions.get(&function.name.name) {
@@ -1346,7 +1374,7 @@ impl<'a> Checker<'a> {
         self.current_return = ret;
         self.scopes.push(HashMap::new());
         for (name, ty, auto) in &params {
-            if name == "lengthOf" {
+            if name == "lengthOf" || name == "typeOf" {
                 continue;
             }
             if *ty != CanonicalType::Void {
@@ -1557,8 +1585,7 @@ impl<'a> Checker<'a> {
             decl.conversion == ConversionMode::Auto,
             initializer.span(),
         );
-        if decl.name.name == "lengthOf" {
-            self.error(decl.name.span, "'lengthOf' is a reserved built-in name");
+        if self.reject_reserved_name(&decl.name.name, decl.name.span) {
             return None;
         }
         if self
@@ -1703,6 +1730,42 @@ impl<'a> Checker<'a> {
                 | BinaryOperator::NotEqual
         );
         let (left, right) = self.check_numeric_operands(&expr.left, &expr.right, expected);
+        if comparison && (left.ty() == CanonicalType::Type || right.ty() == CanonicalType::Type) {
+            let equality = matches!(
+                expr.operator,
+                BinaryOperator::Equal | BinaryOperator::NotEqual
+            );
+            if equality && left.ty() == right.ty() {
+                return CheckedExpr::Binary {
+                    op: expr.operator,
+                    ty: CanonicalType::Bln,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: Some(CompareMode::Same),
+                };
+            }
+            let message = if equality {
+                format!(
+                    "operator '{}' cannot compare '{}' with '{}'",
+                    operator_token(expr.operator),
+                    self.spell(left.ty()),
+                    self.spell(right.ty())
+                )
+            } else {
+                format!(
+                    "operator '{}' cannot compare type descriptors",
+                    operator_token(expr.operator)
+                )
+            };
+            self.error(expr.span, message);
+            return CheckedExpr::Binary {
+                op: expr.operator,
+                ty: CanonicalType::Bln,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+            };
+        }
         if matches!(
             expr.operator,
             BinaryOperator::Equal | BinaryOperator::NotEqual
@@ -1939,6 +2002,9 @@ impl<'a> Checker<'a> {
             if ident.name == "lengthOf" {
                 return self.check_length_of(&expr.arguments, expr.span);
             }
+            if ident.name == "typeOf" {
+                return self.check_type_of(&expr.arguments, expr.span);
+            }
             return self.check_user_call(ident, &expr.arguments, expr.span);
         }
         self.error(expr.span, "unsupported call target");
@@ -2052,6 +2118,31 @@ impl<'a> Checker<'a> {
         CheckedExpr::LengthOf {
             expr: Box::new(value),
             count: None,
+        }
+    }
+
+    fn check_type_of(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+        if arguments.len() != 1 {
+            self.error(
+                span,
+                format!("typeOf expects 1 argument, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(Some(CanonicalType::Type));
+        }
+        let argument = &arguments[0];
+        let value = self.check_expr(argument, None, true);
+        if value.ty() == CanonicalType::Void || value.ty().is_void_array() {
+            self.error(argument.span(), "typeOf requires a value");
+            return self.dummy(Some(CanonicalType::Type));
+        }
+        let described = value.ty();
+        CheckedExpr::TypeOf {
+            name: self.spell(described),
+            record: described.is_record(),
+            expr: Box::new(value),
         }
     }
 
@@ -2741,6 +2832,9 @@ impl<'a> Checker<'a> {
             if ty.is_map() {
                 return self.finish_map_call(name, Some(place), None, arguments, span, member);
             }
+            if ty == CanonicalType::Type {
+                return self.finish_type_call(name, Some(place), None, arguments, span, member);
+            }
             if ty.is_record() {
                 return self.reject_record_call(member, arguments, ty);
             }
@@ -2757,10 +2851,45 @@ impl<'a> Checker<'a> {
             }
             return self.finish_map_call(name, None, Some(object), arguments, span, member);
         }
+        if ty == CanonicalType::Type {
+            return self.finish_type_call(name, None, Some(object), arguments, span, member);
+        }
         if ty.is_record() {
             return self.reject_record_call(member, arguments, ty);
         }
         self.finish_array_call(name, None, Some(object), ty, arguments, span, member)
+    }
+
+    fn finish_type_call(
+        &mut self,
+        name: &str,
+        place: Option<ArrayPlace>,
+        object: Option<CheckedExpr>,
+        arguments: &[Expr],
+        span: Span,
+        member: &MemberExpr,
+    ) -> CheckedExpr {
+        let object = object.unwrap_or_else(|| self.check_expr(&member.object, None, false));
+        let _ = place;
+        if name != "name" {
+            self.error(member.member.span, format!("Type has no method '{name}'"));
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(Some(CanonicalType::Str));
+        }
+        if !arguments.is_empty() {
+            self.error(
+                span,
+                format!("name expects 0 arguments, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+        }
+        CheckedExpr::TypeName {
+            object: Box::new(object),
+        }
     }
 
     fn finish_array_call(
@@ -3080,9 +3209,7 @@ impl<'a> Checker<'a> {
                 );
             }
             names.push(binding.name.name.clone());
-            if binding.name.name == "lengthOf" {
-                self.error(binding.name.span, "'lengthOf' is a reserved built-in name");
-            }
+            let _ = self.reject_reserved_name(&binding.name.name, binding.name.span);
             if self
                 .scopes
                 .last()
@@ -3231,8 +3358,7 @@ impl<'a> Checker<'a> {
         }
         self.scopes.push(HashMap::new());
         for (name, ty, mutable) in &checked_bindings {
-            if name == "lengthOf" {
-                self.error(stmt.span, "'lengthOf' is a reserved built-in name");
+            if self.reject_reserved_name(name, stmt.span) {
                 continue;
             }
             self.scopes.last_mut().unwrap().insert(

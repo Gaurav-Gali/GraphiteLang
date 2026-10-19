@@ -1473,6 +1473,18 @@ impl<'a> Parser<'a> {
                 span: token.span,
             });
         }
+        if self.current().kind.is_keyword() {
+            let token = self.bump();
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                token.span,
+                format!("'{}' is a reserved keyword", token.lexeme),
+            );
+            return Some(Identifier {
+                name: token.lexeme.clone(),
+                span: token.span,
+            });
+        }
         self.error(
             ParserDiagnosticKind::ExpectedToken,
             self.current().span,

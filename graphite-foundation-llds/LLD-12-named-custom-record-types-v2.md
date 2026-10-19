@@ -55,9 +55,13 @@ scope.
 4.  **Complete construction:** A record literal must provide every
     declared field exactly once. Missing, unknown, duplicate, or wrongly
     typed fields are compile-time errors.
-5.  **Expected type:** A record literal must have an expected named
-    record type from its declaration, assignment, return, argument, or
-    field context. Anonymous record inference is not supported.
+5.  **Expected type:** In expression position, the expected type selects
+    the brace literal. An expected named record type makes it a record
+    literal. An expected `map<K, V>` type makes it a map literal. Any
+    other expected type, or no resolvable expected type, is a
+    compile-time error. Do not infer an anonymous record or a map from
+    the brace contents. A record literal still requires every declared
+    field exactly once.
 6.  **Value semantics:** Assignment, parameter passing, returns, and
     storing records in fields or collections copy values. No shared
     mutable alias may change Graphite semantics.
@@ -68,7 +72,8 @@ scope.
     Mutability is controlled by the root binding used to reach a field.
 9.  **No recursive cycles:** Reject direct, indirect, and
     collection-mediated recursive record dependency cycles before code
-    generation.
+    generation. Cycles through arrays and through map values are
+    included. Map fields do not create an exception.
 10. **`lengthOf`:** Returns `uint64` equal to the number of fields
     declared directly by the record's named type. It does not inspect
     field values or recursively count nested fields.
@@ -101,7 +106,20 @@ type Profile {
     scores: int[],
     labels: map<str, str>,
 }
+
+type User {
+    name: str,
+    scores: map<str, int>,
+}
+
+type Group {
+    members: map<str, User>,
+}
 ```
+
+A field may use any supported non-`void` type: a primitive, an array, a
+map, or another named record. A map field is accepted only when its key
+and value types are valid under the map rules.
 
 ### 3.2 Record literals and member access
 
@@ -115,8 +133,22 @@ Integrate member access into the existing postfix-expression grammar so
 it composes with indexing and calls where valid, such as
 `users[0].name`.
 
-Record literals are resolved using an expected named record type. Do not
-silently reinterpret an invalid record literal as a map literal.
+In expression position, the expected type determines the brace-literal
+kind:
+
+-   Expected named record type: record literal.
+-   Expected `map<K, V>` type: map literal.
+-   Any other expected type, or no resolvable expected type:
+    compile-time error.
+
+An invalid record literal must not be reinterpreted as a map literal.
+Do not infer a map or an anonymous record from the contents of the
+braces. In statement position, `{}` remains a block.
+
+When the expected type is a named record, the literal is validated as a
+record literal: every declared field is required, unknown and duplicate
+fields are rejected, and each initializer is checked against that
+field's type.
 
 ## 4. Declaration scope, names, and forward references
 
@@ -153,8 +185,9 @@ implemented by the compiler.
 
 ## 5. Semantic identity and type representation
 
-Assign each record declaration a unique `RecordTypeId`. Record equality
-and assignability use this identity, not just the name or field layout.
+Assign each record declaration a unique `RecordTypeId`. Assignability
+uses this identity, not the name or the field layout. This is nominal
+type identity. It does not define `==` or `!=` for record values.
 
 Suggested conceptual structures (adapt to current code conventions):
 
@@ -191,9 +224,10 @@ conversion rules must not introduce arbitrary record conversions.
 
 ## 6. Record construction validation
 
-A record literal is resolved against an expected named record type. The
-expected type may come from a variable declaration, field initializer,
-function parameter, or function return type.
+A brace literal in expression position is first classified by its
+expected type, as in section 3.2. This section applies when that type is
+a named record. The expected type may come from a variable declaration,
+field initializer, function parameter, or function return type.
 
 Validate all of the following:
 
@@ -217,8 +251,12 @@ User wrong = { name: 123, age: "21" }; // Field type mismatches
 ```
 
 No field defaults are introduced. Omitted fields are not
-zero-initialized. If no expected named record type is available, reject
-the literal rather than infer an anonymous type.
+zero-initialized. If the expected type is not a named record, do not
+validate the braces as a record literal and do not turn an invalid
+record literal into a map literal. A map literal is chosen only when the
+expected type is already `map<K, V>`. If there is no resolvable record
+or map type, reject the literal. Do not infer an anonymous record or a
+map from the brace contents.
 
 An empty record declaration is invalid:
 
@@ -312,9 +350,12 @@ reference or borrow parameter syntax.
 
 After resolving field type references, construct a dependency graph of
 record types. A record depends on named record types reachable through
-its fields, including through array element types and map key/value
-types. Reject every cycle in this graph in Stage 7, before Rust code
-generation.
+its fields, including through array element types and map value types.
+A map field participates only when its key and value types are valid
+under the map rules; a record, array, map, or float key remains
+rejected by those rules. A record used as a map value still creates a
+dependency. Reject every cycle in this graph, including a cycle that
+passes through a map, before Rust code generation.
 
 Rejected examples:
 
@@ -329,6 +370,14 @@ type A {
 
 type B {
     parent: A,
+}
+
+type Directory {
+    groups: map<str, Crew>,
+}
+
+type Crew {
+    parent: Directory,
 }
 ```
 
@@ -479,8 +528,9 @@ Provide useful source spans and names for these errors:
 -   Duplicate field name.
 -   Empty record.
 -   `void` or unsupported field type.
--   Direct or indirect recursive cycle.
--   Record literal without expected record type.
+-   Direct, indirect, or map-mediated recursive cycle.
+-   Brace literal with no resolvable record or map expected type.
+-   Record `==` or `!=`.
 -   Missing, unknown, or duplicate literal field.
 -   Field initializer type mismatch.
 -   Member access on non-record.
@@ -528,7 +578,7 @@ after an unresolved field type.
 6.  `void` field.
 7.  Direct recursion, indirect recursion, and cycles through
     arrays/maps.
-8.  Record literal without expected type.
+8.  Brace literal with no resolvable record or map expected type.
 9.  Missing, unknown, duplicate, or wrongly typed literal field.
 10. Unknown field access.
 11. Member access on primitive, array, or map.
@@ -536,8 +586,9 @@ after an unresolved field type.
 13. Nested collection mutation through const record.
 14. Assign one named record type to another with identical fields.
 15. Attempt record conversion through `auto` or explicit conversion.
-16. `lengthOf` on numeric/boolean values.
-17. Failed compilation must not run a stale executable.
+16. Record `==` and `!=`.
+17. `lengthOf` on numeric/boolean values.
+18. Failed compilation must not run a stale executable.
 
 ### Regression coverage
 
@@ -579,8 +630,10 @@ Stage 7 is complete when:
 -   Recursive records.
 -   References, pointers, or explicit borrow syntax.
 -   Reflection exposing field names or values.
--   Record equality/ordering operators unless already defined by a
-    separate language rule.
+-   Record `==` and `!=`. Comparing records by fields or by identity is
+    unsupported in this stage. The compiler rejects both operators with
+    a compile-time diagnostic. Ordering comparisons of records are also
+    unsupported.
 -   Serialization/deserialization.
 -   New cross-module import behavior.
 
@@ -611,19 +664,27 @@ Stage 7 is complete when:
 
 Stage 7 implements named records only.
 
--   Field types are primitives, arrays (including bounded and nested
-    arrays), and other records. Maps stay in Stage 8.
+-   Field types are any supported non-`void` type: primitives, arrays
+    (including bounded and nested arrays), maps, and other records. A
+    map field is accepted only when its key and value types are valid
+    under the map rules. Map values that are records participate in
+    cycle detection, with no exception for map-mediated cycles.
 -   A field is an ordinary typed slot. `auto` is not a field type, and
     field initialization does not apply `auto T` conversion.
 -   `User(value)` is a function call, not a constructor. A function and
     a record may share a spelling. `type` is a reserved keyword.
 -   Record names are collected before field resolution and function
     bodies, so a function may return a record declared later in the
-    file. Dependency cycles, including cycles through arrays, are
-    compile-time errors.
--   `{ ... }` in expression position is a record literal and needs an
-    expected record type. A statement `{}` stays a block. Trailing
-    commas are allowed. `==` and `!=` do not compare records.
+    file. Dependency cycles, including cycles through arrays and through
+    map values, are compile-time errors.
+-   In expression position, the expected type selects the brace literal:
+    a named record type selects a record literal, and `map<K, V>`
+    selects a map literal. Any other expected type, or no resolvable
+    expected type, is a compile-time error. An invalid record literal is
+    not reinterpreted as a map literal, and the brace contents do not
+    infer an anonymous record or a map. A statement `{}` stays a block.
+    Trailing commas are allowed. Record `==` and `!=` are rejected at
+    compile time. Records are not compared by fields or by identity.
 -   Field writes require an l-value rooted at a mutable binding. A const
     root blocks the whole path. Copying a const record into a mutable
     binding copies the value, including nested arrays and records.

@@ -754,14 +754,14 @@ void main() {
     };
     assert_eq!(nested.ty.arguments[1].kind, TypeKind::Map);
 
-    assert_rejected("void map() {\n}\n", "function name");
+    assert_rejected("void map() {\n}\n", "'map' is a reserved keyword");
     assert_rejected(
         "\
 void main() {
     int map = 1;
 }
 ",
-        "variable name",
+        "'map' is a reserved keyword",
     );
     assert_rejected(
         "\
@@ -772,7 +772,7 @@ type Box {
 void main() {
 }
 ",
-        "field name",
+        "'map' is a reserved keyword",
     );
     assert_rejected(
         "\
@@ -790,4 +790,29 @@ void main() {
         "map<int> scores;\n\nvoid main() {\n}\n",
         "map type requires a key type and a value type",
     );
+}
+
+#[test]
+fn reserved_keywords_cannot_be_declaration_names() {
+    let keywords = [
+        "import", "auto", "const", "void", "int", "uint", "flt", "int16", "int32", "int64",
+        "uint16", "uint32", "uint64", "flt32", "flt64", "bln", "chr", "str", "if", "else", "loop",
+        "break", "continue", "return", "type", "map", "true", "false",
+    ];
+    for keyword in keywords {
+        let message = format!("'{keyword}' is a reserved keyword");
+        assert_rejected(&format!("void {keyword}() {{\n}}\n"), &message);
+        assert_rejected(
+            &format!("void main() {{\n    int {keyword} = 1;\n}}\n"),
+            &message,
+        );
+        assert_rejected(
+            &format!("void hold(int {keyword}) {{\n}}\n\nvoid main() {{\n}}\n"),
+            &message,
+        );
+        assert_rejected(
+            &format!("type Box {{\n    {keyword}: int,\n}}\n\nvoid main() {{\n}}\n"),
+            &message,
+        );
+    }
 }

@@ -1,14 +1,7 @@
 import grf.io;
 
 void main() {
-    io.println(square(5));
-    io.println(greet(123));
-}
+  Type t = typeOf(lengthOf("123"));
 
-int square(int value) {
-    return value * value;
-}
-
-str greet(auto str msg) {
-    return f"Hello {msg}";
+  io.println(t.name());
 }

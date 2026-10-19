@@ -1,0 +1,73 @@
+import grf.io;
+
+type User {
+    name: str,
+    age: int,
+}
+
+type Metadata {
+    descriptor: Type,
+}
+
+void take(auto str value) {
+    io.println(value);
+}
+
+void main() {
+    int Type = 1;
+    io.println(Type);
+
+    int age = 21;
+    str name = "Ada";
+    int[] ages = [age];
+    int[3] fixed = [1, 2, 3];
+    map<str, int> scores = { "Ada": 10 };
+    User user = { name: name, age: age };
+    User[] users = [user];
+    map<str, User> byName = { "Ada": user };
+
+    Type number = typeOf(age);
+    Type text = typeOf(name);
+    Type numbers = typeOf(ages);
+    Type bounded = typeOf(fixed);
+    Type listing = typeOf(scores);
+    Type person = typeOf(user);
+    Type people = typeOf(users);
+    Type grouped = typeOf(byName);
+    Type nested = typeOf(number);
+
+    io.println(number.name());
+    io.println(number);
+    io.println(str(number));
+    io.println(f"{number}");
+    auto str shown = number;
+    io.println(shown);
+    take(person);
+
+    io.println(text.name());
+    io.println(numbers.name());
+    io.println(bounded.name());
+    io.println(listing.name());
+    io.println(person);
+    io.println(people);
+    io.println(grouped);
+    io.println(nested.name());
+    io.println(nested);
+
+    io.println(typeOf(scores) == listing);
+    io.println(person == people);
+
+    Type[] descriptors = [number, text];
+    io.println(descriptors);
+
+    map<str, Type> descriptorByName = {
+        "age": number,
+        "name": text,
+    };
+    io.println(descriptorByName.get("name").name());
+
+    Metadata metadata = { descriptor: person };
+    io.println(metadata);
+    Type copied = metadata.descriptor;
+    io.println(copied == person);
+}

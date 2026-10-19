@@ -1183,3 +1183,213 @@ void main() {
         );
     }
 }
+
+#[test]
+fn type_descriptors_use_canonical_identity() {
+    let program = analyze_source(
+        "\
+import grf.io;
+
+type User { name: str, age: int, }
+type Account { name: str, age: int, }
+type Metadata { descriptor: Type, }
+
+int Type() {
+    return 7;
+}
+
+void take(auto str value) {
+    io.println(value);
+}
+
+void main() {
+    int value = Type();
+    Type number = typeOf(value);
+    Type text = typeOf(\"hello\");
+    int[] ages = [value];
+    int[3] fixed = [1, 2, 3];
+    map<str, int> scores = { \"Ada\": 10 };
+    map<str, int64> same = { \"Ada\": 10 };
+    User user = { name: \"Ada\", age: 36 };
+    Account account = { name: \"Ada\", age: 36 };
+    User[] users = [user];
+    map<str, User> byName = { \"Ada\": user };
+    Type nested = typeOf(typeOf(1));
+    Type agesType = typeOf(ages);
+    Type fixedType = typeOf(fixed);
+    Type scoresType = typeOf(scores);
+    Type usersType = typeOf(users);
+    Type byNameType = typeOf(byName);
+    bln aliases = typeOf(scores) == typeOf(same);
+    bln different = typeOf(user) != typeOf(account);
+    bln compound = typeOf(user) != typeOf(users);
+    io.println(number.name());
+    io.println(number);
+    io.println(str(number));
+    io.println(f\"{number}\");
+    auto str shown = number;
+    shown = text;
+    take(typeOf(user));
+    Type[] descriptors = [number, text];
+    map<str, Type> descriptorByName = { \"age\": number, \"name\": text };
+    Metadata metadata = { descriptor: number };
+    Type copied = metadata.descriptor;
+    const Type frozen = number;
+    io.println(aliases);
+    io.println(different);
+    io.println(compound);
+    io.println(nested.name());
+    io.println(descriptors[0].name());
+    io.println(descriptorByName.get(\"age\").name());
+    io.println(copied == frozen);
+}
+",
+    );
+    assert!(program.diagnostics.is_empty(), "{:?}", program.diagnostics);
+    let rust = generate(program.program.as_ref().unwrap());
+    for name in [
+        "int64[]",
+        "int64[3]",
+        "map<str, int64>",
+        "User[]",
+        "map<str, User>",
+    ] {
+        assert!(rust.contains(name), "{name} missing from {rust}");
+    }
+
+    let rejected = [
+        (
+            "type Type { value: int, }\nvoid main() {\n}\n",
+            "'Type' is a built-in type",
+        ),
+        (
+            "void main() {\n    int typeOf = 1;\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "void hold(int typeOf) {\n}\n\nvoid main() {\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "uint64 typeOf(str value) {\n    return 0;\n}\n\nvoid main() {\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "type Note { typeOf: int, }\nvoid main() {\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "type typeOf { value: int, }\nvoid main() {\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "void main() {\n    int[] items = [1, 2];\n    int typeOf, int other = items;\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "void main() {\n    int[] items = [1];\n    loop (int typeOf = items.iter()) {\n    }\n}\n",
+            "'typeOf' is a reserved built-in name",
+        ),
+        (
+            "void main() {\n    Type t = typeOf();\n}\n",
+            "typeOf expects 1 argument, found 0",
+        ),
+        (
+            "void main() {\n    Type t = typeOf(1, 2);\n}\n",
+            "typeOf expects 1 argument, found 2",
+        ),
+        (
+            "void noop() {\n}\n\nvoid main() {\n    Type t = typeOf(noop());\n}\n",
+            "typeOf requires a value",
+        ),
+        (
+            "void main() {\n    Type t = typeOf(missing);\n}\n",
+            "unknown name 'missing'",
+        ),
+        (
+            "void main() {\n    Type t = typeOf(1);\n    str name = t.other();\n}\n",
+            "Type has no method 'other'",
+        ),
+        (
+            "void main() {\n    Type t = typeOf(1);\n    str name = t.name(1);\n}\n",
+            "name expects 0 arguments, found 1",
+        ),
+        (
+            "void main() {\n    Type t = typeOf(1);\n    str name = t.name;\n}\n",
+            "'Type' has no field 'name'",
+        ),
+        (
+            "void main() {\n    str text = typeOf(1);\n}\n",
+            "type mismatch: expected 'str', found 'Type'",
+        ),
+        (
+            "void exact(str value) {\n}\n\nvoid main() {\n    exact(typeOf(1));\n}\n",
+            "type mismatch: expected 'str', found 'Type'",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    Type b = typeOf(\"hello\");\n    bln invalid = a < b;\n}\n",
+            "operator '<' cannot compare type descriptors",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    bln invalid = a <= a;\n}\n",
+            "operator '<=' cannot compare type descriptors",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    bln invalid = a > a;\n}\n",
+            "operator '>' cannot compare type descriptors",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    bln invalid = a >= a;\n}\n",
+            "operator '>=' cannot compare type descriptors",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    bln invalid = a == \"int64\";\n}\n",
+            "operator '==' cannot compare 'Type' with 'str'",
+        ),
+        (
+            "void main() {\n    Type a = typeOf(1);\n    bln invalid = a != 1;\n}\n",
+            "operator '!=' cannot compare 'Type' with 'int64'",
+        ),
+        (
+            "void main() {\n    map<Type, str> names = {};\n}\n",
+            "'Type' cannot be a map key",
+        ),
+        (
+            "void main() {\n    uint64 count = lengthOf(typeOf(1));\n}\n",
+            "'Type' has no defined length",
+        ),
+    ];
+    for (source, snippet) in rejected {
+        let text = messages(source);
+        assert!(
+            text.contains(snippet),
+            "{source}\nexpected {snippet}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn reserved_identifiers_cannot_be_declaration_names() {
+    for name in ["self", "super", "crate", "Self"] {
+        let message = format!("'{name}' is a reserved name");
+        let rejected = [
+            format!("void {name}() {{\n}}\n\nvoid main() {{\n}}\n"),
+            format!("void main() {{\n    int {name} = 1;\n}}\n"),
+            format!("void hold(int {name}) {{\n}}\n\nvoid main() {{\n}}\n"),
+            format!("type Note {{\n    {name}: int,\n}}\n\nvoid main() {{\n}}\n"),
+            format!(
+                "void main() {{\n    int[] items = [1, 2];\n    int {name}, int other = items;\n}}\n"
+            ),
+            format!(
+                "void main() {{\n    int[] items = [1];\n    loop (int {name} = items.iter()) {{\n    }}\n}}\n"
+            ),
+        ];
+        for source in rejected {
+            let text = messages(&source);
+            assert!(
+                text.contains(&message),
+                "{source}\nexpected {message}\n{text}"
+            );
+        }
+    }
+}

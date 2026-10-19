@@ -49,6 +49,7 @@ pub enum ConvOp {
     ArrayToStr,
     RecordToStr,
     MapToStr,
+    TypeToStr,
 }
 
 pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
@@ -62,6 +63,7 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
             Array { .. } => Some(ConvOp::ArrayToStr),
             Record(_) => Some(ConvOp::RecordToStr),
             Map(_) => Some(ConvOp::MapToStr),
+            Type => Some(ConvOp::TypeToStr),
             _ => None,
         };
     }

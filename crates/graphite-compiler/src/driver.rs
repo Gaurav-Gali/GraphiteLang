@@ -1474,4 +1474,194 @@ void main() {
         assert!(failed.stdout.is_empty(), "{:?}", failed.stdout);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn type_descriptors_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-type-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type User {
+    name: str,
+    age: int,
+}
+
+type Account {
+    name: str,
+    age: int,
+}
+
+type Metadata {
+    descriptor: Type,
+}
+
+int next(str label) {
+    io.println(label);
+    return 1;
+}
+
+Type describe(int value) {
+    return typeOf(value);
+}
+
+void take(auto str value) {
+    io.println(value);
+}
+
+void main() {
+    int Type = 1;
+    io.println(Type);
+    io.println(typeOf(Type).name());
+
+    int age = 21;
+    str name = "hello";
+    int[] ages = [age];
+    int[3] fixed = [1, 2, 3];
+    map<str, int> scores = { "Ada": 10 };
+    map<str, int64> sameScores = { "Ada": 10 };
+    User user = { name: "Ada", age: 36 };
+    Account account = { name: "Ada", age: 36 };
+    User[] users = [user];
+    map<str, User> byName = { "Ada": user };
+
+    Type number = typeOf(age);
+    Type text = typeOf(name);
+    Type numbers = typeOf(ages);
+    Type bounded = typeOf(fixed);
+    Type mapOfInt = typeOf(scores);
+    Type mapOfInt64 = typeOf(sameScores);
+    Type person = typeOf(user);
+    Type other = typeOf(account);
+    Type people = typeOf(users);
+    Type mapOfUser = typeOf(byName);
+    Type nested = typeOf(number);
+
+    io.println(number.name());
+    io.println(number);
+    io.println(text.name());
+    io.println(text);
+    io.println(numbers.name());
+    io.println(numbers);
+    io.println(bounded.name());
+    io.println(bounded);
+    io.println(mapOfInt.name());
+    io.println(mapOfInt);
+    io.println(person.name());
+    io.println(person);
+    io.println(people.name());
+    io.println(people);
+    io.println(mapOfUser.name());
+    io.println(mapOfUser);
+    io.println(nested.name());
+    io.println(nested);
+
+    io.println(mapOfInt == mapOfInt64);
+    io.println(number == typeOf(1));
+    io.println(number == describe(age));
+    io.println(person == other);
+    io.println(person == people);
+    io.println(number != text);
+
+    io.println(str(number));
+    io.println(f"{number}");
+    auto str shown = number;
+    io.println(shown);
+    shown = text;
+    io.println(shown);
+    take(person);
+
+    Type[] descriptors = [number, text];
+    io.println(descriptors);
+    io.println(descriptors[0].name());
+
+    map<str, Type> descriptorByName = {
+        "age": number,
+        "name": text,
+    };
+    io.println(descriptorByName.get("age"));
+    io.println(descriptorByName.get("name").name());
+
+    Metadata metadata = { descriptor: number };
+    io.println(metadata);
+    Type copied = metadata.descriptor;
+    const Type frozen = number;
+    io.println(copied == frozen);
+
+    io.println(typeOf(next("seen")).name());
+    Type kept = typeOf(next("once"));
+    io.println(kept.name());
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let lines: Vec<&str> = output.stdout.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "1",
+                "int64",
+                "int64",
+                "<class 'int64'>",
+                "str",
+                "<class 'str'>",
+                "int64[]",
+                "<class 'int64[]'>",
+                "int64[3]",
+                "<class 'int64[3]'>",
+                "map<str, int64>",
+                "<class 'map<str, int64>'>",
+                "User",
+                "<type 'User'>",
+                "User[]",
+                "<class 'User[]'>",
+                "map<str, User>",
+                "<class 'map<str, User>'>",
+                "Type",
+                "<class 'Type'>",
+                "true",
+                "true",
+                "true",
+                "false",
+                "false",
+                "true",
+                "<class 'int64'>",
+                "<class 'int64'>",
+                "<class 'int64'>",
+                "<class 'str'>",
+                "<type 'User'>",
+                "[<class 'int64'>, <class 'str'>]",
+                "int64",
+                "<class 'int64'>",
+                "str",
+                "{ descriptor: <class 'int64'> }",
+                "true",
+                "seen",
+                "int64",
+                "once",
+                "int64",
+            ]
+        );
+
+        let failed = dir.join("failed.grf");
+        fs::write(
+            &failed,
+            "import grf.io;\n\nvoid main() {\n    Type descriptor = typeOf(int16(\"40000\"));\n    io.println(descriptor.name());\n    io.println(\"after\");\n}\n",
+        )
+        .unwrap();
+        let boom = run_captured(&failed);
+        assert_ne!(boom.status, 0, "{}", boom.stdout);
+        assert!(
+            boom.stderr.contains("cannot convert str to int16"),
+            "{}",
+            boom.stderr
+        );
+        assert!(boom.stdout.is_empty(), "{:?}", boom.stdout);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

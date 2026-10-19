@@ -444,6 +444,17 @@ impl Emitter<'_> {
                     format!("{{ let {tmp} = {name}; {name} = {op}!({name}, 1); {tmp} }}")
                 }
             }
+            CheckedExpr::TypeOf { expr, name, record } => {
+                let inner = self.emit_expr(expr);
+                format!(
+                    "{{ let _ = {inner}; GrfType {{ name: {}, record: {record} }} }}",
+                    rust_string(name)
+                )
+            }
+            CheckedExpr::TypeName { object } => {
+                let inner = self.emit_expr(object);
+                format!("String::from(({inner}).name)")
+            }
             CheckedExpr::LengthOf { expr, count } => {
                 if let Some(count) = count {
                     let inner = self.emit_expr(expr);
@@ -642,6 +653,7 @@ impl Emitter<'_> {
                     ConvOp::RecordToStr => self.record_to_str(*from, &inner),
                     ConvOp::ArrayToStr => self.array_to_str(*from, &inner),
                     ConvOp::MapToStr => self.map_to_str(*from, &inner),
+                    ConvOp::TypeToStr => type_to_str(&inner),
                     other => emit_conv(*other, *from, *to, &inner, &site),
                 }
             }
@@ -1313,6 +1325,14 @@ impl Emitter<'_> {
         if ty.is_map() {
             return self.map_to_str(ty, expr);
         }
+        if ty == CanonicalType::Type {
+            let value = if referenced {
+                format!("*{expr}")
+            } else {
+                expr.to_string()
+            };
+            return type_to_str(&value);
+        }
         let value = if referenced {
             format!("*{expr}")
         } else {
@@ -1486,6 +1506,12 @@ fn emit_float(lexeme: &str, ty: CanonicalType) -> String {
     }
 }
 
+fn type_to_str(inner: &str) -> String {
+    format!(
+        "{{ let grf_ty = {inner}; if grf_ty.record {{ format!(\"<type '{{}}'>\", grf_ty.name) }} else {{ format!(\"<class '{{}}'>\", grf_ty.name) }} }}"
+    )
+}
+
 fn emit_conv(
     op: ConvOp,
     from: CanonicalType,
@@ -1512,7 +1538,9 @@ fn emit_conv(
             _ => "String::new()".to_string(),
         },
         ConvOp::CharToStr => format!("graphite_core::convert::char_to_str({inner})"),
-        ConvOp::ArrayToStr | ConvOp::RecordToStr | ConvOp::MapToStr => String::new(),
+        ConvOp::ArrayToStr | ConvOp::RecordToStr | ConvOp::MapToStr | ConvOp::TypeToStr => {
+            String::new()
+        }
         ConvOp::StrToSigned => format!(
             "(graphite_core::convert::str_to_signed(&({inner}), {signed_min}, {signed_max}, {to_name}, {site}) as {rust})"
         ),
@@ -1841,6 +1869,12 @@ pub(crate) fn grf_div_zero() -> ! {
 
 pub(crate) fn grf_str_length(value: &str) -> u64 {
     value.chars().count() as u64
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GrfType {
+    pub(crate) name: &'static str,
+    pub(crate) record: bool,
 }
 
 "#;

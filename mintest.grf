@@ -41,6 +41,6 @@ void main() {
   map<str, int> map2 = {"a" : 1, "b" : 2};
   map<str, int> map3 = {...map2, "c" : 3, "d" : 4};
 
-  io.println(map3);
+  io.println(typeOf(map3));
 
 }
