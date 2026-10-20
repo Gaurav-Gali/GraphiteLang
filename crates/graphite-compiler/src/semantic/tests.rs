@@ -1451,3 +1451,76 @@ void main() {
         "{other}"
     );
 }
+
+#[test]
+fn try_requires_a_handler_and_known_catch_types() {
+    let bare = analyze_source("void main() {\n    try {\n    }\n}\n");
+    assert!(
+        bare.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "GRF-EXC-001"),
+        "{:?}",
+        bare.diagnostics
+    );
+    assert!(
+        messages("void main() {\n    try {\n    }\n}\n")
+            .contains("a try statement needs a catch or a finally")
+    );
+    assert!(
+        messages("void main() {\n    try {\n    } catch (Nope error) {\n    }\n}\n")
+            .contains("unknown catch type 'Nope'")
+    );
+    assert!(messages(
+        "void main() {\n    try {\n    } catch (RuntimeError error) {\n    } catch (IoError other) {\n    }\n}\n"
+    )
+    .contains("unreachable catch 'IoError'"));
+    assert!(messages(
+        "void main() {\n    try {\n    } catch (Error error) {\n    } catch (DivisionByZeroError other) {\n    }\n}\n"
+    )
+    .contains("unreachable catch 'DivisionByZeroError'"));
+    assert!(messages(
+        "void main() {\n    try {\n    } catch (Error error) {\n    } catch (RuntimeError other) {\n    }\n}\n"
+    )
+    .contains("unreachable catch 'RuntimeError'"));
+    let broad = messages(
+        "void main() {\n    try {\n    } catch (DivisionByZeroError error) {\n    } catch (Error error) {\n    }\n}\n",
+    );
+    assert!(broad.is_empty(), "{broad}");
+    assert!(messages(
+        "void main() {\n    try {\n    } catch (IoError error) {\n    } catch (IoError other) {\n    }\n}\n"
+    )
+    .contains("unreachable catch 'IoError'"));
+    let returned = messages(
+        "int value() {\n    try {\n        return 1;\n    } finally {\n        return 2;\n    }\n}\n\nvoid main() {\n}\n",
+    );
+    assert!(
+        returned.contains("return is not allowed inside finally"),
+        "{returned}"
+    );
+    let broken = messages(
+        "void main() {\n    try {\n    } finally {\n        loop () {\n            break;\n        }\n    }\n}\n",
+    );
+    assert!(
+        broken.contains("break is not allowed inside finally"),
+        "{broken}"
+    );
+    let continued = messages(
+        "void main() {\n    try {\n    } finally {\n        loop () {\n            continue;\n        }\n    }\n}\n",
+    );
+    assert!(
+        continued.contains("continue is not allowed inside finally"),
+        "{continued}"
+    );
+    let hidden = messages(
+        "import grf.io;\n\nvoid main() {\n    try {\n    } catch (RuntimeError error) {\n    } finally {\n        io.println(error.message());\n    }\n}\n",
+    );
+    assert!(hidden.contains("unknown name 'error'"), "{hidden}");
+    let shared = messages(
+        "void main() {\n    try {\n    } catch (DivisionByZeroError error) {\n    } catch (RuntimeError error) {\n    }\n}\n",
+    );
+    assert!(shared.is_empty(), "{shared}");
+    let record = messages(
+        "type DivisionByZeroError {\n    value: int,\n}\n\nvoid main() {\n    DivisionByZeroError item = { value: 1 };\n    try {\n    } catch (DivisionByZeroError error) {\n    }\n}\n",
+    );
+    assert!(record.is_empty(), "{record}");
+}

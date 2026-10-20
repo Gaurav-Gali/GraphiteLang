@@ -806,7 +806,7 @@ void main() {
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    io.println(1 % 0);\n}\n",
-                "error[GRF-RUN-005]: division by zero",
+                "error[GRF-RUN-005]: remainder by zero",
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    uint big = 9223372036854775808;\n    int small = 1;\n    io.println(small + big);\n}\n",
@@ -827,6 +827,401 @@ void main() {
                 output.stderr
             );
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exceptions_match_runtime_kinds_and_preserve_finally() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-try-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type DivisionByZeroError {
+    value: int,
+}
+
+int boom() {
+    return 1 / 0;
+}
+
+void take(auto int value) {
+    io.println(value);
+}
+
+void main() {
+    DivisionByZeroError item = { value: 4 };
+    try {
+        int a = 1;
+        int b = 0;
+        io.println(a / b);
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        io.println(1 % 0);
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        int16 a = 32767;
+        int16 b = 1;
+        io.println(a + b);
+    } catch (IntegerOverflowError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        int[] items = [1, 2, 3];
+        io.println(items[5]);
+    } catch (ArrayIndexOutOfBoundsError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        map<str, int> scores = {};
+        io.println(scores["absent-key"]);
+    } catch (MissingMapKeyError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        take("abc");
+    } catch (NumericConversionError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        uint big = 9223372036854775808;
+        int small = 1;
+        io.println(small + big);
+    } catch (NumericConversionError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        int[] values = [1, 2, 3];
+        int[] copy = values[::0];
+        io.println(copy.length());
+    } catch (InvalidSliceError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        int[] values = [1, 2, 3];
+        values[::2] = [9];
+    } catch (InvalidSliceError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        int[] values = [1];
+        int a, int b = values;
+        io.println(a);
+    } catch (InvalidSliceError error) {
+        io.println("slice");
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+    try {
+        int[3] values = [1, 2, 3];
+        values.push(4);
+    } catch (ArrayIndexOutOfBoundsError error) {
+        io.println("bounds");
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+    try {
+        int[] items = [1];
+        items.insert(5, 9);
+    } catch (ArrayIndexOutOfBoundsError error) {
+        io.println("bounds");
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+    try {
+        str line = io.input("");
+        io.println(line);
+    } catch (IoError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+    try {
+        io.println(1 / 0);
+    } catch (DivisionByZeroError error) {
+        io.println("specific");
+    } catch (RuntimeError error) {
+        io.println("any");
+    }
+    try {
+        int x = 1 / 0;
+        io.println(x);
+    } catch (DivisionByZeroError error) {
+        io.println(lengthOf(error.stackTrace()));
+    }
+    try {
+        io.println(boom());
+    } catch (DivisionByZeroError error) {
+        io.println(error.stackTrace());
+    }
+    try {
+        io.println("body");
+    } finally {
+        io.println("final");
+    }
+    try {
+        loop (int i = 0; i < 2; i++) {
+            if (i == 1) {
+                break;
+            }
+            io.println(i);
+        }
+    } finally {
+        io.println("once");
+    }
+    loop () {
+        try {
+            io.println("brk");
+            break;
+        } finally {
+            io.println("after-break");
+        }
+    }
+    int n = 0;
+    loop () {
+        try {
+            n = n + 1;
+            if (n == 1) {
+                continue;
+            }
+            break;
+        } finally {
+            io.println("after-continue");
+        }
+    }
+    try {
+        try {
+            io.println(1 / 0);
+        } finally {
+            io.println("inner");
+        }
+    } catch (DivisionByZeroError error) {
+        io.println(lengthOf(error.causeMessage()));
+        io.println("outer-catch");
+    } finally {
+        io.println("outer");
+    }
+    try {
+        try {
+            io.println(1 / 0);
+        } finally {
+            io.println(1 % 0);
+        }
+    } catch (DivisionByZeroError error) {
+        io.println(error.message());
+        io.println(error.causeMessage());
+    }
+    try {
+        io.println(1 / 0);
+    } catch (Error error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+    try {
+        int[] values = [1];
+        int left, int right = values;
+        io.println(left);
+    } catch (Error error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+    io.println(item.value);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert!(!output.stdout.contains("absent-key"), "{}", output.stdout);
+        assert!(
+            output.stdout.contains("boom at ") && output.stdout.contains(".grf:"),
+            "{}",
+            output.stdout
+        );
+        let without_trace = output
+            .stdout
+            .lines()
+            .filter(|line| !line.starts_with("boom at "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            without_trace,
+            "\
+DivisionByZeroError
+division by zero
+GRF-RUN-005
+DivisionByZeroError
+remainder by zero
+GRF-RUN-005
+IntegerOverflowError
+integer overflow
+GRF-RUN-004
+ArrayIndexOutOfBoundsError
+array index out of bounds
+GRF-RUN-001
+MissingMapKeyError
+missing map key
+GRF-RUN-002
+NumericConversionError
+numeric conversion failed
+GRF-RUN-006
+NumericConversionError
+numeric conversion failed
+GRF-RUN-006
+InvalidSliceError
+slice step equals zero
+GRF-RUN-003
+InvalidSliceError
+slice assignment length mismatch
+GRF-RUN-008
+RuntimeError
+GRF-RUN-009
+RuntimeError
+GRF-RUN-010
+RuntimeError
+GRF-RUN-011
+IoError
+input/output error
+GRF-RUN-007
+specific
+0
+body
+final
+0
+once
+brk
+after-break
+after-continue
+after-continue
+inner
+0
+outer-catch
+outer
+remainder by zero
+division by zero
+DivisionByZeroError
+division by zero
+RuntimeError
+GRF-RUN-009
+4"
+        );
+
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    try {
+        io.println(1 / 0);
+    } catch (DivisionByZeroError error) {
+        io.println(1 % 0);
+    } catch (RuntimeError error) {
+        io.println("sibling");
+    } finally {
+        io.println("fin");
+    }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "{}", output.stdout);
+        assert_eq!(output.stdout, "fin\n");
+        assert!(!output.stdout.contains("sibling"));
+        assert!(
+            output
+                .stderr
+                .contains("error[GRF-RUN-005]: remainder by zero")
+        );
+        assert_eq!(output.stderr.matches("error[GRF-RUN-005]").count(), 1);
+
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+int give() {
+    try {
+        return 7;
+    } finally {
+        int z = 1 / 0;
+        io.println(z);
+    }
+}
+
+void main() {
+    try {
+        io.println(give());
+    } catch (DivisionByZeroError error) {
+        io.println(error.message());
+        io.println(lengthOf(error.causeMessage()));
+    }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "division by zero\n0\n");
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n\tio.println(1 / 0);\n}\n",
+        )
+        .unwrap();
+        let uncaught = run_captured(&path);
+        let header = uncaught
+            .stderr
+            .lines()
+            .find(|line| line.contains("--> "))
+            .unwrap_or("");
+        let column = header.rsplit(':').next().unwrap_or("");
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n\ttry {\n\tio.println(1 / 0);\n\t} catch (DivisionByZeroError error) {\n\tio.println(error.column());\n\t}\n}\n",
+        )
+        .unwrap();
+        let caught = run_captured(&path);
+        assert_eq!(caught.status, 0, "{}", caught.stderr);
+        assert_eq!(caught.stdout, format!("{column}\n"), "{}", uncaught.stderr);
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    try {\n        io.println(1 / 0);\n    } finally {\n        io.println(\"still\");\n    }\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert_eq!(output.stdout, "still\n");
+        assert_eq!(output.stderr.matches("error[GRF-RUN-005]").count(), 1);
+        assert!(output.stderr.contains("--> "));
         let _ = fs::remove_dir_all(&dir);
     }
 

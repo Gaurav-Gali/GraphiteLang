@@ -194,6 +194,32 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
         }
         Stmt::Break(_) => write_line(out, prefix, last, "Break"),
         Stmt::Continue(_) => write_line(out, prefix, last, "Continue"),
+        Stmt::Try(try_statement) => {
+            write_line(out, prefix, last, "Try");
+            let child = child_prefix(prefix, last);
+            let catch_count = try_statement.catches.len();
+            let has_finally = try_statement.finally_block.is_some();
+            write_block(
+                out,
+                &child,
+                catch_count == 0 && !has_finally,
+                &try_statement.body,
+            );
+            for (index, clause) in try_statement.catches.iter().enumerate() {
+                let clause_last = index + 1 == catch_count && !has_finally;
+                write_line(
+                    out,
+                    &child,
+                    clause_last,
+                    &format!("Catch {} {}", clause.error_type.name, clause.binding.name),
+                );
+                write_block(out, &child_prefix(&child, clause_last), true, &clause.block);
+            }
+            if let Some(finally_block) = &try_statement.finally_block {
+                write_line(out, &child, true, "Finally");
+                write_block(out, &child_prefix(&child, true), true, finally_block);
+            }
+        }
         Stmt::Destructure(declaration) => {
             write_line(out, prefix, last, "Destructure");
             let child = child_prefix(prefix, last);

@@ -1,0 +1,211 @@
+import grf.io;
+
+// Stage 12 try, catch, and finally.
+// Catch clauses name built-in runtime errors. A record may reuse a catch-type spelling.
+
+type DivisionByZeroError {
+    value: int,
+}
+
+int divide(int left, int right) {
+    return left / right;
+}
+
+int give() {
+    try {
+        return 7;
+    } finally {
+        io.println("finally after return");
+    }
+}
+
+void take(auto int value) {
+    io.println(value);
+}
+
+void main() {
+    DivisionByZeroError item = { value: 4 };
+    io.println(item.value);
+
+    try {
+        io.println(divide(1, 0));
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+        io.println(error.line() > 0);
+        io.println(error.column() > 0);
+        io.println(lengthOf(error.sourceFile()) > 0);
+        io.println(lengthOf(error.causeMessage()));
+        io.println(lengthOf(error.stackTrace()) > 0);
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+    }
+
+    try {
+        io.println(1 % 0);
+    } catch (DivisionByZeroError error) {
+        io.println(error.message());
+        io.println(error.code());
+    }
+
+    try {
+        int16 a = 32767;
+        int16 b = 1;
+        io.println(a + b);
+    } catch (IntegerOverflowError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    try {
+        int[] items = [1, 2, 3];
+        io.println(items[5]);
+    } catch (ArrayIndexOutOfBoundsError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    try {
+        map<str, int> scores = {};
+        io.println(scores["Ada"]);
+    } catch (MissingMapKeyError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    try {
+        take("abc");
+    } catch (NumericConversionError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    try {
+        int[] values = [1, 2, 3];
+        int[] copy = values[::0];
+        io.println(lengthOf(copy));
+    } catch (InvalidSliceError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    try {
+        int[] values = [1, 2, 3];
+        values[::2] = [9];
+    } catch (InvalidSliceError error) {
+        io.println(error.message());
+    }
+
+    try {
+        int[] values = [1];
+        int left, int right = values;
+        io.println(left);
+    } catch (InvalidSliceError error) {
+        io.println(error.kind());
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+
+    try {
+        int[3] values = [1, 2, 3];
+        values.push(4);
+    } catch (RuntimeError error) {
+        io.println(error.code());
+    }
+
+    try {
+        int[] items = [1];
+        items.insert(5, 9);
+    } catch (RuntimeError error) {
+        io.println(error.code());
+    }
+
+    try {
+        io.println(1 / 0);
+    } catch (IoError error) {
+        io.println(error.kind());
+    } catch (ExternalLibraryError error) {
+        io.println(error.kind());
+    } catch (RuntimeInternalError error) {
+        io.println(error.kind());
+    } catch (DivisionByZeroError error) {
+        io.println("specific");
+    } catch (RuntimeError error) {
+        io.println("any");
+    } finally {
+        io.println("cleanup");
+    }
+
+    try {
+        io.println("body");
+    } finally {
+        io.println("final");
+    }
+
+    try {
+        loop (int i = 0; i < 2; i++) {
+            if (i == 1) {
+                break;
+            }
+            io.println(i);
+        }
+    } finally {
+        io.println("once");
+    }
+
+    loop () {
+        try {
+            break;
+        } finally {
+            io.println("after break");
+        }
+    }
+
+    int n = 0;
+    loop () {
+        try {
+            n = n + 1;
+            if (n == 1) {
+                continue;
+            }
+            break;
+        } finally {
+            io.println("after continue");
+        }
+    }
+
+    io.println(give());
+
+    try {
+        try {
+            io.println(1 / 0);
+        } finally {
+            io.println("inner");
+        }
+    } catch (DivisionByZeroError error) {
+        io.println(lengthOf(error.causeMessage()));
+    } finally {
+        io.println("outer");
+    }
+
+    try {
+        try {
+            io.println(1 / 0);
+        } finally {
+            io.println(1 % 0);
+        }
+    } catch (DivisionByZeroError error) {
+        io.println(error.message());
+        io.println(error.causeMessage());
+    }
+
+    try {
+        io.println(1 / 0);
+    } catch (Error error) {
+        io.println(error.kind());
+        io.println(error.message());
+        io.println(error.code());
+    }
+}

@@ -584,8 +584,9 @@ Requirements:
 
 -   Specify grammar and AST representation for `try`, `catch`, and
     `finally`.
--   Decide whether `throw` and user-defined error types are included in
-    the initial implementation.
+-   `throw` is a reserved keyword. A throw statement is rejected because
+    explicit throwing is not supported in this version. User-defined
+    error types stay deferred.
 -   Define built-in runtime errors and catch matching, including array
     bounds, missing map keys, conversion failures, and Rust library
     failures.

@@ -49,6 +49,10 @@ pub enum TokenKind {
     KwMap,
     KwTrue,
     KwFalse,
+    KwTry,
+    KwCatch,
+    KwFinally,
+    KwThrow,
 
     LeftParen,
     RightParen,
@@ -145,6 +149,10 @@ fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
         TokenKind::KwMap => "map",
         TokenKind::KwTrue => "true",
         TokenKind::KwFalse => "false",
+        TokenKind::KwTry => "try",
+        TokenKind::KwCatch => "catch",
+        TokenKind::KwFinally => "finally",
+        TokenKind::KwThrow => "throw",
         _ => return None,
     })
 }
@@ -179,6 +187,10 @@ pub fn keyword(ident: &str) -> Option<TokenKind> {
         "map" => TokenKind::KwMap,
         "true" => TokenKind::KwTrue,
         "false" => TokenKind::KwFalse,
+        "try" => TokenKind::KwTry,
+        "catch" => TokenKind::KwCatch,
+        "finally" => TokenKind::KwFinally,
+        "throw" => TokenKind::KwThrow,
         _ => return None,
     })
 }

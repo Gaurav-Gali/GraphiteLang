@@ -32,6 +32,9 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         out: String::from(PRELUDE),
         indent: 0,
         loops: Vec::new(),
+        tries: Vec::new(),
+        fn_ret: "()".to_string(),
+        pending_ids: 0,
         tmps: 0,
         loop_ids: 0,
         records: &program.records,
@@ -69,10 +72,18 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
     emitter.out
 }
 
+struct TryFrame {
+    pending: String,
+    loop_depth: usize,
+}
+
 struct Emitter<'a> {
     out: String,
     indent: usize,
     loops: Vec<(String, String)>,
+    tries: Vec<TryFrame>,
+    fn_ret: String,
+    pending_ids: u32,
     tmps: u32,
     loop_ids: u32,
     records: &'a [CheckedRecord],
@@ -105,6 +116,8 @@ impl Emitter<'_> {
         } else {
             self.ty_name(function.ret)
         };
+        self.fn_ret = ret.clone();
+        self.tries.clear();
         self.line(&format!(
             "{visibility}fn {rust_name}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
         ));
@@ -114,6 +127,8 @@ impl Emitter<'_> {
         }
         if function.ret == CanonicalType::Void {
             self.line("Ok(())");
+        } else {
+            self.line("unreachable!();");
         }
         self.indent -= 1;
         self.line("}");
@@ -149,11 +164,7 @@ impl Emitter<'_> {
                     self.ty_name(*ty)
                 ));
             }
-            CheckedStmt::Return(None) => self.line("return Ok(());"),
-            CheckedStmt::Return(Some(value)) => {
-                let value = self.emit_expr(value);
-                self.line(&format!("return Ok({value});"));
-            }
+            CheckedStmt::Return(value) => self.emit_return(value),
             CheckedStmt::Expr(expr) => {
                 let value = self.emit_expr(expr);
                 if expr.ty() == CanonicalType::Void {
@@ -234,23 +245,8 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
-            CheckedStmt::Break => {
-                if let Some((label, _)) = self.loops.last() {
-                    let label = label.clone();
-                    self.line(&format!("break '{label};"));
-                }
-            }
-            CheckedStmt::Continue => {
-                if let Some((break_label, continue_label)) = self.loops.last() {
-                    if break_label == continue_label {
-                        let label = continue_label.clone();
-                        self.line(&format!("continue '{label};"));
-                    } else {
-                        let label = continue_label.clone();
-                        self.line(&format!("break '{label};"));
-                    }
-                }
-            }
+            CheckedStmt::Break => self.emit_break(),
+            CheckedStmt::Continue => self.emit_continue(),
             CheckedStmt::Block { body } => {
                 self.line("{");
                 self.emit_body(body);
@@ -361,6 +357,236 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
+            CheckedStmt::Try {
+                body,
+                catches,
+                finally_body,
+            } => self.emit_try(body, catches, finally_body),
+        }
+    }
+
+    fn emit_return(&mut self, value: &Option<CheckedExpr>) {
+        if let Some(pending) = self.tries.last().map(|frame| frame.pending.clone()) {
+            if let Some(value) = value {
+                let value = self.emit_expr(value);
+                self.line(&format!("{pending} = GrfExit::Return({value});"));
+            } else {
+                self.line(&format!("{pending} = GrfExit::Return(());"));
+            }
+            self.line("return Ok(());");
+            return;
+        }
+        match value {
+            None => self.line("return Ok(());"),
+            Some(value) => {
+                let value = self.emit_expr(value);
+                self.line(&format!("return Ok({value});"));
+            }
+        }
+    }
+
+    fn emit_break(&mut self) {
+        let Some((label, _)) = self.loops.last().cloned() else {
+            return;
+        };
+        if self.exit_try() {
+            let pending = self.tries.last().unwrap().pending.clone();
+            self.line(&format!("{pending} = GrfExit::Break(\"{label}\");"));
+            self.line("return Ok(());");
+            return;
+        }
+        self.line(&format!("break '{label};"));
+    }
+
+    fn emit_continue(&mut self) {
+        let Some((break_label, continue_label)) = self.loops.last().cloned() else {
+            return;
+        };
+        let inner = break_label != continue_label;
+        if self.exit_try() {
+            let pending = self.tries.last().unwrap().pending.clone();
+            if inner {
+                self.line(&format!(
+                    "{pending} = GrfExit::ContinueInner(\"{continue_label}\");"
+                ));
+            } else {
+                self.line(&format!(
+                    "{pending} = GrfExit::Continue(\"{continue_label}\");"
+                ));
+            }
+            self.line("return Ok(());");
+            return;
+        }
+        if inner {
+            self.line(&format!("break '{continue_label};"));
+        } else {
+            self.line(&format!("continue '{continue_label};"));
+        }
+    }
+
+    fn exit_try(&self) -> bool {
+        self.tries
+            .last()
+            .is_some_and(|frame| self.loops.len() <= frame.loop_depth)
+    }
+
+    fn emit_try(
+        &mut self,
+        body: &[CheckedStmt],
+        catches: &[crate::semantic::CheckedCatch],
+        finally_body: &Option<Vec<CheckedStmt>>,
+    ) {
+        let id = self.pending_ids;
+        self.pending_ids += 1;
+        let pending = format!("grf_pending_{id}");
+        let ret = self.fn_ret.clone();
+        self.line(&format!(
+            "let mut {pending}: GrfExit<{ret}> = GrfExit::Fall;"
+        ));
+        self.tries.push(TryFrame {
+            pending: pending.clone(),
+            loop_depth: self.loops.len(),
+        });
+        self.line("let grf_body = (|| -> Result<(), graphite_core::diagnostic::RuntimeError> {");
+        self.indent += 1;
+        for statement in body {
+            self.emit_stmt(statement);
+        }
+        self.line("Ok(())");
+        self.indent -= 1;
+        self.line("})();");
+        self.line(&format!(
+            "if let Err(error) = grf_body {{ {pending} = GrfExit::Error(error); }}"
+        ));
+        for (index, clause) in catches.iter().enumerate() {
+            let keyword = if index == 0 { "if" } else { "else if" };
+            let condition = if clause.kind == "RuntimeError" || clause.kind == "Error" {
+                format!("matches!(&{pending}, GrfExit::Error(_))")
+            } else {
+                format!(
+                    "matches!(&{pending}, GrfExit::Error(error) if error.kind_name() == \"{}\")",
+                    clause.kind
+                )
+            };
+            self.line(&format!("{keyword} {condition} {{"));
+            self.indent += 1;
+            let binding = rust_ident(&clause.binding);
+            self.line(&format!(
+                "let GrfExit::Error({binding}) = std::mem::replace(&mut {pending}, GrfExit::Fall) else {{ unreachable!() }};"
+            ));
+            self.line(
+                "let grf_catch = (|| -> Result<(), graphite_core::diagnostic::RuntimeError> {",
+            );
+            self.indent += 1;
+            for statement in &clause.body {
+                self.emit_stmt(statement);
+            }
+            self.line("Ok(())");
+            self.indent -= 1;
+            self.line("})();");
+            self.line(&format!(
+                "if let Err(error) = grf_catch {{ {pending} = GrfExit::Error(error); }}"
+            ));
+            self.indent -= 1;
+            self.line("}");
+        }
+        if let Some(finally_body) = finally_body {
+            self.line(
+                "let grf_finally = (|| -> Result<(), graphite_core::diagnostic::RuntimeError> {",
+            );
+            self.indent += 1;
+            for statement in finally_body {
+                self.emit_stmt(statement);
+            }
+            self.line("Ok(())");
+            self.indent -= 1;
+            self.line("})();");
+            self.line("if let Err(error) = grf_finally {");
+            self.indent += 1;
+            self.line(&format!(
+                "{pending} = match std::mem::replace(&mut {pending}, GrfExit::Fall) {{"
+            ));
+            self.indent += 1;
+            self.line("GrfExit::Error(old) => GrfExit::Error(error.with_cause(old)),");
+            self.line("_ => GrfExit::Error(error),");
+            self.indent -= 1;
+            self.line("};");
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.tries.pop();
+        self.emit_resume(&pending);
+    }
+
+    fn emit_resume(&mut self, pending: &str) {
+        if let Some(outer) = self.tries.last().map(|frame| frame.pending.clone()) {
+            self.line(&format!(
+                "match std::mem::replace(&mut {pending}, GrfExit::Fall) {{"
+            ));
+            self.indent += 1;
+            self.line("GrfExit::Fall => {}");
+            self.line(&format!("other => {{ {outer} = other; return Ok(()); }}"));
+            self.indent -= 1;
+            self.line("};");
+            return;
+        }
+        let breaks = self
+            .loops
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect::<Vec<_>>();
+        let continues = self
+            .loops
+            .iter()
+            .filter(|(break_label, continue_label)| break_label == continue_label)
+            .map(|(_, label)| label.clone())
+            .collect::<Vec<_>>();
+        let inners = self
+            .loops
+            .iter()
+            .filter(|(break_label, continue_label)| break_label != continue_label)
+            .map(|(_, label)| label.clone())
+            .collect::<Vec<_>>();
+        self.line(&format!(
+            "match std::mem::replace(&mut {pending}, GrfExit::Fall) {{"
+        ));
+        self.indent += 1;
+        self.line("GrfExit::Fall => {}");
+        if self.fn_ret == "()" {
+            self.line("GrfExit::Return(_) => return Ok(()),");
+        } else {
+            self.line("GrfExit::Return(value) => return Ok(value),");
+        }
+        self.line("GrfExit::Error(error) => return Err(error),");
+        self.line("GrfExit::Break(label) => {");
+        self.indent += 1;
+        self.emit_label_dispatch("break", &breaks);
+        self.indent -= 1;
+        self.line("}");
+        self.line("GrfExit::Continue(label) => {");
+        self.indent += 1;
+        self.emit_label_dispatch("continue", &continues);
+        self.indent -= 1;
+        self.line("}");
+        self.line("GrfExit::ContinueInner(label) => {");
+        self.indent += 1;
+        self.emit_label_dispatch("break", &inners);
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("};");
+    }
+
+    fn emit_label_dispatch(&mut self, keyword: &str, labels: &[String]) {
+        if labels.is_empty() {
+            self.line("let _ = label;");
+            return;
+        }
+        for (index, label) in labels.iter().enumerate() {
+            let word = if index == 0 { "if" } else { "else if" };
+            self.line(&format!(
+                "{word} label == \"{label}\" {{ {keyword} '{label}; }}"
+            ));
         }
     }
 
@@ -691,7 +917,16 @@ impl Emitter<'_> {
                 *column,
                 *end_column,
             ),
-            CheckedExpr::Call { path, args, .. } => {
+            CheckedExpr::Call {
+                path,
+                args,
+                callee,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
                 let path = if path.contains("::") {
                     path.clone()
                 } else if path == "main" {
@@ -704,7 +939,24 @@ impl Emitter<'_> {
                     .map(|arg| self.emit_expr(arg))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("{path}({args})?")
+                let site = self.locate(file, *line, *column, *end_column);
+                format!(
+                    "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee}\", {site})) }}"
+                )
+            }
+            CheckedExpr::HandleCall { name, method, .. } => {
+                let name = rust_ident(name);
+                match method.as_str() {
+                    "message" => format!("{name}.message_text()"),
+                    "code" => format!("String::from({name}.code)"),
+                    "kind" => format!("String::from({name}.kind_name())"),
+                    "sourceFile" => format!("{name}.source_file()"),
+                    "line" => format!("{name}.line_number()"),
+                    "column" => format!("{name}.column_number()"),
+                    "causeMessage" => format!("{name}.cause_message()"),
+                    "stackTrace" => format!("{name}.stack_trace()"),
+                    _ => "String::new()".to_string(),
+                }
             }
             CheckedExpr::NumCast {
                 from,
@@ -1909,7 +2161,15 @@ const RUST_KEYWORDS: &[&str] = &[
     "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen",
 ];
 
-const PRELUDE: &str = r#"#![allow(dead_code, unused_macros)]
+const PRELUDE: &str = r#"#![allow(dead_code, unused_macros, unreachable_code, unused_variables)]
+enum GrfExit<T> {
+    Fall,
+    Return(T),
+    Break(&'static str),
+    Continue(&'static str),
+    ContinueInner(&'static str),
+    Error(graphite_core::diagnostic::RuntimeError),
+}
 
 macro_rules! grf_add {
     ($a:expr, $b:expr, $site:expr) => {
@@ -1955,7 +2215,7 @@ macro_rules! grf_rem {
             Some(value) => value,
             None => {
                 if $b == 0 {
-                    return Err(graphite_core::diagnostic::division_by_zero($site));
+                    return Err(graphite_core::diagnostic::remainder_by_zero($site));
                 } else {
                     return Err(graphite_core::diagnostic::integer_overflow($site));
                 }

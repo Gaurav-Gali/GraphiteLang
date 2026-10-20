@@ -44,6 +44,15 @@ impl ParserDiagnostic {
         if self.message.contains("is a reserved keyword") {
             return "GRF-NAM-003";
         }
+        if self.message.contains("explicit throw") {
+            return "GRF-EXC-007";
+        }
+        if self.message.contains("catch must")
+            || self.message.contains("only one finally")
+            || self.message.contains("must follow a try")
+        {
+            return "GRF-EXC-004";
+        }
         match self.kind {
             ParserDiagnosticKind::ExpectedToken => "GRF-PAR-001",
             ParserDiagnosticKind::UnexpectedToken => "GRF-PAR-002",
@@ -418,6 +427,31 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::KwContinue) {
             return Some(self.parse_break_or_continue(false));
         }
+        if self.check(TokenKind::KwTry) {
+            return Some(self.parse_try());
+        }
+        if self.check(TokenKind::KwThrow) {
+            self.parse_throw();
+            return None;
+        }
+        if self.check(TokenKind::KwCatch) {
+            self.error(
+                ParserDiagnosticKind::InvalidStatement,
+                self.current().span,
+                "catch must follow a try",
+            );
+            let _ = self.parse_catch();
+            return None;
+        }
+        if self.check(TokenKind::KwFinally) {
+            self.error(
+                ParserDiagnosticKind::InvalidStatement,
+                self.current().span,
+                "finally must follow a try",
+            );
+            let _ = self.parse_finally();
+            return None;
+        }
         if self.starts_declaration() {
             return self.parse_declaration_statement();
         }
@@ -432,6 +466,107 @@ impl<'a> Parser<'a> {
             expression,
             span: Span { start, end },
         }))
+    }
+
+    fn parse_try(&mut self) -> Stmt {
+        let start = self.bump().span.start;
+        let body = self.parse_required_block("expected '{' to open a try block");
+        let mut catches = Vec::new();
+        let mut finally_block = None;
+        loop {
+            if self.check(TokenKind::KwCatch) {
+                if finally_block.is_some() {
+                    self.error(
+                        ParserDiagnosticKind::InvalidStatement,
+                        self.current().span,
+                        "catch must come before finally",
+                    );
+                }
+                if let Some(clause) = self.parse_catch() {
+                    catches.push(clause);
+                }
+            } else if self.check(TokenKind::KwFinally) {
+                if finally_block.is_some() {
+                    self.error(
+                        ParserDiagnosticKind::InvalidStatement,
+                        self.current().span,
+                        "a try statement can have only one finally",
+                    );
+                    let _ = self.parse_finally();
+                } else {
+                    finally_block = Some(self.parse_finally());
+                }
+            } else {
+                break;
+            }
+        }
+        let end = finally_block
+            .as_ref()
+            .map(|block| block.span.end)
+            .or_else(|| catches.last().map(|clause| clause.span.end))
+            .unwrap_or(body.span.end);
+        Stmt::Try(TryStmt {
+            body,
+            catches,
+            finally_block,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_catch(&mut self) -> Option<CatchClause> {
+        let start = self.bump().span.start;
+        self.consume(TokenKind::LeftParen, "expected '(' after catch");
+        let error_type = self.expect_identifier("expected a catch type")?;
+        let binding = self.expect_identifier("expected a catch binding")?;
+        self.consume(
+            TokenKind::RightParen,
+            "expected ')' after the catch binding",
+        );
+        let block = self.parse_required_block("expected '{' to open a catch block");
+        let end = block.span.end;
+        Some(CatchClause {
+            error_type,
+            binding,
+            block,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_finally(&mut self) -> BlockStmt {
+        self.bump();
+        self.parse_required_block("expected '{' to open a finally block")
+    }
+
+    fn parse_throw(&mut self) {
+        let token = self.bump();
+        self.error(
+            ParserDiagnosticKind::InvalidStatement,
+            token.span,
+            "explicit throw is not supported in this version",
+        );
+        if !self.check(TokenKind::Semicolon)
+            && !self.check(TokenKind::RightBrace)
+            && !self.is_at_end()
+        {
+            let _ = self.parse_expression();
+        }
+        let _ = self.consume(TokenKind::Semicolon, "expected ';' after throw");
+    }
+
+    fn parse_required_block(&mut self, message: &str) -> BlockStmt {
+        if self.check(TokenKind::LeftBrace) {
+            self.parse_block()
+        } else {
+            self.error(
+                ParserDiagnosticKind::InvalidStatement,
+                self.current().span,
+                message,
+            );
+            BlockStmt {
+                statements: Vec::new(),
+                span: self.current().span,
+            }
+        }
     }
 
     fn parse_declaration_statement(&mut self) -> Option<Stmt> {
@@ -1883,6 +2018,7 @@ fn statement_span(statement: &Stmt) -> Span {
         Stmt::If(if_statement) => if_statement.span,
         Stmt::Loop(loop_statement) => loop_statement.span,
         Stmt::Break(span) | Stmt::Continue(span) => *span,
+        Stmt::Try(try_statement) => try_statement.span,
         Stmt::Expression(expression) => expression.span,
     }
 }

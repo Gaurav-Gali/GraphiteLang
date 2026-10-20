@@ -4,10 +4,9 @@
 //! format arbitrary Graphite values. The compiler inserts `auto str` conversion
 //! before the call.
 //!
-//! Graphite v0.1 has no error-handling syntax. A failed read or write reports
-//! the underlying I/O error and terminates the process with status 1. A
-//! successful read of an empty line returns an empty string. End of file is
-//! not reported as an empty string.
+//! A failed read or write returns `IoError`. An uncaught error is rendered
+//! once at the program boundary. A successful read of an empty line returns
+//! an empty string. End of file is not reported as an empty string.
 
 use std::io::{self, BufRead, Write};
 

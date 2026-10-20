@@ -42,7 +42,17 @@ impl Diagnostic {
 /// Stable code for one semantic or type diagnostic. The match is ordered so
 /// more specific wording wins. Every arm is a distinct published condition.
 pub fn semantic_code(message: &str) -> &'static str {
-    if message.starts_with("type mismatch:") || message.starts_with("expected a ") {
+    if message.starts_with("a try statement needs") {
+        "GRF-EXC-001"
+    } else if message.starts_with("unknown catch type") {
+        "GRF-EXC-002"
+    } else if message.starts_with("unreachable catch") {
+        "GRF-EXC-003"
+    } else if message.contains("inside finally") {
+        "GRF-EXC-006"
+    } else if message.contains("runtime error") {
+        "GRF-EXC-005"
+    } else if message.starts_with("type mismatch:") || message.starts_with("expected a ") {
         "GRF-TYP-001"
     } else if message.starts_with("operator ")
         || message.starts_with("unary ")

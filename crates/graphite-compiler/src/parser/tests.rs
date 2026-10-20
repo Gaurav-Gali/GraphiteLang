@@ -803,11 +803,38 @@ void main() {
 }
 
 #[test]
+fn throw_is_reserved_and_not_a_statement() {
+    let lexed = lex("test.grf", "void main() {\n    throw 1;\n}\n");
+    let parsed = parse("test.grf", &lexed.tokens);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "GRF-EXC-007"),
+        "{:?}",
+        parsed.diagnostics
+    );
+    assert_rejected(
+        "void main() {\n    throw 1;\n}\n",
+        "explicit throw is not supported in this version",
+    );
+    assert_rejected(
+        "void main() {\n    catch (RuntimeError error) {\n    }\n}\n",
+        "catch must follow a try",
+    );
+    assert_rejected(
+        "void main() {\n    try {\n    } finally {\n    } catch (RuntimeError error) {\n    }\n}\n",
+        "catch must come before finally",
+    );
+}
+
+#[test]
 fn reserved_keywords_cannot_be_declaration_names() {
     let keywords = [
         "import", "auto", "const", "void", "int", "uint", "flt", "int16", "int32", "int64",
         "uint16", "uint32", "uint64", "flt32", "flt64", "bln", "chr", "str", "if", "else", "loop",
-        "break", "continue", "return", "type", "map", "true", "false",
+        "break", "continue", "return", "type", "map", "true", "false", "try", "catch", "finally",
+        "throw",
     ];
     for keyword in keywords {
         let message = format!("'{keyword}' is a reserved keyword");

@@ -67,6 +67,7 @@ pub enum CanonicalType {
     Chr,
     Str,
     Type,
+    ErrorHandle,
     Record(RecordId),
     Map(MapId),
     Array {
@@ -92,6 +93,7 @@ pub enum Leaf {
     Chr,
     Str,
     Type,
+    ErrorHandle,
     Record(RecordId),
     Map(MapId),
 }
@@ -112,6 +114,7 @@ impl CanonicalType {
             CanonicalType::Chr => "char".to_string(),
             CanonicalType::Str => "String".to_string(),
             CanonicalType::Type => "GrfType".to_string(),
+            CanonicalType::ErrorHandle => "graphite_core::diagnostic::RuntimeError".to_string(),
             CanonicalType::Record(_) => "GrfRecord".to_string(),
             CanonicalType::Map(_) => "HashMap<(), ()>".to_string(),
             CanonicalType::Array { leaf, depth, .. } => {
@@ -139,6 +142,7 @@ impl CanonicalType {
             CanonicalType::Chr => "chr".to_string(),
             CanonicalType::Str => "str".to_string(),
             CanonicalType::Type => "Type".to_string(),
+            CanonicalType::ErrorHandle => "RuntimeError".to_string(),
             CanonicalType::Record(_) => "record".to_string(),
             CanonicalType::Map(_) => "map".to_string(),
             CanonicalType::Array {
@@ -209,6 +213,7 @@ impl CanonicalType {
         matches!(
             self,
             CanonicalType::Str
+                | CanonicalType::ErrorHandle
                 | CanonicalType::Record(_)
                 | CanonicalType::Map(_)
                 | CanonicalType::Array { .. }
@@ -281,6 +286,7 @@ impl CanonicalType {
             CanonicalType::Chr => Leaf::Chr,
             CanonicalType::Str => Leaf::Str,
             CanonicalType::Type => Leaf::Type,
+            CanonicalType::ErrorHandle => Leaf::ErrorHandle,
             CanonicalType::Record(id) => Leaf::Record(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
@@ -324,6 +330,7 @@ impl Leaf {
             Leaf::Chr => CanonicalType::Chr,
             Leaf::Str => CanonicalType::Str,
             Leaf::Type => CanonicalType::Type,
+            Leaf::ErrorHandle => CanonicalType::ErrorHandle,
             Leaf::Record(id) => CanonicalType::Record(id),
             Leaf::Map(id) => CanonicalType::Map(id),
         }
@@ -344,6 +351,7 @@ impl Leaf {
             Leaf::Chr => "chr",
             Leaf::Str => "str",
             Leaf::Type => "Type",
+            Leaf::ErrorHandle => "RuntimeError",
             Leaf::Record(_) => "record",
             Leaf::Map(_) => "map",
         }
@@ -505,6 +513,18 @@ pub enum CheckedStmt {
         kind: LoopSourceKind,
         body: Vec<CheckedStmt>,
     },
+    Try {
+        body: Vec<CheckedStmt>,
+        catches: Vec<CheckedCatch>,
+        finally_body: Option<Vec<CheckedStmt>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedCatch {
+    pub kind: String,
+    pub binding: String,
+    pub body: Vec<CheckedStmt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,6 +646,16 @@ pub enum CheckedExpr {
     Call {
         path: String,
         args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        callee: String,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    HandleCall {
+        name: String,
+        method: String,
         ty: CanonicalType,
     },
     LengthOf {
@@ -781,7 +811,8 @@ impl CheckedExpr {
             | CheckedExpr::Binary { ty, .. }
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
-            | CheckedExpr::Call { ty, .. } => *ty,
+            | CheckedExpr::Call { ty, .. }
+            | CheckedExpr::HandleCall { ty, .. } => *ty,
             CheckedExpr::Convert { to, .. } | CheckedExpr::NumCast { to, .. } => *to,
             CheckedExpr::Array { ty, .. }
             | CheckedExpr::Record { ty, .. }
@@ -850,6 +881,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         resolve_stack: Vec::new(),
         scopes: Vec::new(),
         loop_depth: 0,
+        finally_depth: 0,
         current_return: CanonicalType::Void,
         iterating: Vec::new(),
     };
@@ -923,6 +955,7 @@ struct Checker<'a> {
     resolve_stack: Vec<RecordId>,
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
+    finally_depth: u32,
     current_return: CanonicalType,
     iterating: Vec<IterLock>,
 }
@@ -1459,6 +1492,9 @@ impl<'a> Checker<'a> {
             Stmt::VariableDecl(decl) => self.check_variable(decl).map(|let_stmt| let_stmt),
             Stmt::Destructure(decl) => self.check_destructure(decl),
             Stmt::Return(stmt) => {
+                if self.finally_depth > 0 {
+                    self.error(stmt.span, "return is not allowed inside finally");
+                }
                 if self.current_return == CanonicalType::Void {
                     if stmt.value.is_some() {
                         self.error(stmt.span, "a void function cannot return a value");
@@ -1495,22 +1531,97 @@ impl<'a> Checker<'a> {
             }
             Stmt::Loop(stmt) => self.check_loop(stmt),
             Stmt::Break(span) => {
-                if self.loop_depth == 0 {
+                if self.finally_depth > 0 {
+                    self.error(*span, "break is not allowed inside finally");
+                } else if self.loop_depth == 0 {
                     self.error(*span, "break is outside a loop");
                 }
                 Some(CheckedStmt::Break)
             }
             Stmt::Continue(span) => {
-                if self.loop_depth == 0 {
+                if self.finally_depth > 0 {
+                    self.error(*span, "continue is not allowed inside finally");
+                } else if self.loop_depth == 0 {
                     self.error(*span, "continue is outside a loop");
                 }
                 Some(CheckedStmt::Continue)
             }
-            Stmt::Expression(stmt) => Some(CheckedStmt::Expr(self.check_expr(
-                &stmt.expression,
-                None,
-                true,
-            ))),
+            Stmt::Try(stmt) => Some(self.check_try(stmt)),
+            Stmt::Expression(stmt) => {
+                let expr = self.check_expr(&stmt.expression, None, true);
+                if expr.ty() == CanonicalType::ErrorHandle {
+                    self.error(
+                        stmt.span,
+                        "a runtime error handle cannot be stored, passed, or returned",
+                    );
+                }
+                Some(CheckedStmt::Expr(expr))
+            }
+        }
+    }
+
+    fn check_try(&mut self, stmt: &TryStmt) -> CheckedStmt {
+        if stmt.catches.is_empty() && stmt.finally_block.is_none() {
+            self.error(stmt.span, "a try statement needs a catch or a finally");
+        }
+        let body = self.check_block_stmts(&stmt.body);
+        let mut seen = Vec::new();
+        let mut caught_all = false;
+        let mut catches = Vec::new();
+        for clause in &stmt.catches {
+            let kind = catch_type(&clause.error_type.name);
+            if let Some(kind) = kind {
+                if caught_all || seen.iter().any(|existing| *existing == kind) {
+                    self.error(
+                        clause.error_type.span,
+                        format!("unreachable catch '{kind}'"),
+                    );
+                } else {
+                    seen.push(kind);
+                    if catches_all(kind) {
+                        caught_all = true;
+                    }
+                }
+            } else {
+                self.error(
+                    clause.error_type.span,
+                    format!("unknown catch type '{}'", clause.error_type.name),
+                );
+            }
+            self.scopes.push(HashMap::new());
+            self.scopes.last_mut().unwrap().insert(
+                clause.binding.name.clone(),
+                Binding {
+                    ty: CanonicalType::ErrorHandle,
+                    mutable: false,
+                    auto: false,
+                },
+            );
+            let catch_body = clause
+                .block
+                .statements
+                .iter()
+                .filter_map(|statement| self.check_stmt(statement))
+                .collect();
+            self.scopes.pop();
+            if let Some(kind) = kind {
+                catches.push(CheckedCatch {
+                    kind: kind.to_string(),
+                    binding: clause.binding.name.clone(),
+                    body: catch_body,
+                });
+            }
+        }
+        self.finally_depth += 1;
+        let finally_body = stmt
+            .finally_block
+            .as_ref()
+            .map(|block| self.check_block_stmts(block));
+        self.finally_depth -= 1;
+        CheckedStmt::Try {
+            body,
+            catches,
+            finally_body,
         }
     }
 
@@ -2116,8 +2227,13 @@ impl<'a> Checker<'a> {
         let args = self.check_arguments(arguments, &params, span);
         CheckedExpr::Call {
             path,
+            callee: member.member.name.clone(),
             args,
             ty: ret,
+            file: self.source_name.to_string(),
+            line: span.start.line,
+            column: span.start.column,
+            end_column: span.end.column,
         }
     }
 
@@ -2216,8 +2332,13 @@ impl<'a> Checker<'a> {
         let args = self.check_arguments(arguments, &params, span);
         CheckedExpr::Call {
             path,
+            callee: ident.name.clone(),
             args,
             ty: ret,
+            file: self.source_name.to_string(),
+            line: span.start.line,
+            column: span.start.column,
+            end_column: span.end.column,
         }
     }
 
@@ -2288,6 +2409,13 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> CheckedExpr {
         let from = expr.ty();
+        if from == CanonicalType::ErrorHandle && target != CanonicalType::ErrorHandle {
+            self.error(
+                span,
+                "a runtime error handle cannot be stored, passed, or returned",
+            );
+            return expr;
+        }
         if from == target {
             return expr;
         }
@@ -2503,6 +2631,13 @@ impl<'a> Checker<'a> {
             }
         }
         let object = self.check_expr(&expr.object, None, false);
+        if object.ty() == CanonicalType::ErrorHandle {
+            self.error(
+                expr.span,
+                "call a runtime error method, for example error.message()",
+            );
+            return self.dummy(None);
+        }
         let CanonicalType::Record(id) = object.ty() else {
             self.error(
                 expr.member.span,
@@ -2914,6 +3049,14 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> CheckedExpr {
         let name = member.member.name.as_str();
+        if let Expr::Identifier(ident) = &*member.object {
+            if self
+                .lookup(&ident.name)
+                .is_some_and(|binding| binding.ty == CanonicalType::ErrorHandle)
+            {
+                return self.finish_handle_call(&ident.name, name, arguments, span);
+            }
+        }
         if matches!(name, "iter" | "enumerate" | "entries") {
             self.error(span, format!("{name}() can only be used as a loop source"));
             let _ = self.check_expr(&member.object, None, false);
@@ -2951,6 +3094,42 @@ impl<'a> Checker<'a> {
             return self.reject_record_call(member, arguments, ty);
         }
         self.finish_array_call(name, None, Some(object), ty, arguments, span, member)
+    }
+
+    fn finish_handle_call(
+        &mut self,
+        name: &str,
+        method: &str,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        for argument in arguments {
+            let _ = self.check_expr(argument, None, false);
+        }
+        if !arguments.is_empty() {
+            self.error(
+                span,
+                format!("runtime error method '{method}' expects no arguments"),
+            );
+        }
+        let ty = match method {
+            "message" | "code" | "kind" | "sourceFile" | "causeMessage" | "stackTrace" => {
+                CanonicalType::Str
+            }
+            "line" | "column" => CanonicalType::UInt64,
+            _ => {
+                self.error(
+                    span,
+                    format!("runtime error handle has no method '{method}'"),
+                );
+                return self.dummy(None);
+            }
+        };
+        CheckedExpr::HandleCall {
+            name: name.to_string(),
+            method: method.to_string(),
+            ty,
+        }
     }
 
     fn finish_type_call(
@@ -3616,6 +3795,10 @@ impl<'a> Checker<'a> {
             return;
         };
         self.reject_iterated_write(name, scope, span);
+        if binding.ty == CanonicalType::ErrorHandle {
+            self.error(span, "a runtime error handle cannot be assigned");
+            return;
+        }
         if !binding.mutable {
             let verb = if update { "modify" } else { "assign to" };
             self.error(span, format!("cannot {verb} constant '{name}'"));
@@ -3954,6 +4137,27 @@ fn int_bounds(ty: CanonicalType) -> Option<(i128, i128)> {
     })
 }
 
+fn catches_all(kind: &str) -> bool {
+    kind == "RuntimeError" || kind == "Error"
+}
+
+fn catch_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "RuntimeError" => "RuntimeError",
+        "Error" => "Error",
+        "ArrayIndexOutOfBoundsError" => "ArrayIndexOutOfBoundsError",
+        "MissingMapKeyError" => "MissingMapKeyError",
+        "InvalidSliceError" => "InvalidSliceError",
+        "IntegerOverflowError" => "IntegerOverflowError",
+        "DivisionByZeroError" => "DivisionByZeroError",
+        "NumericConversionError" => "NumericConversionError",
+        "IoError" => "IoError",
+        "ExternalLibraryError" => "ExternalLibraryError",
+        "RuntimeInternalError" => "RuntimeInternalError",
+        _ => return None,
+    })
+}
+
 fn guaranteed_return(statements: &[Stmt]) -> bool {
     statements.iter().any(stmt_returns)
 }
@@ -3971,6 +4175,13 @@ fn stmt_returns(stmt: &Stmt) -> bool {
                     .else_branch
                     .as_ref()
                     .is_some_and(|branch| stmt_returns(branch))
+        }
+        Stmt::Try(stmt) => {
+            guaranteed_return(&stmt.body.statements)
+                && stmt
+                    .catches
+                    .iter()
+                    .all(|clause| guaranteed_return(&clause.block.statements))
         }
         _ => false,
     }

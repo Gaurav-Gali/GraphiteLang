@@ -111,7 +111,24 @@ pub enum Stmt {
     Loop(LoopStmt),
     Break(Span),
     Continue(Span),
+    Try(TryStmt),
     Expression(ExpressionStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryStmt {
+    pub body: BlockStmt,
+    pub catches: Vec<CatchClause>,
+    pub finally_block: Option<BlockStmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchClause {
+    pub error_type: Identifier,
+    pub binding: Identifier,
+    pub block: BlockStmt,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

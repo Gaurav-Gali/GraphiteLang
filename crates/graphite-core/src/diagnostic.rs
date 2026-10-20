@@ -23,9 +23,25 @@ pub struct DiagnosticView {
     pub help: Option<String>,
 }
 
+/// One Graphite call crossed while an error propagated.
+///
+/// Frames are innermost first. `column` is the logical source column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFrame {
+    pub function: String,
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
 /// Structured failure produced by a Graphite runtime helper.
+///
+/// `kind` is the canonical catch-type name. `message` is the diagnostic
+/// title. `column` is the same logical source column the header prints.
+/// The renderer derives caret display width from `excerpt` when it draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
+    pub kind: &'static str,
     pub code: &'static str,
     pub message: String,
     pub file: String,
@@ -34,16 +50,20 @@ pub struct RuntimeError {
     pub end_column: u32,
     pub excerpt: String,
     pub label: String,
+    pub cause: Option<Box<RuntimeError>>,
+    pub trace: Vec<TraceFrame>,
 }
 
 impl RuntimeError {
     pub fn at(
         site: Site<'_>,
+        kind: &'static str,
         code: &'static str,
         message: impl Into<String>,
         label: impl Into<String>,
     ) -> Self {
         Self {
+            kind,
             code,
             message: message.into(),
             file: site.file.to_string(),
@@ -52,7 +72,90 @@ impl RuntimeError {
             end_column: site.end_column,
             excerpt: site.excerpt.to_string(),
             label: label.into(),
+            cause: None,
+            trace: Vec::new(),
         }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        self.kind
+    }
+
+    pub fn message_text(&self) -> String {
+        self.message.clone()
+    }
+
+    pub fn source_file(&self) -> String {
+        if self.line == 0 {
+            String::new()
+        } else {
+            self.file.clone()
+        }
+    }
+
+    pub fn line_number(&self) -> u64 {
+        u64::from(self.line)
+    }
+
+    pub fn column_number(&self) -> u64 {
+        if self.line == 0 {
+            0
+        } else {
+            u64::from(self.column)
+        }
+    }
+
+    pub fn cause_message(&self) -> String {
+        self.cause
+            .as_ref()
+            .map(|cause| cause.message.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn stack_trace(&self) -> String {
+        self.trace
+            .iter()
+            .map(|frame| {
+                if frame.line == 0 || frame.file.is_empty() {
+                    frame.function.clone()
+                } else {
+                    format!(
+                        "{} at {}:{}:{}",
+                        frame.function, frame.file, frame.line, frame.column
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The pending error becomes the direct cause. An existing cause chain on
+    /// either error is kept behind that direct cause.
+    pub fn with_cause(mut self, mut pending: RuntimeError) -> Self {
+        if let Some(existing) = self.cause.take() {
+            append_cause(&mut pending, *existing);
+        }
+        self.cause = Some(Box::new(pending));
+        self
+    }
+
+    pub fn enter_call(mut self, function: &str, site: Site<'_>) -> Self {
+        let frame = TraceFrame {
+            function: function.to_string(),
+            file: site.file.to_string(),
+            line: site.line,
+            column: site.column,
+        };
+        if self.trace.last().is_some_and(|last| {
+            last.function == frame.function
+                && last.file == frame.file
+                && last.line == frame.line
+                && last.column == frame.column
+        }) {
+            return self;
+        }
+        self.trace.push(frame);
+        self
     }
 
     pub fn view(&self) -> DiagnosticView {
@@ -70,9 +173,17 @@ impl RuntimeError {
     }
 }
 
+fn append_cause(error: &mut RuntimeError, cause: RuntimeError) {
+    match error.cause.as_mut() {
+        Some(next) => append_cause(next, cause),
+        None => error.cause = Some(Box::new(cause)),
+    }
+}
+
 pub fn array_bounds(site: Site<'_>, index: impl std::fmt::Display, len: usize) -> RuntimeError {
     RuntimeError::at(
         site,
+        "ArrayIndexOutOfBoundsError",
         "GRF-RUN-001",
         "array index out of bounds",
         format!("index {index} is out of bounds for an array of length {len}"),
@@ -82,6 +193,7 @@ pub fn array_bounds(site: Site<'_>, index: impl std::fmt::Display, len: usize) -
 pub fn missing_key(site: Site<'_>, map_type: &str) -> RuntimeError {
     RuntimeError::at(
         site,
+        "MissingMapKeyError",
         "GRF-RUN-002",
         "missing map key",
         format!("missing key: lookup on '{map_type}'"),
@@ -89,20 +201,49 @@ pub fn missing_key(site: Site<'_>, map_type: &str) -> RuntimeError {
 }
 
 pub fn zero_step(site: Site<'_>) -> RuntimeError {
-    RuntimeError::at(site, "GRF-RUN-003", "slice step equals zero", "step 0")
+    RuntimeError::at(
+        site,
+        "InvalidSliceError",
+        "GRF-RUN-003",
+        "slice step equals zero",
+        "step 0",
+    )
 }
 
 pub fn integer_overflow(site: Site<'_>) -> RuntimeError {
-    RuntimeError::at(site, "GRF-RUN-004", "integer overflow", "integer overflow")
+    RuntimeError::at(
+        site,
+        "IntegerOverflowError",
+        "GRF-RUN-004",
+        "integer overflow",
+        "integer overflow",
+    )
 }
 
 pub fn division_by_zero(site: Site<'_>) -> RuntimeError {
-    RuntimeError::at(site, "GRF-RUN-005", "division by zero", "division by zero")
+    RuntimeError::at(
+        site,
+        "DivisionByZeroError",
+        "GRF-RUN-005",
+        "division by zero",
+        "division by zero",
+    )
+}
+
+pub fn remainder_by_zero(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "DivisionByZeroError",
+        "GRF-RUN-005",
+        "remainder by zero",
+        "remainder by zero",
+    )
 }
 
 pub fn conversion_failed(site: Site<'_>, from: &str, to: &str, category: &str) -> RuntimeError {
     RuntimeError::at(
         site,
+        "NumericConversionError",
         "GRF-RUN-006",
         "numeric conversion failed",
         format!("cannot convert {from} to {to}: {category}"),
@@ -111,6 +252,7 @@ pub fn conversion_failed(site: Site<'_>, from: &str, to: &str, category: &str) -
 
 pub fn input_output(detail: impl Into<String>) -> RuntimeError {
     RuntimeError {
+        kind: "IoError",
         code: "GRF-RUN-007",
         message: "input/output error".to_string(),
         file: String::new(),
@@ -119,12 +261,15 @@ pub fn input_output(detail: impl Into<String>) -> RuntimeError {
         end_column: 0,
         excerpt: String::new(),
         label: detail.into(),
+        cause: None,
+        trace: Vec::new(),
     }
 }
 
 pub fn slice_length(site: Site<'_>, expected: usize, found: usize) -> RuntimeError {
     RuntimeError::at(
         site,
+        "InvalidSliceError",
         "GRF-RUN-008",
         "slice assignment length mismatch",
         format!("expected {expected} elements, found {found}"),
@@ -134,6 +279,7 @@ pub fn slice_length(site: Site<'_>, expected: usize, found: usize) -> RuntimeErr
 pub fn destructure_length(site: Site<'_>, expected: usize, found: usize) -> RuntimeError {
     RuntimeError::at(
         site,
+        "RuntimeError",
         "GRF-RUN-009",
         "destructuring length mismatch",
         format!("expected {expected} elements, found {found}"),
@@ -143,6 +289,7 @@ pub fn destructure_length(site: Site<'_>, expected: usize, found: usize) -> Runt
 pub fn array_limit(site: Site<'_>, len: u64, limit: u64) -> RuntimeError {
     RuntimeError::at(
         site,
+        "RuntimeError",
         "GRF-RUN-010",
         "array exceeds its maximum length",
         format!("length {len}, maximum {limit}"),
@@ -156,6 +303,7 @@ pub fn insertion_position(
 ) -> RuntimeError {
     RuntimeError::at(
         site,
+        "RuntimeError",
         "GRF-RUN-011",
         "invalid insertion position",
         format!("index {index}, length {len}"),
@@ -164,7 +312,52 @@ pub fn insertion_position(
 
 pub fn numeric_failure(site: Site<'_>, message: impl Into<String>) -> RuntimeError {
     let message = message.into();
-    RuntimeError::at(site, "GRF-RUN-006", "numeric conversion failed", message)
+    RuntimeError::at(
+        site,
+        "NumericConversionError",
+        "GRF-RUN-006",
+        "numeric conversion failed",
+        message,
+    )
+}
+
+pub fn external_library(detail: impl Into<String>) -> RuntimeError {
+    RuntimeError {
+        kind: "ExternalLibraryError",
+        code: "GRF-RUN-012",
+        message: "external library error".to_string(),
+        file: String::new(),
+        line: 0,
+        column: 0,
+        end_column: 0,
+        excerpt: String::new(),
+        label: detail.into(),
+        cause: None,
+        trace: Vec::new(),
+    }
+}
+
+pub fn runtime_internal(detail: impl Into<String>) -> RuntimeError {
+    RuntimeError {
+        kind: "RuntimeInternalError",
+        code: "GRF-RUN-013",
+        message: "internal runtime error".to_string(),
+        file: String::new(),
+        line: 0,
+        column: 0,
+        end_column: 0,
+        excerpt: String::new(),
+        label: detail.into(),
+        cause: None,
+        trace: Vec::new(),
+    }
+}
+
+/// Maps one controlled library `Err` into a Graphite runtime error.
+///
+/// This is the adapter boundary. It does not catch panics.
+pub fn adapt_library_error(detail: impl Into<String>) -> Result<(), RuntimeError> {
+    Err(external_library(detail))
 }
 
 /// The single runtime renderer. The generated program calls this from its
@@ -302,5 +495,63 @@ mod tests {
         assert!(rendered.starts_with("error[GRF-RUN-007]: input/output error\n"));
         assert!(rendered.contains("unexpected end of input"));
         assert!(!rendered.contains("-->"));
+    }
+
+    #[test]
+    fn kind_message_and_code_stay_distinct() {
+        let site = Site {
+            file: "main.grf",
+            line: 2,
+            column: 5,
+            end_column: 10,
+            excerpt: "\t1 / 0",
+        };
+        let division = division_by_zero(site);
+        assert_eq!(division.message_text(), "division by zero");
+        assert_eq!(division.kind_name(), "DivisionByZeroError");
+        assert_eq!(division.code, "GRF-RUN-005");
+        assert_eq!(division.column_number(), 5);
+        let remainder = remainder_by_zero(site);
+        assert_eq!(remainder.message_text(), "remainder by zero");
+        assert_eq!(remainder.kind_name(), "DivisionByZeroError");
+        assert_eq!(remainder.code, "GRF-RUN-005");
+        assert_eq!(destructure_length(site, 2, 1).kind_name(), "RuntimeError");
+        assert_eq!(input_output("eof").kind_name(), "IoError");
+        assert_eq!(input_output("eof").column_number(), 0);
+    }
+
+    #[test]
+    fn cause_chain_keeps_one_level_message() {
+        let site = Site {
+            file: "main.grf",
+            line: 1,
+            column: 1,
+            end_column: 2,
+            excerpt: "1",
+        };
+        let division = division_by_zero(site);
+        let remainder = remainder_by_zero(site).with_cause(division);
+        assert_eq!(remainder.cause_message(), "division by zero");
+        let overflow = integer_overflow(site).with_cause(remainder);
+        assert_eq!(overflow.cause_message(), "remainder by zero");
+        assert_eq!(
+            overflow.cause.unwrap().cause.unwrap().message,
+            "division by zero"
+        );
+    }
+
+    #[test]
+    fn library_adapter_and_internal_error_have_their_kinds() {
+        let Err(error) = adapt_library_error("controlled failure") else {
+            panic!("adapter must return the library error");
+        };
+        assert_eq!(error.kind_name(), "ExternalLibraryError");
+        assert_eq!(error.code, "GRF-RUN-012");
+        assert_eq!(error.message_text(), "external library error");
+        assert!(error.label.contains("controlled failure"));
+        let internal = runtime_internal("unexpected");
+        assert_eq!(internal.kind_name(), "RuntimeInternalError");
+        assert_eq!(internal.code, "GRF-RUN-013");
+        assert_ne!(input_output("eof").kind_name(), "ExternalLibraryError");
     }
 }

@@ -1,4 +1,4 @@
-# LLD-14 --- Stage 12: Exception Handling
+# LLD-16 --- Stage 12: Exception Handling
 
 **Project:** Graphite Lang (`.grf`)\
 **Stage:** 12 --- Exception handling\
@@ -27,7 +27,7 @@ aliases for Rust `panic!`.
     catches and omitted bindings are deferred.
 4.  Catch clauses are tested in source order. Unreachable catches are
     compile-time errors.
-5.  `RuntimeError` matches every catchable Graphite runtime error.
+5.  `RuntimeError` and `Error` each match every catchable Graphite runtime error.
 6.  A try statement requires at least one `catch` or `finally`;
     `finally` is optional and unique, and must be last.
 7.  `finally` runs exactly once when control exits its associated try
@@ -86,11 +86,14 @@ Semantic validation requires at least one catch or finally. Prefer
 parsing the structure and reporting the missing handler/cleanup
 semantically, if the parser architecture supports it.
 
-A try statement is a statement, not an expression. `try`, `catch`, and
-`finally` are reserved keywords. Catch/finally without a preceding try,
-duplicate finally, catch after finally, and malformed clauses are
-rejected. Do not implement these constructs through source-text
-rewriting.
+A try statement is a statement, not an expression. `try`, `catch`,
+`finally`, and `throw` are reserved keywords. `throw` is reserved even
+though a throw statement is not implemented; using it as a name is a
+reserved-keyword error, and using it as a statement reports that
+explicit throwing is not supported in this version. Catch/finally
+without a preceding try, duplicate finally, catch after finally, and
+malformed clauses are rejected. Do not implement these constructs
+through source-text rewriting.
 
 ## 4. AST representation
 
@@ -147,30 +150,46 @@ stable.
 ### 5.1 Catch types and matching
 
   -----------------------------------------------------------------------
-  Catch type                          Matching runtime kind
-  ----------------------------------- -----------------------------------
-  `RuntimeError`                      Every catchable Graphite runtime
-                                      error
+  Catch type                      Code            Runtime condition
+  ------------------------------- --------------- ---------------------------
+  `ArrayIndexOutOfBoundsError`    `GRF-RUN-001`   Array index out of bounds
 
-  `ArrayIndexOutOfBoundsError`        Array index out of bounds
+  `MissingMapKeyError`            `GRF-RUN-002`   Missing map key
 
-  `InvalidSliceError`                 Invalid slice, including zero step
+  `InvalidSliceError`             `GRF-RUN-003`   Zero slice step
 
-  `MissingMapKeyError`                Missing map key
+  `IntegerOverflowError`          `GRF-RUN-004`   Checked integer overflow
 
-  `DivisionByZeroError`               Division by zero
+  `DivisionByZeroError`           `GRF-RUN-005`   Division by zero and
+                                                  remainder by zero
 
-  `IntegerOverflowError`              Checked integer overflow
+  `NumericConversionError`        `GRF-RUN-006`   Numeric conversion failure
+                                                  and operator-promotion
+                                                  value that does not fit
 
-  `NumericConversionError`            Failed numeric/text conversion
+  `IoError`                       `GRF-RUN-007`   Graphite I/O failure
 
-  `IoError`                           Graphite I/O failure
+  `InvalidSliceError`             `GRF-RUN-008`   Slice assignment length
+                                                  mismatch
 
-  `ExternalLibraryError`              Mapped error returned by a
-                                      supported foreign/Rust library
+  `RuntimeError` only             `GRF-RUN-009`   Destructuring length
+                                                  mismatch
 
-  `RuntimeInternalError`              Unexpected internal runtime failure
-                                      represented as a structured error
+  `RuntimeError` only             `GRF-RUN-010`   Array exceeds its limit
+
+  `RuntimeError` only             `GRF-RUN-011`   Invalid insertion position
+
+  `ExternalLibraryError`          `GRF-RUN-012`   Mapped foreign/Rust
+                                                  library error
+
+  `RuntimeInternalError`          `GRF-RUN-013`   Structured unexpected
+                                                  runtime failure
+
+  `RuntimeError`                  any of the      Every catchable Graphite
+                                  above           runtime error
+
+  `Error`                         any of the      Every catchable Graphite
+                                  above           runtime error
   -----------------------------------------------------------------------
 
 Catch matching is based on `RuntimeErrorKind`, never message text.
@@ -188,27 +207,43 @@ registry. Do not create conflicting registries.
 The catch binding is a special immutable error handle. Initial supported
 methods:
 
--   `error.message() -> str`
--   `error.code() -> str`
--   `error.kind() -> str`
+-   `error.message() -> str` --- the diagnostic title, such as
+    `array index out of bounds` or `missing map key`. Not the caret
+    label, source excerpt, or rendered block.
+-   `error.code() -> str` --- the stable code, such as `GRF-RUN-005`.
+-   `error.kind() -> str` --- the canonical catch-type name, such as
+    `DivisionByZeroError`. Conditions with no specific catch type use
+    `RuntimeError`. Kind comes from the structured error kind, not from
+    the message or the code text.
 -   `error.sourceFile() -> str` --- empty if unavailable
 -   `error.line() -> uint64` --- `0` if unavailable
--   `error.column() -> uint64` --- `0` if unavailable
--   `error.causeMessage() -> str` --- empty if no cause
--   `error.stackTrace() -> str` --- empty if unavailable
+-   `error.column() -> uint64` --- the 1-based logical source column
+    used by the diagnostic header, or `0` if unavailable. A tab counts
+    as one source column. Caret alignment separately expands tabs and
+    wide characters for display, derived from the same span.
+-   `error.causeMessage() -> str` --- the direct cause's `message()`,
+    or empty if there is no cause. Older causes stay in the chain and
+    are not concatenated.
+-   `error.stackTrace() -> str` --- innermost Graphite call frame first,
+    or empty if there are no frames. Each frame is
+    `function at file:line:column`.
 
-Use Stage 11's source-map rules for locations and display columns.
-`message()` does not fabricate or append a location; location is exposed
-separately and rendered by the diagnostic renderer. The error handle
-cannot be constructed directly, stored in collections/records, or
-returned from functions in Stage 12.
+`message()` does not fabricate or append a location. The logical column
+and the display caret are both derived from the original span; they are
+not two stored columns. The error handle cannot be constructed directly,
+stored, passed, or returned in Stage 12. Catch-type names are not
+reserved record names. In a catch clause they always mean the built-in
+catch type.
 
 ## 6. Catch ordering and scope
 
 -   Evaluate catch clauses in source order; first match handles the
     error.
--   `catch (RuntimeError error)` matches all catchable runtime errors.
-    Any later specific catch is unreachable and is a compile-time error.
+-   `catch (RuntimeError error)` and `catch (Error error)` each match
+    all catchable runtime errors. Any later catch is unreachable and is
+    a compile-time error. `Error` does not change `kind()`: the handle
+    still reports the specific catch type, or `RuntimeError` when the
+    failure has no specific type.
 -   Duplicate exact catch types are rejected as unreachable.
 -   Unknown catch types are semantic errors, never implicit catch-alls.
 -   An error raised inside a catch body is not handled by sibling
@@ -285,11 +320,14 @@ exactly once.
 If finally completes normally, resume the pending outcome unchanged.
 
 If finally produces a new runtime error: - the new error becomes the
-active outcome; - a pending error is retained as cause/context of the
-new error; - pending return/break/continue is cancelled and replaced by
-the error; - normal completion becomes an error.
+active outcome; - a pending error becomes that new error's direct cause,
+without dropping either error's existing cause chain; - pending
+return/break/continue is cancelled and replaced by the error, and
+`causeMessage()` stays empty unless the new error already had a cause; -
+normal completion becomes an error.
 
-Do not silently discard a pending error.
+`causeMessage()` returns only the direct cause's `message()`. Do not
+silently discard a pending error or an existing cause chain.
 
 ### 8.4 Control flow inside finally
 
@@ -508,3 +546,32 @@ catches, optional bindings, or control-flow transfers inside finally.
 Any change to catch matching, finally execution, error replacement,
 source-location preservation, or panic boundaries requires an explicit
 semantic revision before implementation.
+
+## 16. Locked Stage 12 matching and runtime API
+
+1.  Every existing runtime failure maps to the catch type in section
+    5.1. `RuntimeError` and `Error` each match all of them. Destructuring length, array
+    limit, and invalid insertion have no specific catch type. Division
+    and remainder by zero share `GRF-RUN-005` and
+    `DivisionByZeroError`, with messages `division by zero` and
+    `remainder by zero`. Catch matching uses the error kind. Sharing a
+    code does not merge messages.
+2.  `message()` is the diagnostic title. `kind()` is the catch-type
+    name. `code()` is the stable code. The caret label stays in the
+    rendered diagnostic.
+3.  A failure in `finally` makes a pending error the new error's direct
+    cause. `causeMessage()` is that cause's `message()` only. A pending
+    return, break, continue, or normal completion does not become a
+    cause. Cause chains are preserved.
+4.  `try`, `catch`, `finally`, and `throw` are reserved keywords.
+    Catch-type spellings may still be record names. In `catch` they
+    always denote the built-in type. `throw` as a statement reports that
+    throwing is not supported.
+5.  `ExternalLibraryError` (`GRF-RUN-012`) is produced only by an
+    explicit library adapter. `grf.io` stays `IoError`.
+    `RuntimeInternalError` (`GRF-RUN-013`) is not an automatic panic
+    conversion. Both are tested through the structured value when no
+    production path raises them.
+6.  `column()` and the diagnostic header use the logical source column.
+    A tab is one column. Caret placement derives terminal display width
+    from that same span.
