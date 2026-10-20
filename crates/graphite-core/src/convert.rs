@@ -2,21 +2,21 @@
 //!
 //! String formatting for numbers, booleans, and characters lives here so
 //! explicit `str(value)`, `auto str`, and interpolation use one policy.
-//! Fallible conversions print one diagnostic and terminate the process.
+//! Fallible conversions return `RuntimeError`. The generated program renders it.
 
 #[derive(Clone, Copy)]
 pub struct Site<'a> {
     pub file: &'a str,
     pub line: u32,
     pub column: u32,
+    pub end_column: u32,
+    pub excerpt: &'a str,
 }
 
-pub fn fail(site: Site<'_>, from: &str, to: &str, category: &str) -> ! {
-    eprintln!(
-        "Runtime conversion error at {}:{}:{}:\ncannot convert {from} to {to}: {category}",
-        site.file, site.line, site.column
-    );
-    std::process::exit(1);
+use crate::diagnostic::RuntimeError;
+
+pub fn fail(site: Site<'_>, from: &str, to: &str, category: &str) -> RuntimeError {
+    crate::diagnostic::conversion_failed(site, from, to, category)
 }
 
 pub fn signed_text(value: i128) -> String {
@@ -104,135 +104,169 @@ pub fn quoted_str(value: &str) -> String {
     out
 }
 
-pub fn str_to_signed(text: &str, min: i128, max: i128, to: &str, site: Site<'_>) -> i128 {
+pub fn str_to_signed(
+    text: &str,
+    min: i128,
+    max: i128,
+    to: &str,
+    site: Site<'_>,
+) -> Result<i128, RuntimeError> {
     let Some(value) = parse_signed(text) else {
         let category = if signed_shape(text) {
             "out of range"
         } else {
             "invalid decimal integer"
         };
-        fail(site, "str", to, category);
+        return Err(fail(site, "str", to, category));
     };
     if value < min || value > max {
-        fail(site, "str", to, "out of range");
+        return Err(fail(site, "str", to, "out of range"));
     }
-    value
+    Ok(value)
 }
 
-pub fn str_to_unsigned(text: &str, max: u128, to: &str, site: Site<'_>) -> u128 {
+pub fn str_to_unsigned(
+    text: &str,
+    max: u128,
+    to: &str,
+    site: Site<'_>,
+) -> Result<u128, RuntimeError> {
     let Some(value) = parse_unsigned(text) else {
         let category = if unsigned_shape(text) {
             "out of range"
         } else {
             "invalid decimal integer"
         };
-        fail(site, "str", to, category);
+        return Err(fail(site, "str", to, category));
     };
     if value > max {
-        fail(site, "str", to, "out of range");
+        return Err(fail(site, "str", to, "out of range"));
     }
-    value
+    Ok(value)
 }
 
-pub fn str_to_f64(text: &str, site: Site<'_>) -> f64 {
+pub fn str_to_f64(text: &str, site: Site<'_>) -> Result<f64, RuntimeError> {
     parse_float(text, site, "flt64", |body| body.parse::<f64>().ok())
 }
 
-pub fn str_to_f32(text: &str, site: Site<'_>) -> f32 {
+pub fn str_to_f32(text: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
     parse_float(text, site, "flt32", |body| body.parse::<f32>().ok())
 }
 
-pub fn str_to_bool(text: &str, site: Site<'_>) -> bool {
+pub fn str_to_bool(text: &str, site: Site<'_>) -> Result<bool, RuntimeError> {
     let body = trim_ascii_ws(text);
     if body.eq_ignore_ascii_case("true") {
-        true
+        Ok(true)
     } else if body.eq_ignore_ascii_case("false") {
-        false
+        Ok(false)
     } else {
-        fail(site, "str", "bln", "invalid boolean text");
+        Err(fail(site, "str", "bln", "invalid boolean text"))
     }
 }
 
-pub fn str_to_char(text: &str, site: Site<'_>) -> char {
+pub fn str_to_char(text: &str, site: Site<'_>) -> Result<char, RuntimeError> {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
-        (Some(ch), None) => ch,
-        _ => fail(site, "str", "chr", "invalid character string"),
+        (Some(ch), None) => Ok(ch),
+        _ => Err(fail(site, "str", "chr", "invalid character string")),
     }
 }
 
-pub fn fit_signed(value: i128, min: i128, max: i128, from: &str, to: &str, site: Site<'_>) -> i128 {
+pub fn fit_signed(
+    value: i128,
+    min: i128,
+    max: i128,
+    from: &str,
+    to: &str,
+    site: Site<'_>,
+) -> Result<i128, RuntimeError> {
     if value < min || value > max {
-        fail(site, from, to, "out of range");
+        return Err(fail(site, from, to, "out of range"));
     }
-    value
+    Ok(value)
 }
 
-pub fn fit_unsigned(value: u128, max: u128, from: &str, to: &str, site: Site<'_>) -> u128 {
+pub fn fit_unsigned(
+    value: u128,
+    max: u128,
+    from: &str,
+    to: &str,
+    site: Site<'_>,
+) -> Result<u128, RuntimeError> {
     if value > max {
-        fail(site, from, to, "out of range");
+        return Err(fail(site, from, to, "out of range"));
     }
-    value
+    Ok(value)
 }
 
-pub fn signed_to_unsigned(value: i128, max: u128, from: &str, to: &str, site: Site<'_>) -> u128 {
+pub fn signed_to_unsigned(
+    value: i128,
+    max: u128,
+    from: &str,
+    to: &str,
+    site: Site<'_>,
+) -> Result<u128, RuntimeError> {
     if value < 0 {
-        fail(site, from, to, "out of range");
+        return Err(fail(site, from, to, "out of range"));
     }
     fit_unsigned(value as u128, max, from, to, site)
 }
 
-pub fn unsigned_to_signed(value: u128, max: i128, from: &str, to: &str, site: Site<'_>) -> i128 {
+pub fn unsigned_to_signed(
+    value: u128,
+    max: i128,
+    from: &str,
+    to: &str,
+    site: Site<'_>,
+) -> Result<i128, RuntimeError> {
     if max < 0 || value > max as u128 {
-        fail(site, from, to, "out of range");
+        return Err(fail(site, from, to, "out of range"));
     }
-    value as i128
+    Ok(value as i128)
 }
 
-pub fn signed_to_f64(value: i128, from: &str, site: Site<'_>) -> f64 {
-    exact_signed_f64(value)
-        .unwrap_or_else(|| fail(site, from, "flt64", "not exactly representable"))
+pub fn signed_to_f64(value: i128, from: &str, site: Site<'_>) -> Result<f64, RuntimeError> {
+    exact_signed_f64(value).ok_or_else(|| fail(site, from, "flt64", "not exactly representable"))
 }
 
-pub fn signed_to_f32(value: i128, from: &str, site: Site<'_>) -> f32 {
+pub fn signed_to_f32(value: i128, from: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
     let wide = exact_signed_f64(value)
-        .unwrap_or_else(|| fail(site, from, "flt32", "not exactly representable"));
+        .ok_or_else(|| fail(site, from, "flt32", "not exactly representable"))?;
     f64_to_f32(wide, from, "flt32", site)
 }
 
-pub fn unsigned_to_f64(value: u128, from: &str, site: Site<'_>) -> f64 {
-    exact_unsigned_f64(value)
-        .unwrap_or_else(|| fail(site, from, "flt64", "not exactly representable"))
+pub fn unsigned_to_f64(value: u128, from: &str, site: Site<'_>) -> Result<f64, RuntimeError> {
+    exact_unsigned_f64(value).ok_or_else(|| fail(site, from, "flt64", "not exactly representable"))
 }
 
-pub fn unsigned_to_f32(value: u128, from: &str, site: Site<'_>) -> f32 {
+pub fn unsigned_to_f32(value: u128, from: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
     let wide = exact_unsigned_f64(value)
-        .unwrap_or_else(|| fail(site, from, "flt32", "not exactly representable"));
+        .ok_or_else(|| fail(site, from, "flt32", "not exactly representable"))?;
     f64_to_f32(wide, from, "flt32", site)
 }
 
-pub fn f64_to_f32(value: f64, from: &str, to: &str, site: Site<'_>) -> f32 {
+pub fn f64_to_f32(value: f64, from: &str, to: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
     if value.is_nan() {
-        return f32::NAN;
+        return Ok(f32::NAN);
     }
     if value.is_infinite() {
-        return if value.is_sign_negative() {
+        return Ok(if value.is_sign_negative() {
             f32::NEG_INFINITY
         } else {
             f32::INFINITY
-        };
+        });
     }
     let narrow = value as f32;
     if !narrow.is_finite() {
-        fail(site, from, to, "out of range");
+        return Err(fail(site, from, to, "out of range"));
     }
     if narrow == 0.0 && value != 0.0 {
-        fail(site, from, to, "underflow");
+        return Err(fail(site, from, to, "underflow"));
     }
     if narrow as f64 != value {
-        fail(site, from, to, "not exactly representable");
+        return Err(fail(site, from, to, "not exactly representable"));
     }
-    narrow
+    Ok(narrow)
 }
 
 pub fn f64_to_signed(
@@ -242,69 +276,87 @@ pub fn f64_to_signed(
     from: &str,
     to: &str,
     site: Site<'_>,
-) -> i128 {
-    let Some(converted) = integral_i128(value) else {
+) -> Result<i128, RuntimeError> {
+    if !value.is_finite() {
+        return Err(fail(site, from, to, "non-finite value"));
+    }
+    let Some(converted) = floored_i128(value) else {
+        return Err(fail(site, from, to, "out of range"));
+    };
+    fit_signed(converted, min, max, from, to, site)
+}
+
+pub fn f64_to_unsigned(
+    value: f64,
+    max: u128,
+    from: &str,
+    to: &str,
+    site: Site<'_>,
+) -> Result<u128, RuntimeError> {
+    if value < 0.0 {
+        return Err(fail(site, from, to, "out of range"));
+    }
+    let signed = f64_to_signed(value, 0, i128::MAX, from, to, site)?;
+    fit_unsigned(signed as u128, max, from, to, site)
+}
+
+pub fn signed_to_bool(value: i128, from: &str, site: Site<'_>) -> Result<bool, RuntimeError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(fail(site, from, "bln", "invalid boolean")),
+    }
+}
+
+pub fn unsigned_to_bool(value: u128, from: &str, site: Site<'_>) -> Result<bool, RuntimeError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(fail(site, from, "bln", "invalid boolean")),
+    }
+}
+
+pub fn f64_to_bool(value: f64, from: &str, site: Site<'_>) -> Result<bool, RuntimeError> {
+    if value == 0.0 {
+        Ok(false)
+    } else if value == 1.0 {
+        Ok(true)
+    } else {
+        Err(fail(site, from, "bln", "invalid boolean"))
+    }
+}
+
+pub fn code_to_char_signed(value: i128, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    if value < 0 || value > i128::from(0x10FFFF) {
+        return Err(fail(site, from, "chr", "invalid Unicode scalar value"));
+    }
+    char::from_u32(value as u32)
+        .ok_or_else(|| fail(site, from, "chr", "invalid Unicode scalar value"))
+}
+
+pub fn code_to_char_unsigned(
+    value: u128,
+    from: &str,
+    site: Site<'_>,
+) -> Result<char, RuntimeError> {
+    if value > u128::from(0x10FFFFu32) {
+        return Err(fail(site, from, "chr", "invalid Unicode scalar value"));
+    }
+    code_to_char_signed(value as i128, from, site)
+}
+
+pub fn code_to_char_f64(value: f64, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    let Some(code) = integral_i128(value) else {
         let category = if value.is_finite() {
             "not an integer"
         } else {
             "non-finite value"
         };
-        fail(site, from, to, category);
+        return Err(fail(site, from, "chr", category));
     };
-    fit_signed(converted, min, max, from, to, site)
-}
-
-pub fn f64_to_unsigned(value: f64, max: u128, from: &str, to: &str, site: Site<'_>) -> u128 {
-    if value < 0.0 {
-        fail(site, from, to, "out of range");
+    if !(0..=i128::from(0x10FFFF)).contains(&code) {
+        return Err(fail(site, from, "chr", "invalid Unicode scalar value"));
     }
-    let signed = f64_to_signed(value, 0, i128::MAX, from, to, site);
-    fit_unsigned(signed as u128, max, from, to, site)
-}
-
-pub fn signed_to_bool(value: i128, from: &str, site: Site<'_>) -> bool {
-    match value {
-        0 => false,
-        1 => true,
-        _ => fail(site, from, "bln", "invalid boolean"),
-    }
-}
-
-pub fn unsigned_to_bool(value: u128, from: &str, site: Site<'_>) -> bool {
-    match value {
-        0 => false,
-        1 => true,
-        _ => fail(site, from, "bln", "invalid boolean"),
-    }
-}
-
-pub fn f64_to_bool(value: f64, from: &str, site: Site<'_>) -> bool {
-    if value == 0.0 {
-        false
-    } else if value == 1.0 {
-        true
-    } else {
-        fail(site, from, "bln", "invalid boolean");
-    }
-}
-
-pub fn code_to_char_signed(value: i128, from: &str, site: Site<'_>) -> char {
-    if value < 0 || value > i128::from(0x10FFFF) {
-        fail(site, from, "chr", "invalid Unicode scalar value");
-    }
-    char::from_u32(value as u32)
-        .unwrap_or_else(|| fail(site, from, "chr", "invalid Unicode scalar value"))
-}
-
-pub fn code_to_char_unsigned(value: u128, from: &str, site: Site<'_>) -> char {
-    if value > u128::from(0x10FFFFu32) {
-        fail(site, from, "chr", "invalid Unicode scalar value");
-    }
-    code_to_char_signed(value as i128, from, site)
-}
-
-pub fn code_to_char_f64(value: f64, from: &str, site: Site<'_>) -> char {
-    let code = f64_to_signed(value, 0, i128::from(0x10FFFF), from, "chr", site);
     code_to_char_signed(code, from, site)
 }
 
@@ -312,11 +364,21 @@ pub fn char_to_code(value: char) -> u32 {
     u32::from(value)
 }
 
-pub fn char_to_signed(value: char, max: i128, to: &str, site: Site<'_>) -> i128 {
+pub fn char_to_signed(
+    value: char,
+    max: i128,
+    to: &str,
+    site: Site<'_>,
+) -> Result<i128, RuntimeError> {
     unsigned_to_signed(u128::from(char_to_code(value)), max, "chr", to, site)
 }
 
-pub fn char_to_unsigned(value: char, max: u128, to: &str, site: Site<'_>) -> u128 {
+pub fn char_to_unsigned(
+    value: char,
+    max: u128,
+    to: &str,
+    site: Site<'_>,
+) -> Result<u128, RuntimeError> {
     fit_unsigned(u128::from(char_to_code(value)), max, "chr", to, site)
 }
 
@@ -324,7 +386,7 @@ pub fn char_to_f64(value: char) -> f64 {
     f64::from(char_to_code(value))
 }
 
-pub fn char_to_f32(value: char, site: Site<'_>) -> f32 {
+pub fn char_to_f32(value: char, site: Site<'_>) -> Result<f32, RuntimeError> {
     f64_to_f32(char_to_f64(value), "chr", "flt32", site)
 }
 
@@ -333,24 +395,24 @@ fn parse_float<T: PartialEq + Copy>(
     site: Site<'_>,
     to: &str,
     parse: impl Fn(&str) -> Option<T>,
-) -> T
+) -> Result<T, RuntimeError>
 where
     T: FloatParsed,
 {
     let body = trim_ascii_ws(text);
     if !float_grammar(body) {
-        fail(site, "str", to, "invalid decimal number");
+        return Err(fail(site, "str", to, "invalid decimal number"));
     }
     let Some(value) = parse(body) else {
-        fail(site, "str", to, "invalid decimal number");
+        return Err(fail(site, "str", to, "invalid decimal number"));
     };
     if !value.is_finite_number() {
-        fail(site, "str", to, "out of range");
+        return Err(fail(site, "str", to, "out of range"));
     }
     if value.is_zero() && !significand_is_zero(body) {
-        fail(site, "str", to, "underflow");
+        return Err(fail(site, "str", to, "underflow"));
     }
-    value
+    Ok(value)
 }
 
 trait FloatParsed: Copy {
@@ -530,11 +592,50 @@ pub(crate) fn integral_i128(value: f64) -> Option<i128> {
     if !value.is_finite() || value.fract() != 0.0 {
         return None;
     }
-    let converted = value as i128;
-    if converted as f64 == value {
-        Some(converted)
+    floored_i128(value)
+}
+
+/// Rounds toward negative infinity, then returns the integer when it fits in `i128`.
+pub(crate) fn floored_i128(value: f64) -> Option<i128> {
+    if !value.is_finite() {
+        return None;
+    }
+    integer_f64_to_i128(value.floor())
+}
+
+fn integer_f64_to_i128(value: f64) -> Option<i128> {
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    if exponent == 0 {
+        return Some(0);
+    }
+    let unbiased = exponent - 1023;
+    if unbiased < 0 {
+        return Some(0);
+    }
+    if unbiased > 127 {
+        return None;
+    }
+    let fraction = bits & ((1u64 << 52) - 1);
+    let significand = (1u128 << 52) | u128::from(fraction);
+    let magnitude = if unbiased >= 52 {
+        significand << (unbiased as u32 - 52)
     } else {
+        significand >> (52 - unbiased as u32)
+    };
+    if negative {
+        if magnitude > 1u128 << 127 {
+            None
+        } else if magnitude == 1u128 << 127 {
+            Some(i128::MIN)
+        } else {
+            Some(-(magnitude as i128))
+        }
+    } else if magnitude > i128::MAX as u128 {
         None
+    } else {
+        Some(magnitude as i128)
     }
 }
 
@@ -547,6 +648,8 @@ mod tests {
             file: "test.grf",
             line: 1,
             column: 1,
+            end_column: 1,
+            excerpt: "",
         }
     }
 
@@ -587,7 +690,7 @@ mod tests {
     fn parses_signed_and_unsigned_boundaries() {
         let here = site();
         assert_eq!(
-            str_to_signed(" -42 ", i64::MIN as i128, i64::MAX as i128, "int64", here),
+            str_to_signed(" -42 ", i64::MIN as i128, i64::MAX as i128, "int64", here).unwrap(),
             -42
         );
         assert_eq!(
@@ -597,7 +700,8 @@ mod tests {
                 i64::MAX as i128,
                 "int64",
                 here
-            ),
+            )
+            .unwrap(),
             i64::MIN as i128
         );
         assert_eq!(
@@ -607,15 +711,16 @@ mod tests {
                 i64::MAX as i128,
                 "int64",
                 here
-            ),
+            )
+            .unwrap(),
             i64::MAX as i128
         );
         assert_eq!(
-            str_to_unsigned("18446744073709551615", u64::MAX as u128, "uint64", here),
+            str_to_unsigned("18446744073709551615", u64::MAX as u128, "uint64", here).unwrap(),
             u64::MAX as u128
         );
         assert_eq!(
-            str_to_signed("123", i32::MIN as i128, i32::MAX as i128, "int32", here),
+            str_to_signed("123", i32::MIN as i128, i32::MAX as i128, "int32", here).unwrap(),
             123
         );
         assert_eq!(
@@ -625,7 +730,8 @@ mod tests {
                 i32::MAX as i128,
                 "int32",
                 here
-            ),
+            )
+            .unwrap(),
             i32::MIN as i128
         );
         assert_eq!(
@@ -635,23 +741,24 @@ mod tests {
                 i32::MAX as i128,
                 "int32",
                 here
-            ),
+            )
+            .unwrap(),
             i32::MAX as i128
         );
         assert_eq!(
-            str_to_signed("-32768", i16::MIN as i128, i16::MAX as i128, "int16", here),
+            str_to_signed("-32768", i16::MIN as i128, i16::MAX as i128, "int16", here).unwrap(),
             i16::MIN as i128
         );
         assert_eq!(
-            str_to_signed("32767", i16::MIN as i128, i16::MAX as i128, "int16", here),
+            str_to_signed("32767", i16::MIN as i128, i16::MAX as i128, "int16", here).unwrap(),
             i16::MAX as i128
         );
         assert_eq!(
-            str_to_unsigned("65535", u16::MAX as u128, "uint16", here),
+            str_to_unsigned("65535", u16::MAX as u128, "uint16", here).unwrap(),
             u16::MAX as u128
         );
         assert_eq!(
-            str_to_unsigned("4294967295", u32::MAX as u128, "uint32", here),
+            str_to_unsigned("4294967295", u32::MAX as u128, "uint32", here).unwrap(),
             u32::MAX as u128
         );
         assert!(parse_signed("40000").is_some());
@@ -672,7 +779,7 @@ mod tests {
         for pad in [' ', '\t', '\n', '\r', '\u{000B}', '\u{000C}'] {
             let text = format!("{pad}12{pad}");
             assert_eq!(
-                str_to_signed(&text, i16::MIN as i128, i16::MAX as i128, "int16", site()),
+                str_to_signed(&text, i16::MIN as i128, i16::MAX as i128, "int16", site()).unwrap(),
                 12
             );
         }
@@ -683,31 +790,31 @@ mod tests {
     #[test]
     fn float_text_follows_the_graphite_literal_shapes() {
         let here = site();
-        assert_eq!(str_to_f64("12", here), 12.0);
-        assert_eq!(str_to_f64("12.5", here), 12.5);
-        assert_eq!(str_to_f64("1e-2", here), 0.01);
-        assert_eq!(str_to_f64("+1.5", here), 1.5);
-        assert_eq!(str_to_f64("-0.5", here), -0.5);
-        assert_eq!(str_to_f32("1.5", here), 1.5);
+        assert_eq!(str_to_f64("12", here).unwrap(), 12.0);
+        assert_eq!(str_to_f64("12.5", here).unwrap(), 12.5);
+        assert_eq!(str_to_f64("1e-2", here).unwrap(), 0.01);
+        assert_eq!(str_to_f64("+1.5", here).unwrap(), 1.5);
+        assert_eq!(str_to_f64("-0.5", here).unwrap(), -0.5);
+        assert_eq!(str_to_f32("1.5", here).unwrap(), 1.5);
         for rejected in [".5", "5.", "1e", "12abc", "NaN", "Infinity", "+inf", ""] {
             assert!(!float_grammar(rejected), "{rejected}");
         }
         assert!(float_grammar("0e-9999"));
-        assert_eq!(str_to_f64("0e-9999", here), 0.0);
+        assert_eq!(str_to_f64("0e-9999", here).unwrap(), 0.0);
     }
 
     #[test]
     fn boolean_text_is_case_insensitive() {
-        assert!(str_to_bool(" true ", site()));
-        assert!(!str_to_bool("FALSE", site()));
+        assert!(str_to_bool(" true ", site()).unwrap());
+        assert!(!str_to_bool("FALSE", site()).unwrap());
         assert!(parse_signed("yes").is_none());
     }
 
     #[test]
     fn character_text_counts_unicode_scalars() {
-        assert_eq!(str_to_char("A", site()), 'A');
-        assert_eq!(str_to_char("é", site()), 'é');
-        assert_eq!(str_to_char("𐍈", site()), '\u{10348}');
+        assert_eq!(str_to_char("A", site()).unwrap(), 'A');
+        assert_eq!(str_to_char("é", site()).unwrap(), 'é');
+        assert_eq!(str_to_char("𐍈", site()).unwrap(), '\u{10348}');
         assert_eq!("AB".chars().count(), 2);
         assert_eq!("é".chars().count(), 1);
     }
@@ -716,16 +823,18 @@ mod tests {
     fn numeric_boundaries_keep_exact_values() {
         let here = site();
         assert_eq!(
-            signed_to_f64(1i128 << 53, "int64", here),
+            signed_to_f64(1i128 << 53, "int64", here).unwrap(),
             (1i64 << 53) as f64
         );
         assert!(exact_signed_f64((1i128 << 53) + 1).is_none());
         assert_eq!(
-            signed_to_f32(1i128 << 24, "int32", here),
+            signed_to_f32(1i128 << 24, "int32", here).unwrap(),
             (1i32 << 24) as f32
         );
         assert!(exact_signed_f64(1i128 << 24).is_some());
-        assert!(f64_to_f32((1i64 << 24) as f64, "flt64", "flt32", here) == (1i32 << 24) as f32);
+        assert!(
+            f64_to_f32((1i64 << 24) as f64, "flt64", "flt32", here).unwrap() == (1i32 << 24) as f32
+        );
         let too_wide = ((1i64 << 24) as f64) + 1.0;
         assert!(too_wide as f32 as f64 != too_wide);
         assert_eq!(
@@ -736,16 +845,42 @@ mod tests {
                 "flt64",
                 "int32",
                 here
-            ),
+            )
+            .unwrap(),
             12
         );
+        assert_eq!(
+            f64_to_signed(
+                10.55,
+                i64::MIN as i128,
+                i64::MAX as i128,
+                "flt64",
+                "int64",
+                here
+            )
+            .unwrap(),
+            10
+        );
+        assert_eq!(
+            f64_to_signed(
+                -10.55,
+                i64::MIN as i128,
+                i64::MAX as i128,
+                "flt64",
+                "int64",
+                here
+            )
+            .unwrap(),
+            -11
+        );
+        assert_eq!(signed_to_f64(10, "int64", here).unwrap(), 10.0);
         assert!(integral_i128(12.5).is_none());
         assert!(integral_i128(f64::NAN).is_none());
         assert!(integral_i128(f64::INFINITY).is_none());
         assert!(exact_signed_f64(i64::MAX as i128).is_none());
-        assert_eq!(signed_to_bool(0, "int64", here), false);
-        assert!(signed_to_bool(1, "int64", here));
-        assert_eq!(code_to_char_signed(0x41, "int64", here), 'A');
+        assert_eq!(signed_to_bool(0, "int64", here).unwrap(), false);
+        assert!(signed_to_bool(1, "int64", here).unwrap());
+        assert_eq!(code_to_char_signed(0x41, "int64", here).unwrap(), 'A');
         assert_eq!(char_to_code('é'), 'é' as u32);
     }
 }

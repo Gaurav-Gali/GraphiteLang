@@ -11,62 +11,61 @@
 //! the selected positions, in traversal order, or leaves the array unchanged.
 
 use crate::convert::Site;
+use crate::diagnostic::{self, RuntimeError};
 
-pub fn fail(site: Site<'_>, category: &str, detail: &str) -> ! {
-    eprintln!(
-        "Runtime array error at {}:{}:{}:\n{category}: {detail}",
-        site.file, site.line, site.column
-    );
-    std::process::exit(1);
-}
-
-pub fn read_signed<T: Clone>(items: &[T], index: i128, site: Site<'_>) -> T {
+pub fn read_signed<T: Clone>(items: &[T], index: i128, site: Site<'_>) -> Result<T, RuntimeError> {
     let Some(at) = resolve_index_signed(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
-    items[at as usize].clone()
+    Ok(items[at as usize].clone())
 }
 
-pub fn read_unsigned<T: Clone>(items: &[T], index: u128, site: Site<'_>) -> T {
+pub fn read_unsigned<T: Clone>(
+    items: &[T],
+    index: u128,
+    site: Site<'_>,
+) -> Result<T, RuntimeError> {
     let Some(at) = resolve_index_unsigned(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
-    items[at as usize].clone()
+    Ok(items[at as usize].clone())
 }
 
-pub fn write_signed<T: Clone>(items: &mut [T], index: i128, value: T, site: Site<'_>) {
+pub fn write_signed<T: Clone>(
+    items: &mut [T],
+    index: i128,
+    value: T,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_index_signed(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
     items[at as usize] = value;
+    Ok(())
 }
 
-pub fn write_unsigned<T: Clone>(items: &mut [T], index: u128, value: T, site: Site<'_>) {
+pub fn write_unsigned<T: Clone>(
+    items: &mut [T],
+    index: u128,
+    value: T,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_index_unsigned(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
     items[at as usize] = value;
+    Ok(())
 }
 
-pub fn push<T>(items: &mut Vec<T>, value: T, limit: Option<u64>, site: Site<'_>) {
-    ensure_limit(items.len().saturating_add(1) as u64, limit, site);
+pub fn push<T>(
+    items: &mut Vec<T>,
+    value: T,
+    limit: Option<u64>,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
+    ensure_limit(items.len().saturating_add(1) as u64, limit, site)?;
     items.push(value);
+    Ok(())
 }
 
 pub fn insert_signed<T: Clone>(
@@ -75,16 +74,13 @@ pub fn insert_signed<T: Clone>(
     value: T,
     limit: Option<u64>,
     site: Site<'_>,
-) {
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_insert_signed(items.len() as u64, index) else {
-        fail(
-            site,
-            "invalid insertion position",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::insertion_position(site, index, items.len()));
     };
-    ensure_limit(items.len().saturating_add(1) as u64, limit, site);
+    ensure_limit(items.len().saturating_add(1) as u64, limit, site)?;
     items.insert(at as usize, value);
+    Ok(())
 }
 
 pub fn insert_unsigned<T: Clone>(
@@ -93,51 +89,47 @@ pub fn insert_unsigned<T: Clone>(
     value: T,
     limit: Option<u64>,
     site: Site<'_>,
-) {
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_insert_unsigned(items.len() as u64, index) else {
-        fail(
-            site,
-            "invalid insertion position",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::insertion_position(site, index, items.len()));
     };
-    ensure_limit(items.len().saturating_add(1) as u64, limit, site);
+    ensure_limit(items.len().saturating_add(1) as u64, limit, site)?;
     items.insert(at as usize, value);
+    Ok(())
 }
 
-pub fn ensure_limit(len: u64, limit: Option<u64>, site: Site<'_>) {
+pub fn ensure_limit(len: u64, limit: Option<u64>, site: Site<'_>) -> Result<(), RuntimeError> {
     let Some(limit) = limit else {
-        return;
+        return Ok(());
     };
     if len > limit {
-        fail(
-            site,
-            "array exceeds its maximum length",
-            &format!("length {len}, maximum {limit}"),
-        );
+        return Err(diagnostic::array_limit(site, len, limit));
     }
+    Ok(())
 }
 
-pub fn remove_signed<T>(items: &mut Vec<T>, index: i128, site: Site<'_>) {
+pub fn remove_signed<T>(
+    items: &mut Vec<T>,
+    index: i128,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_index_signed(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
     items.remove(at as usize);
+    Ok(())
 }
 
-pub fn remove_unsigned<T>(items: &mut Vec<T>, index: u128, site: Site<'_>) {
+pub fn remove_unsigned<T>(
+    items: &mut Vec<T>,
+    index: u128,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
     let Some(at) = resolve_index_unsigned(items.len() as u64, index) else {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {}", items.len()),
-        );
+        return Err(diagnostic::array_bounds(site, index, items.len()));
     };
     items.remove(at as usize);
+    Ok(())
 }
 
 pub fn slice_copy<T: Clone>(
@@ -146,15 +138,15 @@ pub fn slice_copy<T: Clone>(
     stop: Option<i128>,
     step: Option<i128>,
     site: Site<'_>,
-) -> Vec<T> {
+) -> Result<Vec<T>, RuntimeError> {
     let indices = match slice_indices(items.len() as u64, start, stop, step) {
         Ok(indices) => indices,
-        Err(SliceFault::ZeroStep) => fail(site, "slice step equals zero", "step 0"),
+        Err(SliceFault::ZeroStep) => return Err(diagnostic::zero_step(site)),
     };
-    indices
+    Ok(indices
         .into_iter()
         .map(|index| items[index as usize].clone())
-        .collect()
+        .collect())
 }
 
 pub fn assign_unit<T: Clone>(
@@ -174,45 +166,32 @@ pub fn assign_step<T: Clone>(
     step: i128,
     replacement: &[T],
     site: Site<'_>,
-) {
+) -> Result<(), RuntimeError> {
     let indices = match slice_indices(items.len() as u64, start, stop, Some(step)) {
         Ok(indices) => indices,
-        Err(SliceFault::ZeroStep) => fail(site, "slice step equals zero", "step 0"),
+        Err(SliceFault::ZeroStep) => return Err(diagnostic::zero_step(site)),
     };
     if indices.len() != replacement.len() {
-        fail(
+        return Err(diagnostic::slice_length(
             site,
-            "slice assignment length mismatch",
-            &format!(
-                "expected {} elements, found {}",
-                indices.len(),
-                replacement.len()
-            ),
-        );
+            indices.len(),
+            replacement.len(),
+        ));
     }
     for (index, value) in indices.into_iter().zip(replacement.iter()) {
         items[index as usize] = value.clone();
     }
+    Ok(())
 }
 
-pub fn index_signed(len: u64, index: i128, site: Site<'_>) -> u64 {
-    resolve_index_signed(len, index).unwrap_or_else(|| {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {len}"),
-        )
-    })
+pub fn index_signed(len: u64, index: i128, site: Site<'_>) -> Result<u64, RuntimeError> {
+    resolve_index_signed(len, index)
+        .ok_or_else(|| diagnostic::array_bounds(site, index, len as usize))
 }
 
-pub fn index_unsigned(len: u64, index: u128, site: Site<'_>) -> u64 {
-    resolve_index_unsigned(len, index).unwrap_or_else(|| {
-        fail(
-            site,
-            "array index out of bounds",
-            &format!("index {index}, length {len}"),
-        )
-    })
+pub fn index_unsigned(len: u64, index: u128, site: Site<'_>) -> Result<u64, RuntimeError> {
+    resolve_index_unsigned(len, index)
+        .ok_or_else(|| diagnostic::array_bounds(site, index, len as usize))
 }
 
 pub fn assign_slice<T: Clone>(
@@ -223,28 +202,26 @@ pub fn assign_slice<T: Clone>(
     replacement: &[T],
     limit: Option<u64>,
     site: Site<'_>,
-) {
+) -> Result<(), RuntimeError> {
     match step {
         None | Some(1) => {
             let (start_at, stop_at) = unit_bounds(items.len() as u64, start, stop);
             let new_len = (items.len() as u64)
                 .saturating_sub(stop_at.saturating_sub(start_at))
                 .saturating_add(replacement.len() as u64);
-            ensure_limit(new_len, limit, site);
+            ensure_limit(new_len, limit, site)?;
             assign_unit(items, start, stop, replacement);
+            Ok(())
         }
         Some(step) => assign_step(items, start, stop, step, replacement, site),
     }
 }
 
-pub fn expect_len(len: usize, expected: usize, site: Site<'_>) {
+pub fn expect_len(len: usize, expected: usize, site: Site<'_>) -> Result<(), RuntimeError> {
     if len != expected {
-        fail(
-            site,
-            "destructuring length mismatch",
-            &format!("expected {expected} elements, found {len}"),
-        );
+        return Err(diagnostic::destructure_length(site, expected, len));
     }
+    Ok(())
 }
 
 pub fn resolve_index_signed(len: u64, index: i128) -> Option<u64> {

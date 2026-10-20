@@ -32,7 +32,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::codegen::generate;
+use crate::codegen::generate_with_source;
 use crate::lexer::lex;
 use crate::manifest::builtin_manifest;
 use crate::parser::{format_ast, parse};
@@ -47,8 +47,8 @@ pub struct RunOutput {
     pub working_directory: Option<PathBuf>,
 }
 
-pub fn run_path(path: &Path, print_ast: bool) -> i32 {
-    match prepare(path, print_ast) {
+pub fn run_path(path: &Path, print_ast: bool, emit_rust: bool) -> i32 {
+    match prepare(path, print_ast, emit_rust) {
         Err(output) => {
             eprint!("{}", output.stderr);
             if print_ast && !output.stdout.is_empty() {
@@ -79,7 +79,7 @@ pub fn run_path(path: &Path, print_ast: bool) -> i32 {
 }
 
 pub fn run_captured(path: &Path) -> RunOutput {
-    match prepare(path, false) {
+    match prepare(path, false, false) {
         Err(output) => output,
         Ok(prepared) => {
             let output = Command::new(&prepared.binary)
@@ -119,6 +119,32 @@ struct Prepared {
     compiler_stderr: String,
 }
 
+fn render_diagnostic(
+    source: &str,
+    file: &str,
+    span: crate::span::Span,
+    code: &'static str,
+    message: &str,
+    help: Option<&str>,
+) -> String {
+    let excerpt = if span.start.line == 0 {
+        String::new()
+    } else {
+        graphite_core::diagnostic::source_line(source, span.start.line)
+    };
+    graphite_core::diagnostic::render(&graphite_core::diagnostic::DiagnosticView {
+        code,
+        message: message.to_string(),
+        file: file.to_string(),
+        line: span.start.line,
+        column: span.start.column,
+        end_column: span.end.column,
+        excerpt,
+        label: String::new(),
+        help: help.map(str::to_string),
+    })
+}
+
 fn failed(stderr: impl Into<String>) -> RunOutput {
     RunOutput {
         status: 1,
@@ -129,7 +155,7 @@ fn failed(stderr: impl Into<String>) -> RunOutput {
     }
 }
 
-fn prepare(path: &Path, print_ast: bool) -> Result<Prepared, RunOutput> {
+fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, RunOutput> {
     let bytes = fs::read(path)
         .map_err(|error| failed(format!("grf: cannot read {}: {error}\n", path.display())))?;
     let source = String::from_utf8(bytes)
@@ -139,8 +165,14 @@ fn prepare(path: &Path, print_ast: bool) -> Result<Prepared, RunOutput> {
     if !lexed.diagnostics.is_empty() {
         let mut stderr = String::new();
         for diagnostic in &lexed.diagnostics {
-            stderr.push_str(&diagnostic.to_string());
-            stderr.push('\n');
+            stderr.push_str(&render_diagnostic(
+                &source,
+                &diagnostic.source_name,
+                diagnostic.span,
+                diagnostic.code(),
+                &diagnostic.message,
+                diagnostic.hint.as_deref(),
+            ));
         }
         return Err(failed(stderr));
     }
@@ -149,8 +181,14 @@ fn prepare(path: &Path, print_ast: bool) -> Result<Prepared, RunOutput> {
     if !parsed.diagnostics.is_empty() {
         let mut stderr = String::new();
         for diagnostic in &parsed.diagnostics {
-            stderr.push_str(&diagnostic.to_string());
-            stderr.push('\n');
+            stderr.push_str(&render_diagnostic(
+                &source,
+                &diagnostic.source_name,
+                diagnostic.span,
+                diagnostic.code(),
+                &diagnostic.message,
+                None,
+            ));
         }
         return Err(RunOutput {
             status: 1,
@@ -170,8 +208,14 @@ fn prepare(path: &Path, print_ast: bool) -> Result<Prepared, RunOutput> {
     if !analysis.diagnostics.is_empty() {
         let mut stderr = String::new();
         for diagnostic in &analysis.diagnostics {
-            stderr.push_str(&diagnostic.to_string());
-            stderr.push('\n');
+            stderr.push_str(&render_diagnostic(
+                &source,
+                &diagnostic.source_name,
+                diagnostic.span,
+                diagnostic.code,
+                &diagnostic.message,
+                diagnostic.help.as_deref(),
+            ));
         }
         return Err(RunOutput {
             status: 1,
@@ -186,7 +230,7 @@ fn prepare(path: &Path, print_ast: bool) -> Result<Prepared, RunOutput> {
         });
     }
     let checked = analysis.program.expect("checked program");
-    let rust = generate(&checked);
+    let rust = generate_with_source(&checked, &source_name, &source);
     let workspace = discover_workspace().map_err(|error| failed(format!("grf: {error}\n")))?;
     let working_directory = entry_directory(path);
     if !workspace.join("crates/graphite-core/Cargo.toml").is_file() {
@@ -225,8 +269,17 @@ resolver = "3"
 "#
     );
     fs::write(build_dir.join("Cargo.toml"), manifest_text)
-        .and_then(|_| fs::write(build_dir.join("src/main.rs"), rust))
+        .and_then(|_| fs::write(build_dir.join("src/main.rs"), &rust))
         .map_err(|error| failed(format!("grf: cannot write generated files: {error}\n")))?;
+    if emit_rust {
+        let sidecar = path.with_extension("rs");
+        fs::write(&sidecar, &rust).map_err(|error| {
+            failed(format!(
+                "grf: cannot write {}: {error}\n",
+                sidecar.display()
+            ))
+        })?;
+    }
 
     let target_dir = workspace.join("target/grf/cargo-target");
     let cargo = Command::new("cargo")
@@ -238,7 +291,7 @@ resolver = "3"
         .output()
         .map_err(|error| failed(format!("grf: failed to start cargo: {error}\n")))?;
     if !cargo.status.success() {
-        let mut stderr = String::from("grf: generated Rust failed to compile\n");
+        let mut stderr = String::from("error[GRF-RST-001]: generated Rust failed to compile\n");
         stderr.push_str(&String::from_utf8_lossy(&cargo.stderr));
         stderr.push_str(&String::from_utf8_lossy(&cargo.stdout));
         return Err(RunOutput {
@@ -347,6 +400,30 @@ mod tests {
         let directory = entry_directory(&path);
         let canonical = fs::canonicalize(&path).unwrap();
         assert_eq!(directory, canonical.parent().unwrap());
+    }
+
+    #[test]
+    fn structured_type_mismatch_keeps_conversion_help_honest() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-diag-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(&path, "void main() {\n    int age = \"ten\";\n}\n").unwrap();
+        let rejected = run_captured(&path);
+        assert_ne!(rejected.status, 0);
+        assert!(
+            rejected.stderr.contains("error[GRF-TYP-001]:"),
+            "{}",
+            rejected.stderr
+        );
+        assert!(rejected.stderr.contains("-->"), "{}", rejected.stderr);
+        assert!(!rejected.stderr.contains("help:"), "{}", rejected.stderr);
+
+        fs::write(&path, "void main() {\n    int age = \"21\";\n}\n").unwrap();
+        let hinted = run_captured(&path);
+        assert_ne!(hinted.status, 0);
+        assert!(hinted.stderr.contains("int64(\"21\")"), "{}", hinted.stderr);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -549,10 +626,20 @@ void main() {
         let output = run_captured(&path);
         assert_ne!(output.status, 0);
         assert!(
-            output.stderr.contains("array index out of bounds"),
+            output
+                .stderr
+                .contains("error[GRF-RUN-001]: array index out of bounds"),
             "{}",
             output.stderr
         );
+        assert!(
+            output
+                .stderr
+                .contains("index 1 is out of bounds for an array of length 1"),
+            "{}",
+            output.stderr
+        );
+        assert!(output.stderr.contains("values[1]"), "{}", output.stderr);
 
         fs::write(
             &path,
@@ -707,19 +794,19 @@ void main() {
         let cases = [
             (
                 "import grf.io;\n\nvoid main() {\n    int16 a = 32767;\n    int16 b = 1;\n    io.println(a + b);\n}\n",
-                "integer overflow",
+                "error[GRF-RUN-004]: integer overflow",
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    int a = 1;\n    int b = 0;\n    io.println(a / b);\n}\n",
-                "division by zero",
+                "error[GRF-RUN-005]: division by zero",
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    int worst = -9223372036854775808;\n    io.println(worst / -1);\n}\n",
-                "integer overflow",
+                "error[GRF-RUN-004]: integer overflow",
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    io.println(1 % 0);\n}\n",
-                "division by zero",
+                "error[GRF-RUN-005]: division by zero",
             ),
             (
                 "import grf.io;\n\nvoid main() {\n    uint big = 9223372036854775808;\n    int small = 1;\n    io.println(small + big);\n}\n",
@@ -774,13 +861,19 @@ void main() {
     io.println(width);
     take("123");
     io.println(age + 1);
+    auto int rounded = 10.55;
+    io.println(rounded);
+    auto int lowered = -10.2;
+    io.println(lowered);
+    auto flt fromInt = 10;
+    io.println(fromInt);
 }
 "#,
         )
         .unwrap();
         let output = run_captured(&path);
         assert_eq!(output.status, 0, "{}", output.stderr);
-        assert_eq!(output.stdout, "25\n13\n13.5\n7\n9\n26\n");
+        assert_eq!(output.stdout, "25\n13\n13.5\n7\n9\n26\n10\n-11\n10\n");
 
         let failures = [
             (
@@ -792,8 +885,8 @@ void main() {
                 "out of range",
             ),
             (
-                "import grf.io;\n\nvoid main() {\n    auto int age = \"1\";\n    age = 1.5;\n}\n",
-                "not an integer",
+                "import grf.io;\n\nvoid main() {\n    auto int age = 1e20;\n}\n",
+                "out of range",
             ),
         ];
         for (source, diagnostic) in failures {
@@ -1035,7 +1128,10 @@ void main() {
         assert!(
             output
                 .stderr
-                .contains("cannot convert str to int16: out of range"),
+                .contains("error[GRF-RUN-006]: numeric conversion failed")
+                && output
+                    .stderr
+                    .contains("cannot convert str to int16: out of range"),
             "{}",
             output.stderr
         );
@@ -1220,7 +1316,11 @@ void main() {
         let output = run_captured(&path);
         assert_ne!(output.status, 0, "stdout {:?}", output.stdout);
         assert!(
-            output.stderr.contains("unexpected end of input"),
+            output
+                .stderr
+                .contains("error[GRF-RUN-007]: input/output error")
+                && output.stderr.contains("unexpected end of input")
+                && !output.stderr.contains("-->"),
             "{}",
             output.stderr
         );
@@ -1420,7 +1520,19 @@ void main() {
         assert!(
             indexed
                 .stderr
+                .contains("error[GRF-RUN-002]: missing map key"),
+            "{}",
+            indexed.stderr
+        );
+        assert!(
+            indexed
+                .stderr
                 .contains("missing key: lookup on 'map<str, int64>'"),
+            "{}",
+            indexed.stderr
+        );
+        assert!(
+            !indexed.stderr.contains("missing key: \"Grace\""),
             "{}",
             indexed.stderr
         );
@@ -1467,7 +1579,10 @@ void main() {
         let failed = run_captured(&boom);
         assert_ne!(failed.status, 0, "{}", failed.stdout);
         assert!(
-            failed.stderr.contains("cannot convert str to int16"),
+            failed
+                .stderr
+                .contains("error[GRF-RUN-006]: numeric conversion failed")
+                && failed.stderr.contains("cannot convert str to int16"),
             "{}",
             failed.stderr
         );
@@ -1662,6 +1777,75 @@ void main() {
             boom.stderr
         );
         assert!(boom.stdout.is_empty(), "{:?}", boom.stdout);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_record_fields_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-auto-record-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    rectangle r1 = {
+        height: 10,
+        width: "200",
+    };
+    io.println(area(r1));
+    r1.width = "3";
+    io.println(area(r1));
+}
+
+type rectangle {
+    height: auto int,
+    width: auto int,
+}
+
+flt area(auto rectangle rect) {
+    return flt(rect.height * rect.width);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "2000\n30\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rs_flag_writes_generated_rust_beside_the_source() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-rs-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.grf");
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(\"beside\");\n}\n",
+        )
+        .unwrap();
+        let prepared = prepare(&path, false, true).unwrap_or_else(|output| {
+            panic!("{}", output.stderr);
+        });
+        let sidecar = dir.join("sample.rs");
+        let rust = fs::read_to_string(&sidecar).unwrap();
+        assert!(rust.contains("fn main()"), "{rust}");
+        assert!(rust.contains("beside"), "{rust}");
+        assert!(!dir.join("Cargo.toml").exists());
+        let output = std::process::Command::new(&prepared.binary)
+            .current_dir(&prepared.working_directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "beside\n");
         let _ = fs::remove_dir_all(&dir);
     }
 }

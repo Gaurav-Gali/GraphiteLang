@@ -10,28 +10,20 @@
 //! not reported as an empty string.
 
 use std::io::{self, BufRead, Write};
-use std::process;
 
-pub fn print(value: String) {
-    if let Err(error) = write_all(&value, false) {
-        fail_io(error);
-    }
+use crate::diagnostic::{self, RuntimeError};
+
+pub fn print(value: String) -> Result<(), RuntimeError> {
+    write_all(&value, false).map_err(fail_io)
 }
 
-pub fn println(value: String) {
-    if let Err(error) = write_all(&value, true) {
-        fail_io(error);
-    }
+pub fn println(value: String) -> Result<(), RuntimeError> {
+    write_all(&value, true).map_err(fail_io)
 }
 
-pub fn input(prompt: String) -> String {
-    if let Err(error) = write_all(&prompt, false) {
-        fail_io(error);
-    }
-    match read_line(&mut io::stdin().lock()) {
-        Ok(line) => line,
-        Err(error) => fail_io(error),
-    }
+pub fn input(prompt: String) -> Result<String, RuntimeError> {
+    write_all(&prompt, false).map_err(fail_io)?;
+    read_line(&mut io::stdin().lock()).map_err(fail_io)
 }
 
 fn write_all(value: &str, newline: bool) -> io::Result<()> {
@@ -65,9 +57,8 @@ fn finish_line(bytes_read: usize, line: &str) -> io::Result<String> {
     }
 }
 
-fn fail_io(error: io::Error) -> ! {
-    eprintln!("graphite: input/output error: {error}");
-    process::exit(1);
+fn fail_io(error: io::Error) -> RuntimeError {
+    diagnostic::input_output(error.to_string())
 }
 
 fn without_line_ending(line: &str) -> &str {
@@ -83,9 +74,9 @@ mod tests {
 
     #[test]
     fn signatures_match_the_graphite_contract() {
-        let _print: fn(String) = print;
-        let _println: fn(String) = println;
-        let _input: fn(String) -> String = input;
+        let _print: fn(String) -> Result<(), RuntimeError> = print;
+        let _println: fn(String) -> Result<(), RuntimeError> = println;
+        let _input: fn(String) -> Result<String, RuntimeError> = input;
     }
 
     #[test]

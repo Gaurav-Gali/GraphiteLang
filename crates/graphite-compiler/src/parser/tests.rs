@@ -697,6 +697,7 @@ void main() {
     assert_eq!(program.types[0].fields.len(), 2);
     assert_eq!(program.types[0].fields[1].ty.kind, TypeKind::Int);
     assert_eq!(program.types[0].fields[1].ty.bounds, vec![None]);
+    assert_eq!(program.types[0].fields[1].conversion, ConversionMode::Exact);
     let function = function(&program, "make");
     let Stmt::Return(statement) = &function.body.statements[0] else {
         panic!("expected return");
@@ -712,16 +713,25 @@ void main() {
 ",
         "top level",
     );
-    assert_rejected(
+    let auto_fields = parse_clean(
         "\
-type User {
-    age: auto int,
+type rectangle {
+    height: auto int,
+    width: auto int,
 }
 
 void main() {
 }
 ",
-        "auto is not allowed",
+    );
+    assert_eq!(
+        auto_fields.types[0].fields[0].conversion,
+        ConversionMode::Auto
+    );
+    assert_eq!(auto_fields.types[0].fields[0].ty.kind, TypeKind::Int);
+    assert_eq!(
+        auto_fields.types[0].fields[1].conversion,
+        ConversionMode::Auto
     );
 }
 

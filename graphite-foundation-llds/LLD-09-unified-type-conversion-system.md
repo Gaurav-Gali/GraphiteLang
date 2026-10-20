@@ -303,20 +303,23 @@ permissive parsing that accepts trailing characters.
 
 ### 6.4 Numeric conversions to `int64` and `uint64`
 
--   Floating-point inputs must be finite and mathematically integral. A
-    fractional value such as `12.5` fails; the compiler/runtime must not
-    truncate or round it.
--   Check the target range before conversion.
--   `flt64` to `int64` requires a value in the signed 64-bit range and
-    with no fractional part. Because binary64 cannot represent every
-    integer near the upper boundary, range validation must be performed
-    without first performing an overflowing or saturating cast.
--   `flt64` to `uint64` requires a nonnegative integral value in the
-    unsigned 64-bit range, validated without a saturating cast.
+-   Floating-point inputs must be finite. A fractional value rounds down
+    toward negative infinity before the integer conversion: `10.55`
+    becomes `10`, and `-10.55` becomes `-11`. `10` converts to `flt64`
+    as `10.0`.
+-   Check the target range after rounding.
+-   `flt64` to `int64` requires the rounded value to fit in the signed
+    64-bit range. Because binary64 cannot represent every integer near
+    the upper boundary, range validation must be performed without
+    first performing an overflowing or saturating cast.
+-   `flt64` to `uint64` requires a nonnegative value whose rounded
+    result fits in the unsigned 64-bit range, validated without a
+    saturating cast. A negative float fails before rounding.
 -   `uint64` to `int64` fails above `9223372036854775807`.
 -   `int64` to `uint64` fails for negative values.
--   No conversion may wrap, saturate, truncate, or invent rounding
-    behavior.
+-   No conversion may wrap or saturate. Float-to-integer conversion
+    rounds down as specified above and does not use any other rounding
+    mode.
 
 ### 6.5 Integer to `flt64`
 
@@ -418,8 +421,8 @@ Some approved conversions depend on the actual runtime value and can
 fail even though the source and target types are compatible.
 
 Examples include parsing malformed strings, a negative value converted
-to `uint64`, a fractional float converted to an integer, and a string
-with multiple Unicode scalar values converted to `chr`.
+to `uint64`, a float that rounds outside the target integer range, and
+a string with multiple Unicode scalar values converted to `chr`.
 
 For v0.1:
 
@@ -508,7 +511,8 @@ Runtime diagnostics are required for:
 
 -   Malformed textual input.
 -   Numeric range violations.
--   Non-integral or non-finite float-to-integer conversion.
+-   Non-finite float-to-integer conversion, or a rounded value outside
+    the target range.
 -   Integer-to-float precision loss.
 -   Invalid boolean numeric values.
 -   Invalid boolean text.
@@ -602,8 +606,9 @@ Stage 5 is complete only when:
 4.  All unsupported conversions fail at compile time.
 5.  Runtime-invalid values produce defined conversion diagnostics and
     nonzero termination.
-6.  Numeric conversions do not silently wrap, saturate, truncate, or
-    lose integer precision.
+6.  Numeric conversions do not silently wrap or saturate. Float-to-integer
+    conversion rounds down. Integer-to-float conversion does not lose
+    integer precision.
 7.  Character conversions enforce Unicode scalar validity.
 8.  String conversions follow the strict parsing grammars in this LLD.
 9.  String formatting is consistent with interpolation.
@@ -638,10 +643,11 @@ Stage 5 is complete only when:
     conversion registry.
 3.  Only matrix-approved source/target pairs are allowed.
 4.  No `any` type or equivalent untyped escape hatch.
-5.  No silent wrap, saturation, truncation, or invented rounding.
-6.  Float-to-integer conversion requires a finite, integral, in-range
-    value.
-7.  Integer-to-float conversion requires exact representability.
+5.  No silent wrap or saturation.
+6.  Float-to-integer conversion rounds a finite value down toward
+    negative infinity, then requires the result to be in range.
+7.  Integer-to-float conversion requires exact representability. A value
+    such as `10` becomes `10.0`.
 8.  String parsing is strict and follows the grammars in this LLD.
 9.  Boolean conversions do not use truthiness; numeric inputs must be
     exactly zero or one.

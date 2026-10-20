@@ -1,46 +1,6 @@
 import grf.io;
 
-type Employee {
-  name : str,
-  age : uint,
-  salary : int,
-  manager : Manager
-}
-
-type Manager {
-  name : str,
-  age : uint
-}
-
 void main() {
-  Manager m1 = {name : "manager1", age : 40};
-  Manager m2 = {name : "manager2", age : 45};
-
-  map<str, Employee[]> company = {
-    m1.name : [
-      {name : "emp1", age : 30, salary : 50000, manager : m1},
-      {name : "emp2", age : 25, salary : 60000, manager : m1}
-    ],
-
-    m2.name : [
-      {name : "emp3", age : 35, salary : 70000, manager : m2},
-      {name : "emp4", age : 28, salary : 80000, manager : m2}
-    ]
-  };
-  
-  loop(str key, Employee[] emps = company.entries()) {
-    io.println(f"======== {key} ========");
-
-    loop(Employee emp = emps.iter()) {
-      io.println(emp);
-    }
-
-    io.println("");
-  }
-
-  map<str, int> map2 = {"a" : 1, "b" : 2};
-  map<str, int> map3 = {...map2, "c" : 3, "d" : 4};
-
-  io.println(typeOf(map3));
-
+  io.println(typeOf("123"));
 }
+

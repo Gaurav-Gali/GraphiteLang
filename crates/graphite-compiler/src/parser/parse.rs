@@ -39,6 +39,26 @@ pub enum ParserDiagnosticKind {
     UnexpectedEof,
 }
 
+impl ParserDiagnostic {
+    pub fn code(&self) -> &'static str {
+        if self.message.contains("is a reserved keyword") {
+            return "GRF-NAM-003";
+        }
+        match self.kind {
+            ParserDiagnosticKind::ExpectedToken => "GRF-PAR-001",
+            ParserDiagnosticKind::UnexpectedToken => "GRF-PAR-002",
+            ParserDiagnosticKind::InvalidImport => "GRF-PAR-003",
+            ParserDiagnosticKind::InvalidTypeSyntax => "GRF-PAR-004",
+            ParserDiagnosticKind::InvalidDeclaration => "GRF-PAR-005",
+            ParserDiagnosticKind::InvalidExpression => "GRF-PAR-006",
+            ParserDiagnosticKind::InvalidStatement => "GRF-PAR-007",
+            ParserDiagnosticKind::UnterminatedBlock => "GRF-PAR-008",
+            ParserDiagnosticKind::UnterminatedInterpolation => "GRF-PAR-009",
+            ParserDiagnosticKind::UnexpectedEof => "GRF-PAR-010",
+        }
+    }
+}
+
 impl fmt::Display for ParserDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -176,14 +196,12 @@ impl<'a> Parser<'a> {
                 if !self.consume(TokenKind::Colon, "expected ':' after field name") {
                     break;
                 }
-                if self.check(TokenKind::KwAuto) {
-                    self.error(
-                        ParserDiagnosticKind::InvalidTypeSyntax,
-                        self.current().span,
-                        "auto is not allowed as a record field type",
-                    );
+                let conversion = if self.check(TokenKind::KwAuto) {
                     self.bump();
-                }
+                    ConversionMode::Auto
+                } else {
+                    ConversionMode::Exact
+                };
                 let Some(ty) = self.parse_type() else {
                     break;
                 };
@@ -194,6 +212,7 @@ impl<'a> Parser<'a> {
                 fields.push(FieldDecl {
                     name: field_name,
                     ty,
+                    conversion,
                     span,
                 });
                 if self.check(TokenKind::Comma) {

@@ -19,6 +19,7 @@ pub struct TypeDecl {
 pub struct FieldDecl {
     pub name: Identifier,
     pub ty: TypeSyntax,
+    pub conversion: ConversionMode,
     pub span: Span,
 }
 

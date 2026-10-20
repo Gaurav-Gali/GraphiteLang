@@ -23,7 +23,13 @@ pub fn format_ast(program: &Program) -> String {
         let fields = declaration
             .fields
             .iter()
-            .map(|field| format!("{}: {}", field.name.name, format_type(&field.ty)))
+            .map(|field| {
+                let ty = match field.conversion {
+                    ConversionMode::Auto => format!("auto {}", format_type(&field.ty)),
+                    ConversionMode::Exact => format_type(&field.ty),
+                };
+                format!("{}: {ty}", field.name.name)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         write_line(

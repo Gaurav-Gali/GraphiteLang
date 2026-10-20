@@ -222,7 +222,11 @@ The command must:
 11. Forward the program's stdout and stderr.
 12. Return a nonzero exit status for compilation or execution failures.
 
-The existing `--ast` functionality must continue to work.
+The existing `--ast` functionality must continue to work. `--rs` runs the
+program the same way and also writes the generated Rust source beside
+the entry file, replacing the `.grf` extension with `.rs`. Generated
+build files stay in the compiler build directory unless that flag is
+set.
 
 If the CLI already has a `run` command, extend its implementation instead of creating a competing command.
 

@@ -15,9 +15,12 @@ fn main() {
         "run" => {
             let mut path = None;
             let mut print_ast = false;
+            let mut emit_rust = false;
             for arg in args {
                 if arg == "--ast" {
                     print_ast = true;
+                } else if arg == "--rs" {
+                    emit_rust = true;
                 } else if path.is_none() {
                     path = Some(arg);
                 } else {
@@ -30,7 +33,7 @@ fn main() {
                 usage();
                 process::exit(2);
             };
-            process::exit(run_path(Path::new(&path), print_ast));
+            process::exit(run_path(Path::new(&path), print_ast, emit_rust));
         }
         other => {
             eprintln!("grf: unknown command '{other}'");
@@ -41,5 +44,5 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("Usage: grf run <file.grf> [--ast]");
+    eprintln!("Usage: grf run <file.grf> [--ast] [--rs]");
 }

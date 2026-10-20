@@ -92,13 +92,18 @@ scope.
 ``` ebnf
 type_declaration = "type", IDENTIFIER, "{", field_declaration_list, "}" ;
 field_declaration_list = field_declaration, { ",", field_declaration }, [ "," ] ;
-field_declaration = IDENTIFIER, ":", type_reference ;
+field_declaration = IDENTIFIER, ":", [ "auto" ], type_reference ;
 ```
 
 Reuse the existing type-reference grammar, including supported
 primitive, named, array, and map types. A trailing comma in a field
 declaration list is accepted. `void` is not a valid field type. Empty
 record declarations are rejected in Stage 7.
+
+`height: auto int` stores `int`. Writes to that field, including record
+literals and later assignments, use the existing `auto T` conversion
+registry. `height: int` stays an ordinary typed slot and does not
+convert. `auto` does not make one record type convertible to another.
 
 ``` grf
 type Profile {
@@ -284,9 +289,11 @@ user.name = "Grace";
 
 Field assignment is valid only if the base path resolves to a record
 field, the root binding is mutable, the field exists, and the assigned
-expression is compatible with the declared field type. Assignment
-through a const root, assignment to an unknown field, or assignment of
-an incompatible value is a compile-time error.
+expression is compatible with the declared field type. A field declared
+`auto T` accepts a value that the existing conversion registry can
+convert to `T`. Assignment through a const root, assignment to an
+unknown field, or assignment of an incompatible value is a compile-time
+error.
 
 ### 7.3 Nested values
 
@@ -669,8 +676,10 @@ Stage 7 implements named records only.
     map field is accepted only when its key and value types are valid
     under the map rules. Map values that are records participate in
     cycle detection, with no exception for map-mediated cycles.
--   A field is an ordinary typed slot. `auto` is not a field type, and
-    field initialization does not apply `auto T` conversion.
+-   A field written `T` is an ordinary typed slot. A field written
+    `auto T` stores `T` and applies the existing `auto T` conversion
+    registry on initialization and assignment. That does not add a
+    conversion between two record types.
 -   `User(value)` is a function call, not a constructor. A function and
     a record may share a spelling. `type` is a reserved keyword.
 -   Record names are collected before field resolution and function

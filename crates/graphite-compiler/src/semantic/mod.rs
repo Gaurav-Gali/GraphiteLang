@@ -30,7 +30,9 @@
 //!
 //! Named records are nominal. A record literal needs an expected record type,
 //! and later assignments to an `auto` record do not convert another record
-//! into it. Field slots use ordinary typed compatibility.
+//! into it. A field written `auto T` stores `T` and converts writes through
+//! the same registry as an `auto T` variable. A field written `T` stays an
+//! ordinary typed slot.
 
 use std::collections::HashMap;
 
@@ -408,6 +410,8 @@ pub struct SemanticDiagnostic {
     pub source_name: String,
     pub span: Span,
     pub message: String,
+    pub code: &'static str,
+    pub help: Option<String>,
 }
 
 impl std::fmt::Display for SemanticDiagnostic {
@@ -493,6 +497,7 @@ pub enum CheckedStmt {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     Iterate {
         bindings: Vec<(String, CanonicalType, bool)>,
@@ -523,6 +528,7 @@ pub enum ArrayPlace {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     MapIndex {
         object: Box<ArrayPlace>,
@@ -532,6 +538,7 @@ pub enum ArrayPlace {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
 }
 
@@ -584,6 +591,7 @@ pub enum CheckedExpr {
         op: UnaryOperator,
         expr: Box<CheckedExpr>,
         ty: CanonicalType,
+        span: Span,
     },
     Binary {
         op: BinaryOperator,
@@ -591,6 +599,7 @@ pub enum CheckedExpr {
         right: Box<CheckedExpr>,
         ty: CanonicalType,
         compare: Option<CompareMode>,
+        span: Span,
     },
     NumCast {
         from: CanonicalType,
@@ -600,6 +609,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     Assign {
         name: String,
@@ -611,6 +621,7 @@ pub enum CheckedExpr {
         increment: bool,
         name: String,
         ty: CanonicalType,
+        span: Span,
     },
     Call {
         path: String,
@@ -653,6 +664,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     Char(char),
     Array {
@@ -666,6 +678,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     SliceGet {
         object: Box<CheckedExpr>,
@@ -676,6 +689,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     IndexSet {
         place: Option<ArrayPlace>,
@@ -686,6 +700,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     SliceSet {
         place: Option<ArrayPlace>,
@@ -699,6 +714,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     ArrayCall {
         place: Option<ArrayPlace>,
@@ -710,6 +726,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     MapLiteral {
         entries: Vec<MapEntry>,
@@ -723,6 +740,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     MapInsert {
         place: ArrayPlace,
@@ -732,6 +750,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     MapCall {
         place: Option<ArrayPlace>,
@@ -745,6 +764,7 @@ pub enum CheckedExpr {
         file: String,
         line: u32,
         column: u32,
+        end_column: u32,
     },
     Interpolated {
         parts: Vec<CheckedPart>,
@@ -887,6 +907,7 @@ struct FieldInfo {
     name: String,
     syntax: TypeSyntax,
     ty: CanonicalType,
+    auto: bool,
     span: Span,
 }
 
@@ -1022,6 +1043,7 @@ impl<'a> Checker<'a> {
                     name: field.name.name.clone(),
                     syntax: field.ty.clone(),
                     ty: CanonicalType::Void,
+                    auto: field.conversion == ConversionMode::Auto,
                     span: field.span,
                 });
             }
@@ -1256,6 +1278,19 @@ impl<'a> Checker<'a> {
             .get(id.0 as usize)
             .map(|record| record.name.clone())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn field_auto(&self, place: &ArrayPlace) -> bool {
+        let ArrayPlace::Field { object, field, .. } = place else {
+            return false;
+        };
+        let CanonicalType::Record(id) = self.place_type(object) else {
+            return false;
+        };
+        self.records
+            .get(id.0 as usize)
+            .and_then(|record| record.fields.iter().find(|info| info.name == *field))
+            .is_some_and(|info| info.auto)
     }
 
     fn field_index(&self, id: RecordId, name: &str) -> Option<(usize, CanonicalType)> {
@@ -1689,6 +1724,7 @@ impl<'a> Checker<'a> {
                     op: UnaryOperator::Not,
                     ty: CanonicalType::Bln,
                     expr: Box::new(operand),
+                    span: expr.span,
                 }
             }
             UnaryOperator::Negate => {
@@ -1699,6 +1735,7 @@ impl<'a> Checker<'a> {
                     op: UnaryOperator::Negate,
                     ty: operand.ty(),
                     expr: Box::new(operand),
+                    span: expr.span,
                 }
             }
         }
@@ -1718,6 +1755,7 @@ impl<'a> Checker<'a> {
                 left: Box::new(left),
                 right: Box::new(right),
                 compare: None,
+                span: expr.span,
             };
         }
         let comparison = matches!(
@@ -1742,6 +1780,7 @@ impl<'a> Checker<'a> {
                     left: Box::new(left),
                     right: Box::new(right),
                     compare: Some(CompareMode::Same),
+                    span: expr.span,
                 };
             }
             let message = if equality {
@@ -1764,6 +1803,7 @@ impl<'a> Checker<'a> {
                 left: Box::new(left),
                 right: Box::new(right),
                 compare: None,
+                span: expr.span,
             };
         }
         if matches!(
@@ -1792,6 +1832,7 @@ impl<'a> Checker<'a> {
                 left: Box::new(left),
                 right: Box::new(right),
                 compare: None,
+                span: expr.span,
             };
         }
         if comparison {
@@ -1858,6 +1899,7 @@ impl<'a> Checker<'a> {
             left: Box::new(left),
             right: Box::new(right),
             compare,
+            span: expr.span,
         }
     }
 
@@ -1878,6 +1920,7 @@ impl<'a> Checker<'a> {
                     left: Box::new(left),
                     right: Box::new(right),
                     compare: None,
+                    span: expr.span,
                 }
             }
             Err(NumericError::Remainder) => {
@@ -1909,6 +1952,7 @@ impl<'a> Checker<'a> {
             left: Box::new(left),
             right: Box::new(right),
             compare: None,
+            span: expr.span,
         }
     }
 
@@ -1917,7 +1961,7 @@ impl<'a> Checker<'a> {
         if from == to {
             return expr;
         }
-        let (file, line, column) = self.located(span);
+        let (file, line, column, end_column) = self.located(span);
         CheckedExpr::NumCast {
             from,
             to,
@@ -1926,6 +1970,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -1986,6 +2031,7 @@ impl<'a> Checker<'a> {
             increment: expr.operator == UpdateOperator::Increment,
             name: ident.name.clone(),
             ty: binding.ty,
+            span: expr.span,
         }
     }
 
@@ -2255,6 +2301,7 @@ impl<'a> Checker<'a> {
                     file: self.source_name.to_string(),
                     line: span.start.line,
                     column: span.start.column,
+                    end_column: span.end.column,
                 };
             }
             self.error(
@@ -2267,15 +2314,49 @@ impl<'a> Checker<'a> {
             );
             return expr;
         }
-        self.error(
+        let help = self.conversion_help(&expr, from, target);
+        self.error_help(
             span,
             format!(
                 "type mismatch: expected '{}', found '{}'",
                 self.spell(target),
                 self.spell(from)
             ),
+            help,
         );
         expr
+    }
+
+    fn conversion_help(
+        &self,
+        expr: &CheckedExpr,
+        from: CanonicalType,
+        target: CanonicalType,
+    ) -> Option<String> {
+        let op = conversion(from, target)?;
+        if matches!(
+            op,
+            ConvOp::F64ToSigned
+                | ConvOp::F64ToUnsigned
+                | ConvOp::F32ToSigned
+                | ConvOp::F32ToUnsigned
+                | ConvOp::F64ToF32
+        ) {
+            return None;
+        }
+        if let CheckedExpr::Str(text) = expr {
+            if !string_literal_converts(text, target) {
+                return None;
+            }
+            return Some(format!(
+                "convert the value explicitly, for example `{}(\"{text}\")`",
+                self.spell(target)
+            ));
+        }
+        Some(format!(
+            "an explicit conversion to '{}' is allowed; it is checked when the program runs",
+            self.spell(target)
+        ))
     }
 
     fn check_record_literal(
@@ -2319,7 +2400,7 @@ impl<'a> Checker<'a> {
                 record
                     .fields
                     .iter()
-                    .map(|field| (field.name.clone(), field.ty))
+                    .map(|field| (field.name.clone(), field.ty, field.auto))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -2350,7 +2431,10 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(value, None, false);
                 continue;
             }
-            let Some(position) = declared.iter().position(|(field, _)| field == &name.name) else {
+            let Some(position) = declared
+                .iter()
+                .position(|(field, _, _)| field == &name.name)
+            else {
                 self.error(
                     name.span,
                     format!("record literal has unknown field '{}'", name.name),
@@ -2359,11 +2443,12 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let field_ty = declared[position].1;
+            let auto = declared[position].2;
             let checked = self.check_expr(value, Some(field_ty), false);
-            let checked = self.apply_conversion(checked, field_ty, false, value.span());
+            let checked = self.apply_conversion(checked, field_ty, auto, value.span());
             initializers.push((position, checked));
         }
-        for (name, _) in &declared {
+        for (name, _, _) in &declared {
             if !seen.contains_key(name) {
                 self.error(
                     expr.span,
@@ -2448,8 +2533,9 @@ impl<'a> Checker<'a> {
         let before = self.diagnostics.len();
         if let Some(place) = self.check_place(&Expr::Member(member.clone()), true) {
             let ty = self.place_type(&place);
+            let auto = self.field_auto(&place);
             let checked = self.check_expr(value, Some(ty), false);
-            let value = self.apply_conversion(checked, ty, false, value.span());
+            let value = self.apply_conversion(checked, ty, auto, value.span());
             return CheckedExpr::FieldSet {
                 place,
                 value: Box::new(value),
@@ -2547,7 +2633,7 @@ impl<'a> Checker<'a> {
             );
             CanonicalType::Int64
         };
-        let (file, line, column) = self.located(expr.span);
+        let (file, line, column, end_column) = self.located(expr.span);
         CheckedExpr::IndexGet {
             object: Box::new(object),
             index: Box::new(index),
@@ -2555,6 +2641,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -2581,7 +2668,7 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|bound| Box::new(self.check_index_operand(bound)));
         let ty = object.ty();
-        let (file, line, column) = self.located(expr.span);
+        let (file, line, column, end_column) = self.located(expr.span);
         CheckedExpr::SliceGet {
             object: Box::new(object),
             start,
@@ -2591,6 +2678,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -2601,7 +2689,7 @@ impl<'a> Checker<'a> {
                 return self.check_map_insert(place, object_ty, index, value);
             }
             let checked_index = self.check_index_operand(&index.index);
-            let (file, line, column) = self.located(index.span);
+            let (file, line, column, end_column) = self.located(index.span);
             let array_ty = object_ty;
             if !array_ty.is_array() {
                 self.error(
@@ -2623,6 +2711,7 @@ impl<'a> Checker<'a> {
                 file,
                 line,
                 column,
+                end_column,
             };
         }
         let object = self.check_expr(&index.object, None, false);
@@ -2634,7 +2723,7 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         }
         let checked_index = self.check_index_operand(&index.index);
-        let (file, line, column) = self.located(index.span);
+        let (file, line, column, end_column) = self.located(index.span);
         let element = if object.ty().is_array() {
             object.ty().element().unwrap_or(CanonicalType::Int64)
         } else {
@@ -2655,6 +2744,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -2671,7 +2761,7 @@ impl<'a> Checker<'a> {
             .step
             .as_ref()
             .map(|bound| Box::new(self.check_index_operand(bound)));
-        let (file, line, column) = self.located(slice.span);
+        let (file, line, column, end_column) = self.located(slice.span);
         let (place, object, array_ty) = if let Some(place) = self.check_place(&slice.object, true) {
             let array_ty = self.place_type(&place);
             if array_ty.is_map() {
@@ -2718,6 +2808,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -2767,7 +2858,7 @@ impl<'a> Checker<'a> {
                 if object_ty.is_map() {
                     let (key_ty, value_ty) = self.map_parts(object_ty);
                     let key = self.check_map_key(&index.index, key_ty);
-                    let (file, line, column) = self.located(index.span);
+                    let (file, line, column, end_column) = self.located(index.span);
                     return Some(ArrayPlace::MapIndex {
                         object: Box::new(object),
                         key: Box::new(key),
@@ -2776,6 +2867,7 @@ impl<'a> Checker<'a> {
                         file,
                         line,
                         column,
+                        end_column,
                     });
                 }
                 if !object_ty.is_array() {
@@ -2786,13 +2878,14 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 let checked = self.check_index_operand(&index.index);
-                let (file, line, column) = self.located(index.span);
+                let (file, line, column, end_column) = self.located(index.span);
                 Some(ArrayPlace::Index {
                     object: Box::new(object),
                     index: Box::new(checked),
                     file,
                     line,
                     column,
+                    end_column,
                 })
             }
             _ => None,
@@ -2938,7 +3031,7 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
-        let (file, line, column) = self.located(span);
+        let (file, line, column, end_column) = self.located(span);
         let args = self.array_method_args(method, array_ty, arguments);
         CheckedExpr::ArrayCall {
             place,
@@ -2950,6 +3043,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -3024,7 +3118,7 @@ impl<'a> Checker<'a> {
             MapMethod::Keys => key_ty.nest(),
             MapMethod::Values | MapMethod::Entries => value_ty.nest(),
         };
-        let (file, line, column) = self.located(span);
+        let (file, line, column, end_column) = self.located(span);
         CheckedExpr::MapCall {
             place,
             object: object.map(Box::new),
@@ -3037,6 +3131,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -3044,7 +3139,7 @@ impl<'a> Checker<'a> {
         let map_ty = object.ty();
         let (key_ty, value_ty) = self.map_parts(map_ty);
         let key = self.check_map_key(&expr.index, key_ty);
-        let (file, line, column) = self.located(expr.span);
+        let (file, line, column, end_column) = self.located(expr.span);
         CheckedExpr::MapGet {
             object: Box::new(object),
             key: Box::new(key),
@@ -3053,6 +3148,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -3067,7 +3163,7 @@ impl<'a> Checker<'a> {
         let key = self.check_map_key(&index.index, key_ty);
         let checked = self.check_expr(value, Some(value_ty), false);
         let checked = self.apply_conversion(checked, value_ty, false, value.span());
-        let (file, line, column) = self.located(index.span);
+        let (file, line, column, end_column) = self.located(index.span);
         CheckedExpr::MapInsert {
             place,
             key: Box::new(key),
@@ -3076,6 +3172,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         }
     }
 
@@ -3232,13 +3329,14 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        let (file, line, column) = self.located(decl.span);
+        let (file, line, column, end_column) = self.located(decl.span);
         Some(CheckedStmt::Destructure {
             bindings,
             value,
             file,
             line,
             column,
+            end_column,
         })
     }
 
@@ -3477,7 +3575,7 @@ impl<'a> Checker<'a> {
             MapMethod::Values => value_ty.nest(),
             _ => value_ty,
         };
-        let (file, line, column) = self.located(span);
+        let (file, line, column, end_column) = self.located(span);
         let source = CheckedExpr::MapCall {
             place: None,
             object: Some(Box::new(object)),
@@ -3490,6 +3588,7 @@ impl<'a> Checker<'a> {
             file,
             line,
             column,
+            end_column,
         };
         match method {
             MapMethod::Keys => (source, LoopSourceKind::Values, key_ty, key_ty),
@@ -3545,11 +3644,12 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn located(&self, span: Span) -> (String, u32, u32) {
+    fn located(&self, span: Span) -> (String, u32, u32, u32) {
         (
             self.source_name.to_string(),
             span.start.line,
             span.start.column,
+            span.end.column.max(span.start.column),
         )
     }
 
@@ -3697,17 +3797,75 @@ impl<'a> Checker<'a> {
     }
 
     fn error(&mut self, span: Span, message: impl Into<String>) {
+        self.error_help(span, message, None);
+    }
+
+    fn error_help(&mut self, span: Span, message: impl Into<String>, help: Option<String>) {
         let message = message.into();
         if self.diagnostics.last().is_some_and(|last| {
             last.span.start.offset == span.start.offset && last.message == message
         }) {
             return;
         }
+        let code = crate::diagnostics::semantic_code(&message);
+        debug_assert_ne!(code, "GRF-SEM-900", "unclassified diagnostic: {message}");
         self.diagnostics.push(SemanticDiagnostic {
             source_name: self.source_name.to_string(),
             span,
             message,
+            code,
+            help,
         });
+    }
+}
+
+fn string_literal_converts(text: &str, target: CanonicalType) -> bool {
+    let site = graphite_core::convert::Site {
+        file: "",
+        line: 0,
+        column: 1,
+        end_column: 1,
+        excerpt: "",
+    };
+    match target {
+        CanonicalType::Int16 => graphite_core::convert::str_to_signed(
+            text,
+            i16::MIN as i128,
+            i16::MAX as i128,
+            "int16",
+            site,
+        )
+        .is_ok(),
+        CanonicalType::Int32 => graphite_core::convert::str_to_signed(
+            text,
+            i32::MIN as i128,
+            i32::MAX as i128,
+            "int32",
+            site,
+        )
+        .is_ok(),
+        CanonicalType::Int64 => graphite_core::convert::str_to_signed(
+            text,
+            i64::MIN as i128,
+            i64::MAX as i128,
+            "int64",
+            site,
+        )
+        .is_ok(),
+        CanonicalType::UInt16 => {
+            graphite_core::convert::str_to_unsigned(text, u16::MAX as u128, "uint16", site).is_ok()
+        }
+        CanonicalType::UInt32 => {
+            graphite_core::convert::str_to_unsigned(text, u32::MAX as u128, "uint32", site).is_ok()
+        }
+        CanonicalType::UInt64 => {
+            graphite_core::convert::str_to_unsigned(text, u64::MAX as u128, "uint64", site).is_ok()
+        }
+        CanonicalType::Flt32 => graphite_core::convert::str_to_f32(text, site).is_ok(),
+        CanonicalType::Flt64 => graphite_core::convert::str_to_f64(text, site).is_ok(),
+        CanonicalType::Bln => graphite_core::convert::str_to_bool(text, site).is_ok(),
+        CanonicalType::Chr => graphite_core::convert::str_to_char(text, site).is_ok(),
+        _ => false,
     }
 }
 

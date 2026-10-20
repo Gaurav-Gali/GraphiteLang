@@ -1393,3 +1393,61 @@ fn reserved_identifiers_cannot_be_declaration_names() {
         }
     }
 }
+
+#[test]
+fn auto_fields_convert_through_the_record_slot() {
+    let program = analyze_source(
+        "\
+import grf.io;
+
+void main() {
+    rectangle r1 = {
+        height: 10,
+        width: \"200\",
+    };
+    r1.width = \"3\";
+    io.println(area(r1));
+    io.println(area({ height: \"4\", width: 5 }));
+}
+
+type rectangle {
+    height: auto int,
+    width: auto int,
+}
+
+flt area(auto rectangle rect) {
+    return flt(rect.height * rect.width);
+}
+",
+    );
+    assert!(program.diagnostics.is_empty(), "{:?}", program.diagnostics);
+
+    let exact = messages(
+        "\
+type rectangle { height: int, width: int, }
+void main() {
+    rectangle r1 = { height: 10, width: \"200\" };
+}
+",
+    );
+    assert!(
+        exact.contains("type mismatch: expected 'int64', found 'str'"),
+        "{exact}"
+    );
+
+    let other = messages(
+        "\
+type rectangle { height: auto int, width: auto int, }
+type square { height: auto int, width: auto int, }
+flt area(auto rectangle rect) { return flt(rect.height * rect.width); }
+void main() {
+    square box = { height: 1, width: 2 };
+    flt value = area(box);
+}
+",
+    );
+    assert!(
+        other.contains("cannot convert 'square' to 'rectangle'"),
+        "{other}"
+    );
+}

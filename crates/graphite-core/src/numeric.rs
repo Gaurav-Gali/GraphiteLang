@@ -6,59 +6,60 @@
 //! as unsigned just to make the operands match.
 
 use crate::convert::{self, Site};
+use crate::diagnostic::{self, RuntimeError};
 
-pub fn fail(site: Site<'_>, message: &str) -> ! {
-    eprintln!(
-        "Runtime numeric error at {}:{}:{}:\n{message}",
-        site.file, site.line, site.column
-    );
-    std::process::exit(1);
-}
-
-pub fn unsigned_to_signed(value: u128, max: i128, to: &str, site: Site<'_>) -> i128 {
+pub fn unsigned_to_signed(
+    value: u128,
+    max: i128,
+    to: &str,
+    site: Site<'_>,
+) -> Result<i128, RuntimeError> {
     if max < 0 || value > max as u128 {
-        fail(site, &format!("value does not fit in '{to}'"));
+        return Err(diagnostic::numeric_failure(
+            site,
+            format!("value does not fit in '{to}'"),
+        ));
     }
-    value as i128
+    Ok(value as i128)
 }
 
-pub fn signed_to_f64(value: i128, to: &str, site: Site<'_>) -> f64 {
-    convert::exact_signed_f64(value).unwrap_or_else(|| {
-        fail(
+pub fn signed_to_f64(value: i128, to: &str, site: Site<'_>) -> Result<f64, RuntimeError> {
+    convert::exact_signed_f64(value).ok_or_else(|| {
+        diagnostic::numeric_failure(
             site,
-            &format!("value is not exactly representable as '{to}'"),
+            format!("value is not exactly representable as '{to}'"),
         )
     })
 }
 
-pub fn unsigned_to_f64(value: u128, to: &str, site: Site<'_>) -> f64 {
-    convert::exact_unsigned_f64(value).unwrap_or_else(|| {
-        fail(
+pub fn unsigned_to_f64(value: u128, to: &str, site: Site<'_>) -> Result<f64, RuntimeError> {
+    convert::exact_unsigned_f64(value).ok_or_else(|| {
+        diagnostic::numeric_failure(
             site,
-            &format!("value is not exactly representable as '{to}'"),
+            format!("value is not exactly representable as '{to}'"),
         )
     })
 }
 
-pub fn signed_to_f32(value: i128, to: &str, site: Site<'_>) -> f32 {
-    let wide = signed_to_f64(value, to, site);
+pub fn signed_to_f32(value: i128, to: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
+    let wide = signed_to_f64(value, to, site)?;
     narrow_f64(wide, to, site)
 }
 
-pub fn unsigned_to_f32(value: u128, to: &str, site: Site<'_>) -> f32 {
-    let wide = unsigned_to_f64(value, to, site);
+pub fn unsigned_to_f32(value: u128, to: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
+    let wide = unsigned_to_f64(value, to, site)?;
     narrow_f64(wide, to, site)
 }
 
-fn narrow_f64(value: f64, to: &str, site: Site<'_>) -> f32 {
+fn narrow_f64(value: f64, to: &str, site: Site<'_>) -> Result<f32, RuntimeError> {
     let narrow = value as f32;
     if narrow as f64 == value {
-        narrow
+        Ok(narrow)
     } else {
-        fail(
+        Err(diagnostic::numeric_failure(
             site,
-            &format!("value is not exactly representable as '{to}'"),
-        );
+            format!("value is not exactly representable as '{to}'"),
+        ))
     }
 }
 

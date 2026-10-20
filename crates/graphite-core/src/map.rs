@@ -7,23 +7,21 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::convert::Site;
+use crate::diagnostic::{self, RuntimeError};
 
-pub fn missing(site: Site<'_>, map_type: &str) -> ! {
-    eprintln!(
-        "Runtime map error at {}:{}:{}:\nmissing key: lookup on '{map_type}'",
-        site.file, site.line, site.column
-    );
-    std::process::exit(1);
-}
-
-pub fn get<K, V>(map: &HashMap<K, V>, key: &K, site: Site<'_>, map_type: &str) -> V
+pub fn get<K, V>(
+    map: &HashMap<K, V>,
+    key: &K,
+    site: Site<'_>,
+    map_type: &str,
+) -> Result<V, RuntimeError>
 where
     K: Eq + Hash,
     V: Clone,
 {
     match map.get(key) {
-        Some(value) => value.clone(),
-        None => missing(site, map_type),
+        Some(value) => Ok(value.clone()),
+        None => Err(diagnostic::missing_key(site, map_type)),
     }
 }
 
@@ -32,13 +30,13 @@ pub fn get_mut<'a, K, V>(
     key: &K,
     site: Site<'_>,
     map_type: &str,
-) -> &'a mut V
+) -> Result<&'a mut V, RuntimeError>
 where
     K: Eq + Hash,
 {
     match map.get_mut(key) {
-        Some(value) => value,
-        None => missing(site, map_type),
+        Some(value) => Ok(value),
+        None => Err(diagnostic::missing_key(site, map_type)),
     }
 }
 
