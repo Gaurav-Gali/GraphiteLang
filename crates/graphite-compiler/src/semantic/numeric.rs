@@ -18,6 +18,8 @@ pub enum CompareMode {
     Integers,
     Floats,
     IntFloat,
+    Null,
+    Optional,
 }
 
 pub fn arithmetic(

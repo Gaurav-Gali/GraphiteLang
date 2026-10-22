@@ -185,6 +185,9 @@ stable.
   `RuntimeInternalError`          `GRF-RUN-013`   Structured unexpected
                                                   runtime failure
 
+  `ConstViolationError`           `GRF-RUN-014`   Mutation of a frozen
+                                                  object (Stage 13)
+
   `RuntimeError`                  any of the      Every catchable Graphite
                                   above           runtime error
 

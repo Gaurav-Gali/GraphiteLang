@@ -4,6 +4,7 @@ use crate::span::Span;
 pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub types: Vec<TypeDecl>,
+    pub classes: Vec<ClassDecl>,
     pub functions: Vec<FunctionDecl>,
     pub span: Span,
 }
@@ -12,6 +13,45 @@ pub struct Program {
 pub struct TypeDecl {
     pub name: Identifier,
     pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassDecl {
+    pub name: Identifier,
+    pub fields: Vec<ClassField>,
+    pub init: Option<ClassInit>,
+    pub methods: Vec<ClassMethod>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassField {
+    pub name: Identifier,
+    pub ty: TypeSyntax,
+    pub conversion: ConversionMode,
+    pub const_field: bool,
+    pub public: bool,
+    pub initializer: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassInit {
+    pub public: bool,
+    pub parameters: Vec<Parameter>,
+    pub body: BlockStmt,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassMethod {
+    pub public: bool,
+    pub is_static: bool,
+    pub return_type: TypeSyntax,
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub body: BlockStmt,
     pub span: Span,
 }
 
@@ -71,6 +111,8 @@ pub struct TypeSyntax {
     pub bounds: Vec<Option<u64>>,
     /// Key and value types when `kind` is `Map`.
     pub arguments: Vec<TypeSyntax>,
+    /// `int?` and `node?`. The `?` applies to the whole type, after array bounds.
+    pub optional: bool,
     pub span: Span,
 }
 
@@ -152,7 +194,8 @@ pub struct VariableDecl {
     pub name: Identifier,
     pub ty: TypeSyntax,
     pub conversion: ConversionMode,
-    pub initializer: Expr,
+    /// Absent when the variable starts at the type's default value.
+    pub initializer: Option<Expr>,
     pub mutable: bool,
     pub span: Span,
 }
@@ -210,6 +253,7 @@ pub enum Expr {
     Binary(BinaryExpr),
     Assignment(AssignmentExpr),
     Call(CallExpr),
+    New(NewExpr),
     Conversion(ConversionExpr),
     Member(MemberExpr),
     Update(UpdateExpr),
@@ -230,6 +274,7 @@ impl Expr {
             Expr::Binary(binary) => binary.span,
             Expr::Assignment(assignment) => assignment.span,
             Expr::Call(call) => call.span,
+            Expr::New(new_expr) => new_expr.span,
             Expr::Conversion(conversion) => conversion.span,
             Expr::Member(member) => member.span,
             Expr::Update(update) => update.span,
@@ -249,6 +294,7 @@ pub enum LiteralExpr {
     Float { lexeme: String, span: Span },
     Boolean { value: bool, span: Span },
     String { value: String, span: Span },
+    Null { span: Span },
 }
 
 impl LiteralExpr {
@@ -257,7 +303,8 @@ impl LiteralExpr {
             LiteralExpr::Integer { span, .. }
             | LiteralExpr::Float { span, .. }
             | LiteralExpr::Boolean { span, .. }
-            | LiteralExpr::String { span, .. } => *span,
+            | LiteralExpr::String { span, .. }
+            | LiteralExpr::Null { span } => *span,
         }
     }
 }
@@ -324,6 +371,8 @@ pub enum BinaryOperator {
     Multiply,
     Divide,
     Remainder,
+    Power,
+    FloorDiv,
     Equal,
     NotEqual,
     Less,
@@ -338,6 +387,15 @@ pub enum BinaryOperator {
 pub struct AssignmentExpr {
     pub target: Box<Expr>,
     pub value: Box<Expr>,
+    /// `None` is plain `=`. `Some` is the operation in a compound assignment.
+    pub op: Option<BinaryOperator>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewExpr {
+    pub name: Identifier,
+    pub arguments: Vec<Expr>,
     pub span: Span,
 }
 

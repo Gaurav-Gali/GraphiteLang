@@ -15,8 +15,9 @@ use crate::parser::{BinaryOperator, UnaryOperator};
 use crate::semantic::convert::ConvOp;
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
-    ArrayMethod, ArrayPlace, CanonicalType, CheckedExpr, CheckedFn, CheckedPart, CheckedProgram,
-    CheckedRecord, CheckedStmt, Leaf, LoopSourceKind, MapEntry, MapMethod, MapShape, RecordId,
+    ArrayMethod, ArrayPlace, CanonicalType, CheckedClass, CheckedExpr, CheckedFn, CheckedPart,
+    CheckedProgram, CheckedRecord, CheckedStmt, ClassId, Leaf, LoopSourceKind, MapEntry, MapMethod,
+    MapShape, RecordId,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -38,13 +39,22 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         tmps: 0,
         loop_ids: 0,
         records: &program.records,
+        classes: &program.classes,
         maps: &program.maps,
         source_name,
         source,
+        constructor_return: false,
     };
     for index in record_order(&program.records) {
         emitter.emit_record(&program.records[index]);
         emitter.out.push('\n');
+    }
+    for class in &program.classes {
+        emitter.emit_class_struct(class);
+        emitter.out.push('\n');
+    }
+    for class in &program.classes {
+        emitter.emit_class_behavior(class);
     }
     let mut others = Vec::new();
     let mut entry = Vec::new();
@@ -87,14 +97,17 @@ struct Emitter<'a> {
     tmps: u32,
     loop_ids: u32,
     records: &'a [CheckedRecord],
+    classes: &'a [CheckedClass],
     maps: &'a [MapShape],
     source_name: &'a str,
     source: &'a str,
+    constructor_return: bool,
 }
 
 impl Emitter<'_> {
     fn emit_function(&mut self, function: &CheckedFn) {
         let name = rust_ident(&function.name);
+        self.constructor_return = false;
         let visibility = if function.name == "main" {
             ""
         } else {
@@ -158,11 +171,25 @@ impl Emitter<'_> {
             } => {
                 let value = self.emit_expr(value);
                 let binding = if *mutable { "let mut" } else { "let" };
-                self.line(&format!(
-                    "{binding} {}: {} = {value};",
-                    rust_ident(name),
-                    self.ty_name(*ty)
-                ));
+                if !*mutable && self.contains_class(*ty) {
+                    let temp = self.fresh_tmp();
+                    self.line(&format!("let {temp} = {value};"));
+                    let freeze = self.freeze_block(*ty, &temp);
+                    if !freeze.is_empty() {
+                        self.line(&freeze);
+                    }
+                    self.line(&format!(
+                        "{binding} {}: {} = {temp};",
+                        rust_ident(name),
+                        self.ty_name(*ty)
+                    ));
+                } else {
+                    self.line(&format!(
+                        "{binding} {}: {} = {value};",
+                        rust_ident(name),
+                        self.ty_name(*ty)
+                    ));
+                }
             }
             CheckedStmt::Return(value) => self.emit_return(value),
             CheckedStmt::Expr(expr) => {
@@ -366,14 +393,21 @@ impl Emitter<'_> {
     }
 
     fn emit_return(&mut self, value: &Option<CheckedExpr>) {
+        let constructor = self.constructor_return && value.is_none();
         if let Some(pending) = self.tries.last().map(|frame| frame.pending.clone()) {
-            if let Some(value) = value {
+            if constructor {
+                self.line(&format!("{pending} = GrfExit::Return(this.clone());"));
+            } else if let Some(value) = value {
                 let value = self.emit_expr(value);
                 self.line(&format!("{pending} = GrfExit::Return({value});"));
             } else {
                 self.line(&format!("{pending} = GrfExit::Return(());"));
             }
             self.line("return Ok(());");
+            return;
+        }
+        if constructor {
+            self.line("return Ok(this.clone());");
             return;
         }
         match value {
@@ -605,6 +639,26 @@ impl Emitter<'_> {
             CheckedExpr::Bool(value) => value.to_string(),
             CheckedExpr::Char(value) => format!("char::from_u32({}).unwrap()", u32::from(*value)),
             CheckedExpr::Str(value) => format!("String::from({})", rust_string(value)),
+            CheckedExpr::Null { ty } => {
+                let inner = ty.optional_inner().unwrap_or(*ty);
+                format!("None::<{}>", self.ty_name(inner))
+            }
+            CheckedExpr::Wrap { expr, .. } => format!("Some({})", self.emit_expr(expr)),
+            CheckedExpr::Unready { .. } => "Default::default()".to_string(),
+            CheckedExpr::Unwrap {
+                expr,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                let value = self.emit_expr(expr);
+                let site = self.locate(file, *line, *column, *end_column);
+                format!(
+                    "match {value} {{ Some(grf_value) => grf_value, None => return Err(graphite_core::diagnostic::null_access({site})) }}"
+                )
+            }
             CheckedExpr::Load { name, ty } => {
                 let name = rust_ident(name);
                 if ty.is_heap() {
@@ -656,6 +710,8 @@ impl Emitter<'_> {
                         BinaryOperator::Subtract => format!("({left} - {right})"),
                         BinaryOperator::Multiply => format!("({left} * {right})"),
                         BinaryOperator::Divide => format!("({left} / {right})"),
+                        BinaryOperator::Power => format!("({left}.powf({right}))"),
+                        BinaryOperator::FloorDiv => format!("(({left} / {right}).floor())"),
                         BinaryOperator::Less => format!("({left} < {right})"),
                         BinaryOperator::LessEqual => format!("({left} <= {right})"),
                         BinaryOperator::Greater => format!("({left} > {right})"),
@@ -672,6 +728,8 @@ impl Emitter<'_> {
                     BinaryOperator::Subtract => format!("grf_sub!({left}, {right}, {site})"),
                     BinaryOperator::Multiply => format!("grf_mul!({left}, {right}, {site})"),
                     BinaryOperator::Divide => format!("grf_div!({left}, {right}, {site})"),
+                    BinaryOperator::Power => format!("grf_pow!({left}, {right}, {site})"),
+                    BinaryOperator::FloorDiv => format!("grf_floordiv!({left}, {right}, {site})"),
                     BinaryOperator::Remainder => format!("grf_rem!({left}, {right}, {site})"),
                     BinaryOperator::Less => format!("({left} < {right})"),
                     BinaryOperator::LessEqual => format!("({left} <= {right})"),
@@ -797,24 +855,28 @@ impl Emitter<'_> {
             }
             CheckedExpr::FieldSet { place, value, ty } => {
                 let value = self.emit_expr(value);
-                let (setup, container) = self.emit_container(place);
+                let (setup, container, commit) = self.emit_container(place);
                 if ty.is_heap() {
                     format!(
-                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored.clone(); grf_stored }}"
+                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored.clone(); {commit} grf_stored }}"
                     )
                 } else {
                     format!(
-                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored; grf_stored }}"
+                        "{{ let grf_stored = {value}; {setup} {container} = grf_stored; {commit} grf_stored }}"
                     )
                 }
             }
-            CheckedExpr::Array { elements, .. } => {
-                let elements = elements
-                    .iter()
-                    .map(|element| self.emit_expr(element))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("vec![{elements}]")
+            CheckedExpr::Array { elements, ty } => {
+                if elements.is_empty() {
+                    format!("{}::new()", vec_turbofish(&self.ty_name(*ty)))
+                } else {
+                    let elements = elements
+                        .iter()
+                        .map(|element| self.emit_expr(element))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("vec![{elements}]")
+                }
             }
             CheckedExpr::IndexGet {
                 object,
@@ -989,9 +1051,97 @@ impl Emitter<'_> {
                     ConvOp::ArrayToStr => self.array_to_str(*from, &inner),
                     ConvOp::MapToStr => self.map_to_str(*from, &inner),
                     ConvOp::TypeToStr => type_to_str(&inner),
+                    ConvOp::OptionalToStr => {
+                        let inner_ty = from.optional_inner().unwrap_or(*from);
+                        let rendered = if inner_ty == CanonicalType::Str {
+                            "grf_inner.clone()".to_string()
+                        } else if inner_ty.is_record() {
+                            self.record_to_str(inner_ty, "grf_inner")
+                        } else if inner_ty.is_array() {
+                            self.array_to_str(inner_ty, "grf_inner")
+                        } else if inner_ty.is_map() {
+                            self.map_to_str(inner_ty, "grf_inner")
+                        } else if inner_ty == CanonicalType::Type {
+                            type_to_str("grf_inner")
+                        } else if inner_ty == CanonicalType::Chr {
+                            emit_conv(
+                                ConvOp::CharToStr,
+                                inner_ty,
+                                CanonicalType::Str,
+                                "grf_inner",
+                                &site,
+                            )
+                        } else {
+                            emit_conv(
+                                ConvOp::ToStr,
+                                inner_ty,
+                                CanonicalType::Str,
+                                "grf_inner",
+                                &site,
+                            )
+                        };
+                        format!(
+                            "{{ let grf_opt = {inner}; match grf_opt {{ None => String::from(\"null\"), Some(grf_inner) => {rendered} }} }}"
+                        )
+                    }
                     other => emit_conv(*other, *from, *to, &inner, &site),
                 }
             }
+            CheckedExpr::ClassNew {
+                class,
+                args,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => self.emit_class_new(*class, args, file, *line, *column, *end_column),
+            CheckedExpr::ClassGet {
+                object,
+                class,
+                field,
+                ..
+            } => self.emit_class_get(object, *class, *field),
+            CheckedExpr::ClassSet {
+                object,
+                class,
+                field,
+                value,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => self.emit_class_set(
+                object,
+                *class,
+                *field,
+                value,
+                file,
+                *line,
+                *column,
+                *end_column,
+            ),
+            CheckedExpr::ClassCall {
+                class,
+                method,
+                object,
+                args,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => self.emit_class_call(
+                *class,
+                *method,
+                object,
+                args,
+                file,
+                *line,
+                *column,
+                *end_column,
+            ),
             CheckedExpr::Interpolated { parts } => {
                 let mut lines = vec![
                     "{".to_string(),
@@ -1022,10 +1172,37 @@ impl Emitter<'_> {
         right: &CheckedExpr,
         mode: CompareMode,
     ) -> String {
+        if mode == CompareMode::Null {
+            let value = if matches!(left, CheckedExpr::Null { .. }) {
+                right
+            } else {
+                left
+            };
+            let value = self.emit_expr(value);
+            let test = format!("{value}.is_none()");
+            return if op == BinaryOperator::NotEqual {
+                format!("(!{test})")
+            } else {
+                test
+            };
+        }
+        if mode == CompareMode::Optional {
+            let left = self.emit_expr(left);
+            let right = self.emit_expr(right);
+            let equal = format!(
+                "{{ let grf_left = {left}; let grf_right = {right}; match (&grf_left, &grf_right) {{ (None, None) => true, (Some(grf_a), Some(grf_b)) => grf_a == grf_b, _ => false }} }}"
+            );
+            return if op == BinaryOperator::NotEqual {
+                format!("(!{equal})")
+            } else {
+                equal
+            };
+        }
         let (left_text, right_text) = match mode {
             CompareMode::Same => (self.emit_expr(left), self.emit_expr(right)),
             CompareMode::Integers => (self.emit_i128(left), self.emit_i128(right)),
             CompareMode::Floats => (self.emit_f64(left), self.emit_f64(right)),
+            CompareMode::Null | CompareMode::Optional => unreachable!("handled above"),
             CompareMode::IntFloat => {
                 let int_on_left = !left.ty().is_float();
                 let (integer, float) = if int_on_left {
@@ -1142,12 +1319,12 @@ impl Emitter<'_> {
         line: u32,
         column: u32,
     ) -> String {
-        let (setup, container) = self.emit_container(place);
+        let (setup, container, commit) = self.emit_container(place);
         let key = self.emit_expr(key);
         let value = self.emit_expr(value);
         let _ = (file, line, column);
         format!(
-            "{{ {setup} let grf_key = {key}; let grf_val = {value}; graphite_core::map::assign(&mut {container}, grf_key, grf_val.clone()) }}"
+            "{{ {setup} let grf_key = {key}; let grf_val = {value}; let grf_result = graphite_core::map::assign(&mut {container}, grf_key, grf_val.clone()); {commit} grf_result }}"
         )
     }
 
@@ -1167,16 +1344,17 @@ impl Emitter<'_> {
     ) -> String {
         let site = self.locate(file, line, column, end_column);
         let map_type = rust_string(type_name);
-        let (setup, container, borrowed) = if let Some(place) = place {
-            let (setup, container) = self.emit_container(place);
-            (setup, container, false)
+        let (setup, container, commit, borrowed) = if let Some(place) = place {
+            let (setup, container, commit) = self.emit_container(place);
+            (setup, container, commit, false)
         } else if let Some(object) = object {
             let map_ref = self.emit_map_ref(object);
-            (String::new(), map_ref, true)
+            (String::new(), map_ref, String::new(), true)
         } else {
             (
                 String::new(),
                 "&std::collections::HashMap::new()".to_string(),
+                String::new(),
                 true,
             )
         };
@@ -1221,13 +1399,13 @@ impl Emitter<'_> {
                 let key = arg(0, self);
                 let value = arg(1, self);
                 format!(
-                    "{{ {setup} let grf_key = {key}; let grf_val = {value}; graphite_core::map::insert({map_mut}, grf_key, grf_val); }}"
+                    "{{ {setup} let grf_key = {key}; let grf_val = {value}; graphite_core::map::insert({map_mut}, grf_key, grf_val); {commit} }}"
                 )
             }
             MapMethod::Remove => {
                 let key = arg(0, self);
                 format!(
-                    "{{ {setup} let grf_key = {key}; graphite_core::map::remove({map_mut}, &grf_key) }}"
+                    "{{ {setup} let grf_key = {key}; let grf_result = graphite_core::map::remove({map_mut}, &grf_key); {commit} grf_result }}"
                 )
             }
             MapMethod::Length => format!("({map_expr}.len() as u64)"),
@@ -1309,7 +1487,7 @@ impl Emitter<'_> {
         let site = self.locate(file, line, column, end_column);
         let index_expr = self.emit_expr(index);
         let unsigned = index.ty().is_unsigned();
-        let (setup, container) = if let Some(place) = place {
+        let (setup, container, commit) = if let Some(place) = place {
             self.emit_container(place)
         } else {
             let object = object
@@ -1319,6 +1497,7 @@ impl Emitter<'_> {
             (
                 format!("let mut grf_recv = {object};"),
                 "grf_recv".to_string(),
+                String::new(),
             )
         };
         let write = if unsigned {
@@ -1330,7 +1509,7 @@ impl Emitter<'_> {
                 "graphite_core::array::write_signed(&mut {container}, i128::from({index_expr}), grf_stored.clone(), {site})?;"
             )
         };
-        format!("{{ let grf_stored = {value_expr}; {setup} {write} grf_stored }}")
+        format!("{{ let grf_stored = {value_expr}; {setup} {write} {commit} grf_stored }}")
     }
 
     fn emit_slice_set(
@@ -1349,7 +1528,7 @@ impl Emitter<'_> {
     ) -> String {
         let value_expr = self.emit_expr(value);
         let site = self.locate(file, line, column, end_column);
-        let (setup, container) = if let Some(place) = place {
+        let (setup, container, commit) = if let Some(place) = place {
             self.emit_container(place)
         } else {
             let object = object
@@ -1359,23 +1538,51 @@ impl Emitter<'_> {
             (
                 format!("let mut grf_recv = {object};"),
                 "grf_recv".to_string(),
+                String::new(),
             )
         };
         let limit = limit_expr(limit);
         format!(
-            "{{ let grf_repl = {value_expr}; {setup} graphite_core::array::assign_slice(&mut {container}, {}, {}, {}, &grf_repl, {limit}, {site})?; grf_repl }}",
+            "{{ let grf_repl = {value_expr}; {setup} graphite_core::array::assign_slice(&mut {container}, {}, {}, {}, &grf_repl, {limit}, {site})?; {commit} grf_repl }}",
             self.emit_bound(start),
             self.emit_bound(stop),
             self.emit_bound(step)
         )
     }
 
-    fn emit_container(&mut self, place: &ArrayPlace) -> (String, String) {
+    fn emit_container(&mut self, place: &ArrayPlace) -> (String, String, String) {
         match place {
-            ArrayPlace::Var(name) => (String::new(), rust_ident(name)),
+            ArrayPlace::Var(name) => (String::new(), rust_ident(name), String::new()),
             ArrayPlace::Field { object, field, .. } => {
-                let (setup, parent) = self.emit_container(object);
-                (setup, format!("{parent}.{}", rust_ident(field)))
+                let (setup, parent, commit) = self.emit_container(object);
+                (setup, format!("{parent}.{}", rust_ident(field)), commit)
+            }
+            ArrayPlace::ClassField {
+                object,
+                class,
+                field,
+                ty,
+                file,
+                line,
+                column,
+                end_column,
+            } => {
+                let struct_name = class_struct(&self.classes[class.0 as usize].name);
+                let field_name = rust_ident(&self.classes[class.0 as usize].fields[*field].name);
+                let object = self.emit_expr(object);
+                let obj = self.fresh_tmp();
+                let slot = self.fresh_tmp();
+                let read = self.read_inside(*ty, &format!("obj.{field_name}"));
+                let unpack = self.unpack_expr(*ty, "grf_raw");
+                let setup = format!(
+                    "let {obj} = {object}; let mut {slot} = {{ let grf_raw = graphite_core::heap::with::<{struct_name}, _>({obj}.handle(), |obj| {read})?; {unpack} }};"
+                );
+                let packed = self.pack_expr(*ty, &slot);
+                let site = self.locate(file, *line, *column, *end_column);
+                let commit = format!(
+                    "let grf_packed = {packed}; graphite_core::heap::with_mut::<{struct_name}, ()>({obj}.handle(), {site}, |obj| {{ obj.{field_name} = grf_packed; }})?;"
+                );
+                (setup, slot, commit)
             }
             ArrayPlace::MapIndex {
                 object,
@@ -1387,7 +1594,7 @@ impl Emitter<'_> {
                 end_column,
                 ..
             } => {
-                let (setup, parent) = self.emit_container(object);
+                let (setup, parent, commit) = self.emit_container(object);
                 let key_expr = self.emit_expr(key);
                 let tmp = self.fresh_tmp();
                 let site = self.locate(file, *line, *column, *end_column);
@@ -1397,6 +1604,7 @@ impl Emitter<'_> {
                     format!(
                         "(*graphite_core::map::get_mut(&mut {parent}, &{tmp}, {site}, {map_type})?)"
                     ),
+                    commit,
                 )
             }
             ArrayPlace::Index {
@@ -1407,7 +1615,7 @@ impl Emitter<'_> {
                 column,
                 end_column,
             } => {
-                let (setup, parent) = self.emit_container(object);
+                let (setup, parent, commit) = self.emit_container(object);
                 let site = self.locate(file, *line, *column, *end_column);
                 let tmp = self.fresh_tmp();
                 let index_expr = self.emit_expr(index);
@@ -1423,6 +1631,7 @@ impl Emitter<'_> {
                 (
                     format!("{setup} let {tmp} = {read};"),
                     format!("{parent}[{tmp}]"),
+                    commit,
                 )
             }
         }
@@ -1442,9 +1651,17 @@ impl Emitter<'_> {
     ) -> String {
         let site = self.locate(file, line, column, end_column);
         let limit = limit_expr(limit);
-        let (setup, container, mutable) = if let Some(place) = place {
-            let (setup, container) = self.emit_container(place);
-            (setup, container, true)
+        let (setup, container, commit, mutable) = if let Some(place) = place {
+            let (setup, container, commit) = self.emit_container(place);
+            let commit = if matches!(
+                method,
+                ArrayMethod::Push | ArrayMethod::Set | ArrayMethod::Insert | ArrayMethod::Remove
+            ) {
+                commit
+            } else {
+                String::new()
+            };
+            (setup, container, commit, true)
         } else {
             let object = object
                 .as_ref()
@@ -1453,6 +1670,7 @@ impl Emitter<'_> {
             (
                 format!("let grf_recv = {object};"),
                 "grf_recv".to_string(),
+                String::new(),
                 false,
             )
         };
@@ -1564,7 +1782,11 @@ impl Emitter<'_> {
                 }
             }
         }
-        format!("{{ {setup} {call} }}")
+        if commit.is_empty() {
+            format!("{{ {setup} {call} }}")
+        } else {
+            format!("{{ {setup} let grf_result = {{ {call} }}; {commit} grf_result }}")
+        }
     }
 
     fn line(&mut self, text: &str) {
@@ -1576,7 +1798,7 @@ impl Emitter<'_> {
     }
 
     fn emit_record(&mut self, record: &CheckedRecord) {
-        self.line("#[derive(Clone)]");
+        self.line("#[derive(Clone, Default)]");
         self.line(&format!("struct {} {{", record_struct(&record.name)));
         self.indent += 1;
         for (name, ty) in &record.fields {
@@ -1584,6 +1806,730 @@ impl Emitter<'_> {
         }
         self.indent -= 1;
         self.line("}");
+        let struct_name = record_struct(&record.name);
+        self.line(&format!("impl {struct_name} {{"));
+        self.indent += 1;
+        self.line("fn grf_trace(&self, visit: &mut dyn FnMut(graphite_core::heap::Handle)) {");
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            self.emit_trace_stack(*ty, &format!("self.{}", rust_ident(name)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("fn grf_disarm(&mut self) {");
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            self.emit_disarm(*ty, &format!("self.{}", rust_ident(name)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("fn grf_copy_raw(&self) -> {struct_name} {{"));
+        self.indent += 1;
+        self.line(&format!("{struct_name} {{"));
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            let copied = self.copy_field_expr(*ty, &format!("self.{}", rust_ident(name)));
+            self.line(&format!("{}: {copied},", rust_ident(name)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("fn grf_promote(&self) -> {struct_name} {{"));
+        self.indent += 1;
+        self.line(&format!("{struct_name} {{"));
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            let promoted = self.promote_field_expr(*ty, &format!("self.{}", rust_ident(name)));
+            self.line(&format!("{}: {promoted},", rust_ident(name)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line("fn grf_freeze(&self) {");
+        self.indent += 1;
+        for (name, ty) in &record.fields {
+            let freeze = self.freeze_block(*ty, &format!("self.{}", rust_ident(name)));
+            if !freeze.is_empty() {
+                self.line(&freeze);
+            }
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_class_struct(&mut self, class: &CheckedClass) {
+        let struct_name = class_struct(&class.name);
+        self.line(&format!("struct {struct_name} {{"));
+        self.indent += 1;
+        for field in &class.fields {
+            self.line(&format!(
+                "{}: {},",
+                rust_ident(&field.name),
+                self.heap_ty(field.ty)
+            ));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "impl graphite_core::heap::GcObject for {struct_name} {{"
+        ));
+        self.indent += 1;
+        self.line("fn trace(&self, visit: &mut dyn FnMut(graphite_core::heap::Handle)) {");
+        self.indent += 1;
+        for field in &class.fields {
+            self.emit_trace_heap(field.ty, &format!("self.{}", rust_ident(&field.name)));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line("fn as_any(&self) -> &dyn std::any::Any { self }");
+        self.line("fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_class_behavior(&mut self, class: &CheckedClass) {
+        let struct_name = class_struct(&class.name);
+        let params = class.init.as_ref().map(|init| &init.params);
+        let param_list = params
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|(name, ty)| format!("mut {}: {}", rust_ident(name), self.ty_name(*ty)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        self.constructor_return = false;
+        self.fn_ret = "graphite_core::heap::Rooted".to_string();
+        self.tries.clear();
+        self.line(&format!(
+            "fn {}({param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
+            class_new_fn(&class.name)
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "let this = graphite_core::heap::alloc({struct_name} {{"
+        ));
+        self.indent += 1;
+        for field in &class.fields {
+            self.line(&format!(
+                "{}: {},",
+                rust_ident(&field.name),
+                self.heap_default(field.ty)
+            ));
+        }
+        self.indent -= 1;
+        self.line("})?;");
+        for field in &class.fields {
+            if let Some(initializer) = &field.initializer {
+                let value = self.emit_expr(initializer);
+                self.emit_field_store(class, field, &value, &self.empty_site(), field.const_field);
+            }
+        }
+        if let Some(init) = &class.init {
+            self.constructor_return = true;
+            for statement in &init.body {
+                self.emit_stmt(statement);
+            }
+            self.constructor_return = false;
+        }
+        self.line("Ok(this)");
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+
+        for method in &class.methods {
+            self.emit_class_method(class, method);
+        }
+    }
+
+    fn emit_class_method(&mut self, class: &CheckedClass, method: &crate::semantic::CheckedMethod) {
+        self.constructor_return = false;
+        let params = method
+            .params
+            .iter()
+            .map(|(name, ty)| format!("mut {}: {}", rust_ident(name), self.ty_name(*ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let this_param = "this: graphite_core::heap::Rooted";
+        let all_params = match (method.is_static, params.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => params,
+            (false, true) => this_param.to_string(),
+            (false, false) => format!("{this_param}, {params}"),
+        };
+        let ret = if method.ret == CanonicalType::Void {
+            "()".to_string()
+        } else {
+            self.ty_name(method.ret)
+        };
+        self.fn_ret = ret.clone();
+        self.tries.clear();
+        self.line(&format!(
+            "fn {}({all_params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{",
+            class_method_fn(&class.name, &method.name)
+        ));
+        self.indent += 1;
+        for statement in &method.body {
+            self.emit_stmt(statement);
+        }
+        if method.ret == CanonicalType::Void {
+            self.line("Ok(())");
+        } else {
+            self.line("unreachable!();");
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+    }
+
+    fn emit_field_store(
+        &mut self,
+        class: &CheckedClass,
+        field: &crate::semantic::CheckedClassField,
+        value: &str,
+        site: &str,
+        freeze: bool,
+    ) {
+        let struct_name = class_struct(&class.name);
+        let field_name = rust_ident(&field.name);
+        let packed = self.pack_expr(field.ty, "grf_stored");
+        self.line(&format!("let grf_stored = {value};"));
+        self.line(&format!("let grf_packed = {packed};"));
+        self.line(&format!(
+            "graphite_core::heap::with_mut::<{struct_name}, ()>(this.handle(), {site}, |obj| {{ obj.{field_name} = grf_packed; }})?;"
+        ));
+        if freeze && self.contains_class(field.ty) {
+            let text = self.freeze_block(field.ty, "grf_stored");
+            if !text.is_empty() {
+                self.line(&text);
+            }
+        }
+    }
+
+    fn emit_class_new(
+        &mut self,
+        class: ClassId,
+        args: &[CheckedExpr],
+        file: &str,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    ) -> String {
+        let name = self.classes[class.0 as usize].name.clone();
+        let args = args
+            .iter()
+            .map(|arg| self.emit_expr(arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let site = self.locate(file, line, column, end_column);
+        let path = format!("crate::{}", class_new_fn(&name));
+        format!(
+            "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{name}\", {site})) }}"
+        )
+    }
+
+    fn emit_class_get(&mut self, object: &CheckedExpr, class: ClassId, field: usize) -> String {
+        let info = &self.classes[class.0 as usize];
+        let struct_name = class_struct(&info.name);
+        let field_name = rust_ident(&info.fields[field].name);
+        let field_ty = info.fields[field].ty;
+        let object = self.emit_expr(object);
+        let read = self.read_inside(field_ty, &format!("obj.{field_name}"));
+        let unpack = self.unpack_expr(field_ty, "grf_raw");
+        format!(
+            "{{ let grf_obj = {object}; let grf_raw = graphite_core::heap::with::<{struct_name}, _>(grf_obj.handle(), |obj| {read})?; {unpack} }}"
+        )
+    }
+
+    fn emit_class_set(
+        &mut self,
+        object: &CheckedExpr,
+        class: ClassId,
+        field: usize,
+        value: &CheckedExpr,
+        file: &str,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    ) -> String {
+        let info = &self.classes[class.0 as usize];
+        let struct_name = class_struct(&info.name);
+        let field_name = rust_ident(&info.fields[field].name);
+        let field_ty = info.fields[field].ty;
+        let const_field = info.fields[field].const_field;
+        let object = self.emit_expr(object);
+        let value = self.emit_expr(value);
+        let packed = self.pack_expr(field_ty, "grf_stored");
+        let site = self.locate(file, line, column, end_column);
+        let freeze = if const_field && self.contains_class(field_ty) {
+            self.freeze_block(field_ty, "grf_stored")
+        } else {
+            String::new()
+        };
+        format!(
+            "{{ let grf_obj = {object}; let grf_stored = {value}; let grf_packed = {packed}; graphite_core::heap::with_mut::<{struct_name}, ()>(grf_obj.handle(), {site}, |obj| {{ obj.{field_name} = grf_packed; }})?; {freeze} grf_stored }}"
+        )
+    }
+
+    fn emit_class_call(
+        &mut self,
+        class: ClassId,
+        method: usize,
+        object: &Option<Box<CheckedExpr>>,
+        args: &[CheckedExpr],
+        file: &str,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    ) -> String {
+        let info = &self.classes[class.0 as usize];
+        let is_static = info.methods[method].is_static;
+        let method_name = info.methods[method].name.clone();
+        let path = format!("crate::{}", class_method_fn(&info.name, &method_name));
+        let args = args
+            .iter()
+            .map(|arg| self.emit_expr(arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let site = self.locate(file, line, column, end_column);
+        if is_static {
+            let invoke = format!(
+                "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
+            );
+            if let Some(object) = object {
+                let object = self.emit_expr(object);
+                format!("{{ let _grf_recv = {object}; {invoke} }}")
+            } else {
+                invoke
+            }
+        } else {
+            let object = object
+                .as_ref()
+                .map(|object| self.emit_expr(object))
+                .unwrap_or_else(|| "graphite_core::heap::alloc(())".to_string());
+            let call_args = if args.is_empty() {
+                object
+            } else {
+                format!("{object}, {args}")
+            };
+            format!(
+                "match {path}({call_args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
+            )
+        }
+    }
+
+    fn empty_site(&self) -> String {
+        site_expr("", 0, 1, 1, "")
+    }
+
+    fn contains_class(&self, ty: CanonicalType) -> bool {
+        self.contains_class_seen(ty, &mut Vec::new())
+    }
+
+    fn contains_class_seen(&self, ty: CanonicalType, seen: &mut Vec<u32>) -> bool {
+        match ty {
+            CanonicalType::Class(_) => true,
+            CanonicalType::Optional(kind) => self.contains_class_seen(kind.canonical(), seen),
+            CanonicalType::Record(id) => {
+                if !seen.contains(&id.0) {
+                    seen.push(id.0);
+                    let fields = self
+                        .records
+                        .get(id.0 as usize)
+                        .map(|record| record.fields.clone())
+                        .unwrap_or_default();
+                    if fields
+                        .iter()
+                        .any(|(_, field)| self.contains_class_seen(*field, seen))
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            CanonicalType::Array { .. } => ty
+                .element()
+                .is_some_and(|element| self.contains_class_seen(element, seen)),
+            CanonicalType::Map(id) => self
+                .maps
+                .get(id.0 as usize)
+                .is_some_and(|shape| self.contains_class_seen(shape.value, seen)),
+            _ => false,
+        }
+    }
+
+    fn heap_ty(&self, ty: CanonicalType) -> String {
+        match ty {
+            CanonicalType::Optional(kind) => {
+                format!("Option<{}>", self.heap_ty(kind.canonical()))
+            }
+            CanonicalType::Class(_) => "graphite_core::heap::Handle".to_string(),
+            CanonicalType::Array { .. } => {
+                format!(
+                    "Vec<{}>",
+                    self.heap_ty(ty.element().expect("array element"))
+                )
+            }
+            CanonicalType::Map(id) => {
+                let shape = &self.maps[id.0 as usize];
+                format!(
+                    "std::collections::HashMap<{}, {}>",
+                    self.ty_name(shape.key),
+                    self.heap_ty(shape.value)
+                )
+            }
+            other => self.ty_name(other),
+        }
+    }
+
+    fn heap_default(&self, ty: CanonicalType) -> String {
+        match ty {
+            CanonicalType::Optional(_) => "None".to_string(),
+            CanonicalType::Class(_) => "graphite_core::heap::Handle::invalid()".to_string(),
+            CanonicalType::Array { .. } => "Vec::new()".to_string(),
+            CanonicalType::Map(_) => "std::collections::HashMap::new()".to_string(),
+            CanonicalType::Record(_) => format!("{}::default()", self.ty_name(ty)),
+            CanonicalType::Str => "String::new()".to_string(),
+            _ => "Default::default()".to_string(),
+        }
+    }
+
+    fn heap_contains_rooted(&self, ty: CanonicalType) -> bool {
+        match ty {
+            CanonicalType::Record(_) => self.contains_class(ty),
+            CanonicalType::Array { .. } => ty
+                .element()
+                .is_some_and(|element| self.heap_contains_rooted(element)),
+            CanonicalType::Map(id) => self
+                .maps
+                .get(id.0 as usize)
+                .is_some_and(|shape| self.heap_contains_rooted(shape.value)),
+            _ => false,
+        }
+    }
+
+    fn read_inside(&self, ty: CanonicalType, access: &str) -> String {
+        if self.heap_contains_rooted(ty) {
+            self.heap_copy_raw(ty, access)
+        } else {
+            format!("{access}.clone()")
+        }
+    }
+
+    fn heap_copy_raw(&self, ty: CanonicalType, access: &str) -> String {
+        match ty {
+            CanonicalType::Record(_) => format!("{access}.grf_copy_raw()"),
+            CanonicalType::Array { .. } => {
+                let inner = self.heap_copy_raw(ty.element().expect("array element"), "grf_item");
+                format!("{access}.iter().map(|grf_item| {inner}).collect::<Vec<_>>()")
+            }
+            CanonicalType::Map(id) => {
+                let inner = self.heap_copy_raw(self.maps[id.0 as usize].value, "grf_val");
+                format!(
+                    "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.iter() {{ grf_out.insert(grf_key.clone(), {inner}); }} grf_out }}"
+                )
+            }
+            _ => format!("{access}.clone()"),
+        }
+    }
+
+    fn pack_expr(&self, ty: CanonicalType, access: &str) -> String {
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let inner = kind.canonical();
+                let packed = self.pack_expr(inner, "grf_item");
+                format!("{access}.as_ref().map(|grf_item| {packed})")
+            }
+            CanonicalType::Class(_) => format!("{access}.handle()"),
+            CanonicalType::Record(_) if self.contains_class(ty) => {
+                format!("{access}.grf_copy_raw()")
+            }
+            CanonicalType::Array { .. } => {
+                let element = ty.element().expect("array element");
+                if !self.contains_class(element) {
+                    format!("{access}.clone()")
+                } else {
+                    let inner = self.pack_expr(element, "grf_item");
+                    format!("{access}.iter().map(|grf_item| {inner}).collect::<Vec<_>>()")
+                }
+            }
+            CanonicalType::Map(id) => {
+                let value = self.maps[id.0 as usize].value;
+                if !self.contains_class(value) {
+                    format!("{access}.clone()")
+                } else {
+                    let inner = self.pack_expr(value, "grf_val");
+                    format!(
+                        "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.iter() {{ grf_out.insert(grf_key.clone(), {inner}); }} grf_out }}"
+                    )
+                }
+            }
+            _ => format!("{access}.clone()"),
+        }
+    }
+
+    fn unpack_expr(&self, ty: CanonicalType, access: &str) -> String {
+        if !self.contains_class(ty) {
+            return access.to_string();
+        }
+        format!("({})?", self.unpack_result(ty, access))
+    }
+
+    fn unpack_result(&self, ty: CanonicalType, access: &str) -> String {
+        match ty {
+            CanonicalType::Class(_) => format!("graphite_core::heap::root({access})"),
+            CanonicalType::Record(_) if self.contains_class(ty) => {
+                format!("Ok({access}.grf_promote())")
+            }
+            CanonicalType::Array { .. } => {
+                let element = ty.element().expect("array element");
+                if !self.contains_class(element) {
+                    format!("Ok({access})")
+                } else {
+                    let inner = self.unpack_result(element, "grf_item");
+                    format!(
+                        "{access}.into_iter().map(|grf_item| {inner}).collect::<Result<Vec<_>, graphite_core::diagnostic::RuntimeError>>()"
+                    )
+                }
+            }
+            CanonicalType::Map(id) => {
+                let value = self.maps[id.0 as usize].value;
+                if !self.contains_class(value) {
+                    format!("Ok({access})")
+                } else {
+                    let inner = self.unpack_result(value, "grf_val");
+                    format!(
+                        "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.into_iter() {{ grf_out.insert(grf_key, ({inner})?); }} Ok(grf_out) }}"
+                    )
+                }
+            }
+            CanonicalType::Optional(kind) => {
+                let inner = kind.canonical();
+                if inner.is_class() {
+                    format!(
+                        "Ok(match {access} {{ None => None, Some(grf_item) => Some(graphite_core::heap::root(grf_item)?) }})"
+                    )
+                } else if self.contains_class(inner) {
+                    let unpacked = self.unpack_result(inner, "grf_item");
+                    format!(
+                        "Ok(match {access} {{ None => None, Some(grf_item) => Some(({unpacked})?) }})"
+                    )
+                } else {
+                    format!("Ok({access})")
+                }
+            }
+            _ => format!("Ok({access})"),
+        }
+    }
+
+    fn freeze_block(&self, ty: CanonicalType, access: &str) -> String {
+        if !self.contains_class(ty) {
+            return String::new();
+        }
+        match ty {
+            CanonicalType::Class(_) => {
+                format!("graphite_core::heap::freeze({access}.handle());")
+            }
+            CanonicalType::Record(_) => format!("{access}.grf_freeze();"),
+            CanonicalType::Array { .. } => {
+                let inner = self.freeze_block(ty.element().expect("array element"), "grf_item");
+                format!("for grf_item in {access}.iter() {{ {inner} }}")
+            }
+            CanonicalType::Map(id) => {
+                let inner = self.freeze_block(self.maps[id.0 as usize].value, "grf_item");
+                format!("for grf_item in {access}.values() {{ {inner} }}")
+            }
+            CanonicalType::Optional(kind) => {
+                let inner = self.freeze_block(kind.canonical(), "grf_item");
+                format!("if let Some(grf_item) = {access}.as_ref() {{ {inner} }}")
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn emit_trace_heap(&mut self, ty: CanonicalType, access: &str) {
+        if !self.contains_class(ty) {
+            return;
+        }
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let inner = kind.canonical();
+                self.line(&format!("if let Some(grf_edge) = {access}.as_ref() {{"));
+                self.indent += 1;
+                if inner.is_class() {
+                    self.line("visit(*grf_edge);");
+                } else {
+                    self.emit_trace_heap(inner, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Class(_) => self.line(&format!("visit({access});")),
+            CanonicalType::Record(_) => self.line(&format!("{access}.grf_trace(visit);")),
+            CanonicalType::Array { .. } => {
+                let element = ty.element().expect("array element");
+                self.line(&format!("for grf_edge in {access}.iter() {{"));
+                self.indent += 1;
+                if element.is_class() {
+                    self.line("visit(*grf_edge);");
+                } else {
+                    self.emit_trace_heap(element, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Map(id) => {
+                let value = self.maps[id.0 as usize].value;
+                self.line(&format!("for grf_edge in {access}.values() {{"));
+                self.indent += 1;
+                if value.is_class() {
+                    self.line("visit(*grf_edge);");
+                } else {
+                    self.emit_trace_heap(value, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_trace_stack(&mut self, ty: CanonicalType, access: &str) {
+        if !self.contains_class(ty) {
+            return;
+        }
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let inner = kind.canonical();
+                self.line(&format!("if let Some(grf_edge) = {access}.as_ref() {{"));
+                self.indent += 1;
+                if inner.is_class() {
+                    self.line("visit(grf_edge.handle());");
+                } else {
+                    self.emit_trace_stack(inner, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Class(_) => self.line(&format!("visit({access}.handle());")),
+            CanonicalType::Record(_) => self.line(&format!("{access}.grf_trace(visit);")),
+            CanonicalType::Array { .. } => {
+                let element = ty.element().expect("array element");
+                self.line(&format!("for grf_edge in {access}.iter() {{"));
+                self.indent += 1;
+                if element.is_class() {
+                    self.line("visit(grf_edge.handle());");
+                } else {
+                    self.emit_trace_stack(element, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Map(id) => {
+                let value = self.maps[id.0 as usize].value;
+                self.line(&format!("for grf_edge in {access}.values() {{"));
+                self.indent += 1;
+                if value.is_class() {
+                    self.line("visit(grf_edge.handle());");
+                } else {
+                    self.emit_trace_stack(value, "grf_edge");
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_disarm(&mut self, ty: CanonicalType, access: &str) {
+        if !self.contains_class(ty) {
+            return;
+        }
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let inner = kind.canonical();
+                self.line(&format!("if let Some(grf_edge) = {access}.as_mut() {{"));
+                self.indent += 1;
+                self.emit_disarm(inner, "grf_edge");
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Class(_) => self.line(&format!("{access}.disarm();")),
+            CanonicalType::Record(_) => self.line(&format!("{access}.grf_disarm();")),
+            CanonicalType::Array { .. } => {
+                let element = ty.element().expect("array element");
+                self.line(&format!("for grf_edge in {access}.iter_mut() {{"));
+                self.indent += 1;
+                self.emit_disarm(element, "grf_edge");
+                self.indent -= 1;
+                self.line("}");
+            }
+            CanonicalType::Map(id) => {
+                let value = self.maps[id.0 as usize].value;
+                self.line(&format!("for grf_edge in {access}.values_mut() {{"));
+                self.indent += 1;
+                self.emit_disarm(value, "grf_edge");
+                self.indent -= 1;
+                self.line("}");
+            }
+            _ => {}
+        }
+    }
+
+    fn copy_field_expr(&self, ty: CanonicalType, access: &str) -> String {
+        if !self.contains_class(ty) {
+            return format!("{access}.clone()");
+        }
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let copied = self.copy_field_expr(kind.canonical(), "grf_item");
+                format!("{access}.as_ref().map(|grf_item| {copied})")
+            }
+            CanonicalType::Class(_) => format!("{access}.duplicate_unrooted()"),
+            CanonicalType::Record(_) => format!("{access}.grf_copy_raw()"),
+            CanonicalType::Array { .. } => {
+                let inner = self.copy_field_expr(ty.element().expect("array element"), "grf_item");
+                format!("{access}.iter().map(|grf_item| {inner}).collect::<Vec<_>>()")
+            }
+            CanonicalType::Map(id) => {
+                let inner = self.copy_field_expr(self.maps[id.0 as usize].value, "grf_val");
+                format!(
+                    "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.iter() {{ grf_out.insert(grf_key.clone(), {inner}); }} grf_out }}"
+                )
+            }
+            _ => format!("{access}.clone()"),
+        }
+    }
+
+    fn promote_field_expr(&self, ty: CanonicalType, access: &str) -> String {
+        if !self.contains_class(ty) {
+            return format!("{access}.clone()");
+        }
+        match ty {
+            CanonicalType::Optional(kind) => {
+                let promoted = self.promote_field_expr(kind.canonical(), "grf_item");
+                format!("{access}.as_ref().map(|grf_item| {promoted})")
+            }
+            CanonicalType::Class(_) => format!("{access}.promote()"),
+            CanonicalType::Record(_) => format!("{access}.grf_promote()"),
+            CanonicalType::Array { .. } => {
+                let inner =
+                    self.promote_field_expr(ty.element().expect("array element"), "grf_item");
+                format!("{access}.iter().map(|grf_item| {inner}).collect::<Vec<_>>()")
+            }
+            CanonicalType::Map(id) => {
+                let inner = self.promote_field_expr(self.maps[id.0 as usize].value, "grf_val");
+                format!(
+                    "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.iter() {{ grf_out.insert(grf_key.clone(), {inner}); }} grf_out }}"
+                )
+            }
+            _ => format!("{access}.clone()"),
+        }
     }
 
     fn emit_record_literal(&mut self, id: RecordId, fields: &[(usize, CheckedExpr)]) -> String {
@@ -1753,6 +2699,7 @@ impl Emitter<'_> {
                 }
                 name
             }
+            CanonicalType::Optional(kind) => format!("Option<{}>", self.ty_name(kind.canonical())),
             other => other.rust_name(),
         }
     }
@@ -1770,8 +2717,28 @@ impl Emitter<'_> {
     }
 }
 
+fn vec_turbofish(ty_name: &str) -> String {
+    ty_name
+        .strip_prefix("Vec<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map(|inner| format!("Vec::<{inner}>"))
+        .unwrap_or_else(|| ty_name.to_string())
+}
+
 fn record_struct(name: &str) -> String {
     format!("Grf{name}")
+}
+
+fn class_struct(name: &str) -> String {
+    format!("GrfClass{name}")
+}
+
+fn class_new_fn(name: &str) -> String {
+    format!("grf_new_{name}")
+}
+
+fn class_method_fn(class: &str, method: &str) -> String {
+    format!("grf_method_{class}_{method}")
 }
 
 fn record_order(records: &[CheckedRecord]) -> Vec<usize> {
@@ -1880,9 +2847,11 @@ fn emit_conv(
             _ => "String::new()".to_string(),
         },
         ConvOp::CharToStr => format!("graphite_core::convert::char_to_str({inner})"),
-        ConvOp::ArrayToStr | ConvOp::RecordToStr | ConvOp::MapToStr | ConvOp::TypeToStr => {
-            String::new()
-        }
+        ConvOp::ArrayToStr
+        | ConvOp::RecordToStr
+        | ConvOp::MapToStr
+        | ConvOp::TypeToStr
+        | ConvOp::OptionalToStr => String::new(),
         ConvOp::StrToSigned => format!(
             "(graphite_core::convert::str_to_signed(&({inner}), {signed_min}, {signed_max}, {to_name}, {site})? as {rust})"
         ),
@@ -2231,12 +3200,38 @@ macro_rules! grf_neg {
         }
     };
 }
+macro_rules! grf_pow {
+    ($a:expr, $b:expr, $site:expr) => {{
+        let grf_exp = match u32::try_from($b) {
+            Ok(exp) => exp,
+            Err(_) => return Err(graphite_core::diagnostic::integer_overflow($site)),
+        };
+        match $a.checked_pow(grf_exp) {
+            Some(value) => value,
+            None => return Err(graphite_core::diagnostic::integer_overflow($site)),
+        }
+    }};
+}
+macro_rules! grf_floordiv {
+    ($a:expr, $b:expr, $site:expr) => {
+        match $a.checked_div_euclid($b) {
+            Some(value) => value,
+            None => {
+                if $b == 0 {
+                    return Err(graphite_core::diagnostic::division_by_zero($site));
+                } else {
+                    return Err(graphite_core::diagnostic::integer_overflow($site));
+                }
+            }
+        }
+    };
+}
 
 pub(crate) fn grf_str_length(value: &str) -> u64 {
     value.chars().count() as u64
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct GrfType {
     pub(crate) name: &'static str,
     pub(crate) record: bool,

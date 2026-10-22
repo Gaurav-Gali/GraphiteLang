@@ -148,7 +148,7 @@ fn auto_is_a_keyword_and_not_an_identifier_prefix() {
 }
 
 #[test]
-fn v0_1_keywords_and_unreserved_class_words() {
+fn v0_1_keywords_and_class_keywords() {
     let keywords = "\
 auto const void int uint flt int16 int32 int64 uint16 uint32 uint64 \
 flt32 flt64 bln chr str if else loop break continue return type map import true false";
@@ -157,12 +157,26 @@ flt32 flt64 bln chr str if else loop break continue return type map import true 
     assert_eq!(result.last(), Some(&TokenKind::Eof));
     assert_eq!(result.len(), 29);
 
-    let ordinary = "class private this public new constructor library";
+    let ordinary = "constructor library extends implements";
     assert!(
         kinds(ordinary)
             .iter()
             .filter(|kind| **kind != TokenKind::Eof)
             .all(|kind| *kind == TokenKind::Identifier)
+    );
+    assert_eq!(
+        kinds("class public private this init new static null"),
+        vec![
+            TokenKind::KwClass,
+            TokenKind::KwPublic,
+            TokenKind::KwPrivate,
+            TokenKind::KwThis,
+            TokenKind::KwInit,
+            TokenKind::KwNew,
+            TokenKind::KwStatic,
+            TokenKind::KwNull,
+            TokenKind::Eof,
+        ]
     );
 }
 
@@ -182,6 +196,21 @@ fn operators_use_longest_match() {
             TokenKind::Eof,
         ]
     );
+    assert_eq!(
+        kinds("+= -= *= /= %= ** **= //="),
+        vec![
+            TokenKind::PlusEqual,
+            TokenKind::MinusEqual,
+            TokenKind::StarEqual,
+            TokenKind::SlashEqual,
+            TokenKind::PercentEqual,
+            TokenKind::StarStar,
+            TokenKind::StarStarEqual,
+            TokenKind::SlashSlashEqual,
+            TokenKind::Eof,
+        ]
+    );
+    assert_eq!(kinds("// comment"), vec![TokenKind::Eof]);
     assert_eq!(
         kinds("+ - * / % = ! < >"),
         vec![
@@ -220,13 +249,12 @@ fn operators_use_longest_match() {
 }
 
 #[test]
-fn deferred_operators_are_not_single_tokens() {
+fn compound_assignments_are_single_tokens() {
     assert_eq!(
         kinds("index += 1"),
         vec![
             TokenKind::Identifier,
-            TokenKind::Plus,
-            TokenKind::Equal,
+            TokenKind::PlusEqual,
             TokenKind::IntegerLiteral,
             TokenKind::Eof,
         ]
@@ -235,8 +263,7 @@ fn deferred_operators_are_not_single_tokens() {
         kinds("a -= 1"),
         vec![
             TokenKind::Identifier,
-            TokenKind::Minus,
-            TokenKind::Equal,
+            TokenKind::MinusEqual,
             TokenKind::IntegerLiteral,
             TokenKind::Eof,
         ]
@@ -245,8 +272,7 @@ fn deferred_operators_are_not_single_tokens() {
         kinds("a *= 1"),
         vec![
             TokenKind::Identifier,
-            TokenKind::Star,
-            TokenKind::Equal,
+            TokenKind::StarEqual,
             TokenKind::IntegerLiteral,
             TokenKind::Eof,
         ]
@@ -255,8 +281,7 @@ fn deferred_operators_are_not_single_tokens() {
         kinds("a /= 1"),
         vec![
             TokenKind::Identifier,
-            TokenKind::Slash,
-            TokenKind::Equal,
+            TokenKind::SlashEqual,
             TokenKind::IntegerLiteral,
             TokenKind::Eof,
         ]
@@ -265,8 +290,7 @@ fn deferred_operators_are_not_single_tokens() {
         kinds("a %= 1"),
         vec![
             TokenKind::Identifier,
-            TokenKind::Percent,
-            TokenKind::Equal,
+            TokenKind::PercentEqual,
             TokenKind::IntegerLiteral,
             TokenKind::Eof,
         ]
@@ -285,7 +309,17 @@ fn deferred_operators_are_not_single_tokens() {
 
 #[test]
 fn colon_question_and_lone_ampersand_are_unexpected() {
-    for source in ["?", "&", "|"] {
+    let question = lex("op.grf", "?");
+    assert!(question.diagnostics.is_empty());
+    assert_eq!(
+        question
+            .tokens
+            .iter()
+            .map(|token| token.kind)
+            .collect::<Vec<_>>(),
+        vec![TokenKind::Question, TokenKind::Eof]
+    );
+    for source in ["&", "|"] {
         let result = lex("op.grf", source);
         assert_eq!(result.tokens.len(), 1);
         assert_eq!(result.tokens[0].kind, TokenKind::Eof);

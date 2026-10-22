@@ -40,6 +40,7 @@ use crate::manifest::{Manifest, ManifestType};
 use crate::parser::*;
 use crate::span::Span;
 
+pub(crate) mod classes;
 pub(crate) mod convert;
 pub(crate) mod numeric;
 
@@ -51,6 +52,9 @@ pub struct RecordId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MapId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClassId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalType {
@@ -69,6 +73,7 @@ pub enum CanonicalType {
     Type,
     ErrorHandle,
     Record(RecordId),
+    Class(ClassId),
     Map(MapId),
     Array {
         leaf: Leaf,
@@ -76,6 +81,64 @@ pub enum CanonicalType {
         /// `limits[i]` is dimension `i`, innermost first. `None` is dynamic.
         limits: [Option<u64>; MAX_ARRAY_RANK],
     },
+    /// `T?`. The inner type is never itself optional.
+    Optional(OptionalKind),
+}
+
+/// The type inside `T?`. One level of nullability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalKind {
+    Int16,
+    Int32,
+    Int64,
+    UInt16,
+    UInt32,
+    UInt64,
+    Flt32,
+    Flt64,
+    Bln,
+    Chr,
+    Str,
+    Type,
+    Record(RecordId),
+    Class(ClassId),
+    Map(MapId),
+    Array {
+        leaf: Leaf,
+        depth: u8,
+        limits: [Option<u64>; MAX_ARRAY_RANK],
+    },
+}
+
+impl OptionalKind {
+    pub(crate) fn canonical(self) -> CanonicalType {
+        match self {
+            OptionalKind::Int16 => CanonicalType::Int16,
+            OptionalKind::Int32 => CanonicalType::Int32,
+            OptionalKind::Int64 => CanonicalType::Int64,
+            OptionalKind::UInt16 => CanonicalType::UInt16,
+            OptionalKind::UInt32 => CanonicalType::UInt32,
+            OptionalKind::UInt64 => CanonicalType::UInt64,
+            OptionalKind::Flt32 => CanonicalType::Flt32,
+            OptionalKind::Flt64 => CanonicalType::Flt64,
+            OptionalKind::Bln => CanonicalType::Bln,
+            OptionalKind::Chr => CanonicalType::Chr,
+            OptionalKind::Str => CanonicalType::Str,
+            OptionalKind::Type => CanonicalType::Type,
+            OptionalKind::Record(id) => CanonicalType::Record(id),
+            OptionalKind::Class(id) => CanonicalType::Class(id),
+            OptionalKind::Map(id) => CanonicalType::Map(id),
+            OptionalKind::Array {
+                leaf,
+                depth,
+                limits,
+            } => CanonicalType::Array {
+                leaf,
+                depth,
+                limits,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +158,7 @@ pub enum Leaf {
     Type,
     ErrorHandle,
     Record(RecordId),
+    Class(ClassId),
     Map(MapId),
 }
 
@@ -115,6 +179,7 @@ impl CanonicalType {
             CanonicalType::Str => "String".to_string(),
             CanonicalType::Type => "GrfType".to_string(),
             CanonicalType::ErrorHandle => "graphite_core::diagnostic::RuntimeError".to_string(),
+            CanonicalType::Class(_) => "graphite_core::heap::Rooted".to_string(),
             CanonicalType::Record(_) => "GrfRecord".to_string(),
             CanonicalType::Map(_) => "HashMap<(), ()>".to_string(),
             CanonicalType::Array { leaf, depth, .. } => {
@@ -124,7 +189,52 @@ impl CanonicalType {
                 }
                 name
             }
+            CanonicalType::Optional(kind) => format!("Option<{}>", kind.canonical().rust_name()),
         }
+    }
+
+    pub fn optional(self) -> Option<CanonicalType> {
+        let kind = match self {
+            CanonicalType::Optional(_) | CanonicalType::Void | CanonicalType::ErrorHandle => {
+                return None;
+            }
+            CanonicalType::Int16 => OptionalKind::Int16,
+            CanonicalType::Int32 => OptionalKind::Int32,
+            CanonicalType::Int64 => OptionalKind::Int64,
+            CanonicalType::UInt16 => OptionalKind::UInt16,
+            CanonicalType::UInt32 => OptionalKind::UInt32,
+            CanonicalType::UInt64 => OptionalKind::UInt64,
+            CanonicalType::Flt32 => OptionalKind::Flt32,
+            CanonicalType::Flt64 => OptionalKind::Flt64,
+            CanonicalType::Bln => OptionalKind::Bln,
+            CanonicalType::Chr => OptionalKind::Chr,
+            CanonicalType::Str => OptionalKind::Str,
+            CanonicalType::Type => OptionalKind::Type,
+            CanonicalType::Record(id) => OptionalKind::Record(id),
+            CanonicalType::Class(id) => OptionalKind::Class(id),
+            CanonicalType::Map(id) => OptionalKind::Map(id),
+            CanonicalType::Array {
+                leaf,
+                depth,
+                limits,
+            } => OptionalKind::Array {
+                leaf,
+                depth,
+                limits,
+            },
+        };
+        Some(CanonicalType::Optional(kind))
+    }
+
+    pub fn optional_inner(self) -> Option<CanonicalType> {
+        match self {
+            CanonicalType::Optional(kind) => Some(kind.canonical()),
+            _ => None,
+        }
+    }
+
+    pub fn is_optional(self) -> bool {
+        matches!(self, CanonicalType::Optional(_))
     }
 
     pub fn spelling(self) -> String {
@@ -143,6 +253,7 @@ impl CanonicalType {
             CanonicalType::Str => "str".to_string(),
             CanonicalType::Type => "Type".to_string(),
             CanonicalType::ErrorHandle => "RuntimeError".to_string(),
+            CanonicalType::Class(_) => "class".to_string(),
             CanonicalType::Record(_) => "record".to_string(),
             CanonicalType::Map(_) => "map".to_string(),
             CanonicalType::Array {
@@ -159,6 +270,7 @@ impl CanonicalType {
                 }
                 name
             }
+            CanonicalType::Optional(kind) => format!("{}?", kind.canonical().spelling()),
         }
     }
 
@@ -215,13 +327,19 @@ impl CanonicalType {
             CanonicalType::Str
                 | CanonicalType::ErrorHandle
                 | CanonicalType::Record(_)
+                | CanonicalType::Class(_)
                 | CanonicalType::Map(_)
                 | CanonicalType::Array { .. }
+                | CanonicalType::Optional(_)
         )
     }
 
     pub fn is_record(self) -> bool {
         matches!(self, CanonicalType::Record(_))
+    }
+
+    pub fn is_class(self) -> bool {
+        matches!(self, CanonicalType::Class(_))
     }
 
     pub fn is_map(self) -> bool {
@@ -288,8 +406,10 @@ impl CanonicalType {
             CanonicalType::Type => Leaf::Type,
             CanonicalType::ErrorHandle => Leaf::ErrorHandle,
             CanonicalType::Record(id) => Leaf::Record(id),
+            CanonicalType::Class(id) => Leaf::Class(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
+            CanonicalType::Optional(_) => Leaf::Void,
         }
     }
 
@@ -332,6 +452,7 @@ impl Leaf {
             Leaf::Type => CanonicalType::Type,
             Leaf::ErrorHandle => CanonicalType::ErrorHandle,
             Leaf::Record(id) => CanonicalType::Record(id),
+            Leaf::Class(id) => CanonicalType::Class(id),
             Leaf::Map(id) => CanonicalType::Map(id),
         }
     }
@@ -353,6 +474,7 @@ impl Leaf {
             Leaf::Type => "Type",
             Leaf::ErrorHandle => "RuntimeError",
             Leaf::Record(_) => "record",
+            Leaf::Class(_) => "class",
             Leaf::Map(_) => "map",
         }
     }
@@ -441,8 +563,41 @@ pub struct Analysis {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedProgram {
     pub records: Vec<CheckedRecord>,
+    pub classes: Vec<CheckedClass>,
     pub maps: Vec<MapShape>,
     pub functions: Vec<CheckedFn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedClass {
+    pub name: String,
+    pub fields: Vec<CheckedClassField>,
+    pub init: Option<CheckedInit>,
+    pub methods: Vec<CheckedMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedClassField {
+    pub name: String,
+    pub ty: CanonicalType,
+    pub const_field: bool,
+    pub initializer: Option<CheckedExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedInit {
+    pub params: Vec<(String, CanonicalType)>,
+    pub body: Vec<CheckedStmt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedMethod {
+    pub name: String,
+    pub params: Vec<(String, CanonicalType)>,
+    pub ret: CanonicalType,
+    pub body: Vec<CheckedStmt>,
+    pub mutating: bool,
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,6 +710,18 @@ pub enum ArrayPlace {
         key: Box<CheckedExpr>,
         value_ty: CanonicalType,
         type_name: String,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    /// A field stored on a class instance. Nested record, array, and map
+    /// updates copy this value out, change it, and write it back.
+    ClassField {
+        object: Box<CheckedExpr>,
+        class: ClassId,
+        field: usize,
+        ty: CanonicalType,
         file: String,
         line: u32,
         column: u32,
@@ -796,8 +963,63 @@ pub enum CheckedExpr {
         column: u32,
         end_column: u32,
     },
+    ClassNew {
+        class: ClassId,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    ClassGet {
+        object: Box<CheckedExpr>,
+        class: ClassId,
+        field: usize,
+        ty: CanonicalType,
+    },
+    ClassSet {
+        object: Box<CheckedExpr>,
+        class: ClassId,
+        field: usize,
+        value: Box<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    ClassCall {
+        class: ClassId,
+        method: usize,
+        object: Option<Box<CheckedExpr>>,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
     Interpolated {
         parts: Vec<CheckedPart>,
+    },
+    Null {
+        ty: CanonicalType,
+    },
+    Wrap {
+        expr: Box<CheckedExpr>,
+        ty: CanonicalType,
+    },
+    Unwrap {
+        expr: Box<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    Unready {
+        ty: CanonicalType,
     },
 }
 
@@ -826,7 +1048,15 @@ impl CheckedExpr {
             | CheckedExpr::MapLiteral { ty, .. }
             | CheckedExpr::MapGet { ty, .. }
             | CheckedExpr::MapInsert { ty, .. }
-            | CheckedExpr::MapCall { ty, .. } => *ty,
+            | CheckedExpr::MapCall { ty, .. }
+            | CheckedExpr::ClassNew { ty, .. }
+            | CheckedExpr::ClassGet { ty, .. }
+            | CheckedExpr::ClassSet { ty, .. }
+            | CheckedExpr::ClassCall { ty, .. }
+            | CheckedExpr::Null { ty }
+            | CheckedExpr::Wrap { ty, .. }
+            | CheckedExpr::Unwrap { ty, .. }
+            | CheckedExpr::Unready { ty } => *ty,
             CheckedExpr::LengthOf { .. } => CanonicalType::UInt64,
             CheckedExpr::TypeOf { .. } => CanonicalType::Type,
             CheckedExpr::TypeName { .. } => CanonicalType::Str,
@@ -849,6 +1079,7 @@ struct Signature {
     span: Span,
 }
 
+#[derive(Clone)]
 struct ParamInfo {
     name: String,
     ty: CanonicalType,
@@ -866,6 +1097,7 @@ struct Binding {
     ty: CanonicalType,
     mutable: bool,
     auto: bool,
+    ready: bool,
 }
 
 pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Analysis {
@@ -877,18 +1109,33 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         imports: HashMap::new(),
         records: Vec::new(),
         record_names: HashMap::new(),
+        classes: Vec::new(),
+        class_names: HashMap::new(),
         maps: Vec::new(),
         resolve_stack: Vec::new(),
         scopes: Vec::new(),
         loop_depth: 0,
         finally_depth: 0,
         current_return: CanonicalType::Void,
+        current_class: None,
+        current_static: false,
+        in_init: false,
         iterating: Vec::new(),
+        narrowed: Vec::new(),
     };
     checker.collect_imports(program);
+    checker.collect_classes(program);
     checker.collect_records(program);
+    checker.finish_class_types();
+    checker.prepare_class_effects(program);
     checker.collect_functions(program);
     checker.check_entry_point(program);
+    let mut checked_classes = Vec::new();
+    for declaration in &program.classes {
+        if let Some(checked) = checker.check_class(declaration) {
+            checked_classes.push(checked);
+        }
+    }
     let mut functions = Vec::new();
     if checker.diagnostics.is_empty() {
         for function in &program.functions {
@@ -916,6 +1163,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
                             .collect(),
                     })
                     .collect(),
+                classes: checked_classes,
                 maps: checker.maps,
                 functions,
             })
@@ -943,6 +1191,51 @@ struct FieldInfo {
     span: Span,
 }
 
+struct ClassFieldInfo {
+    name: String,
+    syntax: TypeSyntax,
+    ty: CanonicalType,
+    auto: bool,
+    const_field: bool,
+    public: bool,
+    span: Span,
+}
+
+struct ClassMethodInfo {
+    name: String,
+    params: Vec<ParamInfo>,
+    param_syntax: Vec<RawParam>,
+    ret: CanonicalType,
+    ret_syntax: TypeSyntax,
+    public: bool,
+    is_static: bool,
+    mutating: bool,
+    leaks: bool,
+    span: Span,
+}
+
+struct ClassInitInfo {
+    params: Vec<ParamInfo>,
+    param_syntax: Vec<RawParam>,
+    public: bool,
+}
+
+#[derive(Clone)]
+struct RawParam {
+    name: String,
+    syntax: TypeSyntax,
+    auto: bool,
+    span: Span,
+}
+
+struct ClassInfo {
+    name: String,
+    span: Span,
+    fields: Vec<ClassFieldInfo>,
+    methods: Vec<ClassMethodInfo>,
+    init: Option<ClassInitInfo>,
+}
+
 struct Checker<'a> {
     source_name: &'a str,
     manifest: &'a Manifest,
@@ -951,13 +1244,19 @@ struct Checker<'a> {
     imports: HashMap<String, ImportBinding>,
     records: Vec<RecordInfo>,
     record_names: HashMap<String, RecordId>,
+    classes: Vec<ClassInfo>,
+    class_names: HashMap<String, ClassId>,
     maps: Vec<MapShape>,
     resolve_stack: Vec<RecordId>,
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
     finally_depth: u32,
     current_return: CanonicalType,
+    current_class: Option<ClassId>,
+    current_static: bool,
+    in_init: bool,
     iterating: Vec<IterLock>,
+    narrowed: Vec<HashMap<String, CanonicalType>>,
 }
 
 #[derive(Clone)]
@@ -1041,6 +1340,18 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.reject_reserved_name(&declaration.name.name, declaration.name.span) {
+                continue;
+            }
+            if self.class_names.contains_key(&declaration.name.name) {
+                let id = self.class_names[&declaration.name.name];
+                let line = self.classes[id.0 as usize].span.start.line;
+                self.error(
+                    declaration.name.span,
+                    format!(
+                        "record type '{}' is already declared at line {line}",
+                        declaration.name.name
+                    ),
+                );
                 continue;
             }
             if self.record_names.contains_key(&declaration.name.name) {
@@ -1147,15 +1458,32 @@ impl<'a> Checker<'a> {
             }
             self.validate_map(key, value, syntax.span);
             let id = self.intern_map(key, value);
-            return self.with_bounds(CanonicalType::Map(id), &syntax.bounds);
+            return self.finish_optional(
+                self.with_bounds(CanonicalType::Map(id), &syntax.bounds),
+                syntax,
+            );
         }
         if syntax.kind == TypeKind::Named && syntax.name == "Type" {
-            return self.with_bounds(CanonicalType::Type, &syntax.bounds);
+            return self.finish_optional(
+                self.with_bounds(CanonicalType::Type, &syntax.bounds),
+                syntax,
+            );
+        }
+        if syntax.kind == TypeKind::Named {
+            if let Some(id) = self.class_names.get(&syntax.name).copied() {
+                return self.finish_optional(
+                    self.with_bounds(CanonicalType::Class(id), &syntax.bounds),
+                    syntax,
+                );
+            }
         }
         let scalar = if syntax.kind == TypeKind::Named {
             let Some(id) = self.record_names.get(&syntax.name).copied() else {
                 self.error(syntax.span, format!("unknown type '{}'", syntax.name));
-                return self.with_bounds(CanonicalType::Record(RecordId(u32::MAX)), &syntax.bounds);
+                return self.finish_optional(
+                    self.with_bounds(CanonicalType::Record(RecordId(u32::MAX)), &syntax.bounds),
+                    syntax,
+                );
             };
             if self.records[id.0 as usize].resolving {
                 self.report_cycle(id, syntax.span);
@@ -1167,7 +1495,24 @@ impl<'a> Checker<'a> {
         } else {
             canonical_type(syntax.kind, &[])
         };
-        self.with_bounds(scalar, &syntax.bounds)
+        let ty = self.with_bounds(scalar, &syntax.bounds);
+        self.finish_optional(ty, syntax)
+    }
+
+    fn finish_optional(&mut self, ty: CanonicalType, syntax: &TypeSyntax) -> CanonicalType {
+        if !syntax.optional {
+            return ty;
+        }
+        match ty.optional() {
+            Some(optional) => optional,
+            None => {
+                self.error(
+                    syntax.span,
+                    format!("'{}' cannot be nullable", self.spell(ty)),
+                );
+                ty
+            }
+        }
     }
 
     fn with_bounds(&self, scalar: CanonicalType, bounds: &[Option<u64>]) -> CanonicalType {
@@ -1203,6 +1548,7 @@ impl<'a> Checker<'a> {
     fn spell(&self, ty: CanonicalType) -> String {
         match ty {
             CanonicalType::Record(id) => self.record_name(id),
+            CanonicalType::Class(id) => self.class_name(id),
             CanonicalType::Map(id) => {
                 let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
                     key: CanonicalType::Void,
@@ -1213,6 +1559,20 @@ impl<'a> Checker<'a> {
                     self.spell(shape.key),
                     self.spell(shape.value)
                 )
+            }
+            CanonicalType::Array {
+                leaf: Leaf::Class(id),
+                depth,
+                limits,
+            } => {
+                let mut name = self.class_name(id);
+                for bound in limits.iter().take(depth as usize) {
+                    match bound {
+                        None => name.push_str("[]"),
+                        Some(limit) => name.push_str(&format!("[{limit}]")),
+                    }
+                }
+                name
             }
             CanonicalType::Array {
                 leaf: Leaf::Record(id),
@@ -1242,6 +1602,7 @@ impl<'a> Checker<'a> {
                 }
                 name
             }
+            CanonicalType::Optional(kind) => format!("{}?", self.spell(kind.canonical())),
             other => other.spelling(),
         }
     }
@@ -1452,6 +1813,7 @@ impl<'a> Checker<'a> {
                         ty: *ty,
                         mutable: true,
                         auto: *auto,
+                        ready: true,
                     },
                 );
             }
@@ -1518,11 +1880,27 @@ impl<'a> Checker<'a> {
                 if condition.ty() != CanonicalType::Bln {
                     self.error(stmt.condition.span(), "an if condition must have type bln");
                 }
+                let (then_narrow, else_narrow) = self.null_split(&stmt.condition);
+                let before = self.ready_snapshot();
+                self.push_narrow(&then_narrow);
                 let then_body = self.check_block_stmts(&stmt.then_branch);
-                let else_body = stmt
-                    .else_branch
-                    .as_ref()
-                    .map(|branch| self.check_else(branch));
+                self.pop_narrow();
+                let after_then = self.ready_snapshot();
+                self.restore_ready(&before);
+                let else_body = if let Some(branch) = &stmt.else_branch {
+                    self.push_narrow(&else_narrow);
+                    let body = self.check_else(branch);
+                    self.pop_narrow();
+                    Some(body)
+                } else {
+                    None
+                };
+                let after_else = if stmt.else_branch.is_some() {
+                    self.ready_snapshot()
+                } else {
+                    before
+                };
+                self.merge_ready(&after_then, &after_else);
                 Some(CheckedStmt::If {
                     condition,
                     then_body,
@@ -1595,6 +1973,7 @@ impl<'a> Checker<'a> {
                     ty: CanonicalType::ErrorHandle,
                     mutable: false,
                     auto: false,
+                    ready: true,
                 },
             );
             let catch_body = clause
@@ -1647,9 +2026,11 @@ impl<'a> Checker<'a> {
     fn check_loop(&mut self, stmt: &LoopStmt) -> Option<CheckedStmt> {
         match &stmt.kind {
             LoopKind::Infinite => {
+                let before = self.ready_snapshot();
                 self.loop_depth += 1;
                 let body = self.check_block_stmts(&stmt.body);
                 self.loop_depth -= 1;
+                self.restore_ready(&before);
                 Some(CheckedStmt::Loop { body })
             }
             LoopKind::Condition { condition } => {
@@ -1657,9 +2038,14 @@ impl<'a> Checker<'a> {
                 if checked.ty() != CanonicalType::Bln {
                     self.error(condition.span(), "a loop condition must have type bln");
                 }
+                let (then_narrow, _) = self.null_split(condition);
+                let before = self.ready_snapshot();
                 self.loop_depth += 1;
+                self.push_narrow(&then_narrow);
                 let body = self.check_block_stmts(&stmt.body);
+                self.pop_narrow();
                 self.loop_depth -= 1;
+                self.restore_ready(&before);
                 Some(CheckedStmt::While {
                     condition: checked,
                     body,
@@ -1671,6 +2057,7 @@ impl<'a> Checker<'a> {
                 condition,
                 update,
             } => {
+                let before = self.ready_snapshot();
                 self.scopes.push(HashMap::new());
                 let init = initializer
                     .as_ref()
@@ -1696,6 +2083,7 @@ impl<'a> Checker<'a> {
                 let body = self.check_block_stmts(&stmt.body);
                 self.loop_depth -= 1;
                 self.scopes.pop();
+                self.restore_ready(&before);
                 Some(CheckedStmt::CStyle {
                     initializer: init,
                     init_expr,
@@ -1705,9 +2093,90 @@ impl<'a> Checker<'a> {
                 })
             }
             LoopKind::Iteration { bindings, iterable } => {
-                self.check_iteration(bindings, iterable, stmt)
+                let before = self.ready_snapshot();
+                let result = self.check_iteration(bindings, iterable, stmt);
+                self.restore_ready(&before);
+                result
             }
         }
+    }
+
+    fn default_value(&self, ty: CanonicalType, stack: &mut Vec<RecordId>) -> Option<CheckedExpr> {
+        match ty {
+            CanonicalType::Int16
+            | CanonicalType::Int32
+            | CanonicalType::Int64
+            | CanonicalType::UInt16
+            | CanonicalType::UInt32
+            | CanonicalType::UInt64 => Some(CheckedExpr::Int { value: 0, ty }),
+            CanonicalType::Flt32 | CanonicalType::Flt64 => Some(CheckedExpr::Float {
+                lexeme: "0.0".to_string(),
+                ty,
+            }),
+            CanonicalType::Bln => Some(CheckedExpr::Bool(false)),
+            CanonicalType::Chr => Some(CheckedExpr::Char('\0')),
+            CanonicalType::Str => Some(CheckedExpr::Str(String::new())),
+            CanonicalType::Array { .. } => {
+                let element = ty.element()?;
+                if let Some(limit) = ty.limit() {
+                    let item = self.default_value(element, stack)?;
+                    let count = usize::try_from(limit).ok()?;
+                    Some(CheckedExpr::Array {
+                        elements: vec![item; count],
+                        ty,
+                    })
+                } else {
+                    Some(CheckedExpr::Array {
+                        elements: Vec::new(),
+                        ty,
+                    })
+                }
+            }
+            CanonicalType::Map(_) => Some(CheckedExpr::MapLiteral {
+                entries: Vec::new(),
+                ty,
+            }),
+            CanonicalType::Record(id) => {
+                if stack.contains(&id) {
+                    return None;
+                }
+                stack.push(id);
+                let fields = self
+                    .records
+                    .get(id.0 as usize)
+                    .map(|record| {
+                        record
+                            .fields
+                            .iter()
+                            .map(|field| field.ty)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut values = Vec::new();
+                for (index, field) in fields.iter().enumerate() {
+                    let Some(value) = self.default_value(*field, stack) else {
+                        stack.pop();
+                        return None;
+                    };
+                    values.push((index, value));
+                }
+                stack.pop();
+                Some(CheckedExpr::Record {
+                    id,
+                    fields: values,
+                    ty,
+                })
+            }
+            CanonicalType::Optional(_) => Some(CheckedExpr::Null { ty }),
+            CanonicalType::Class(_)
+            | CanonicalType::Type
+            | CanonicalType::Void
+            | CanonicalType::ErrorHandle => None,
+        }
+    }
+
+    fn can_delay(&self, ty: CanonicalType) -> bool {
+        matches!(ty, CanonicalType::Class(_) | CanonicalType::Record(_))
     }
 
     fn check_variable(&mut self, decl: &VariableDecl) -> Option<CheckedStmt> {
@@ -1723,14 +2192,28 @@ impl<'a> Checker<'a> {
         if self.reject_unspecified_type(ty, decl.ty.span) {
             return None;
         }
-        let initializer = &decl.initializer;
-        let value = self.check_expr(initializer, Some(ty), false);
-        let value = self.apply_conversion(
-            value,
-            ty,
-            decl.conversion == ConversionMode::Auto,
-            initializer.span(),
-        );
+        let (value, ready) = if let Some(initializer) = &decl.initializer {
+            let value = self.check_expr(initializer, Some(ty), false);
+            (
+                self.apply_conversion(
+                    value,
+                    ty,
+                    decl.conversion == ConversionMode::Auto,
+                    initializer.span(),
+                ),
+                true,
+            )
+        } else if let Some(value) = self.default_value(ty, &mut Vec::new()) {
+            (value, true)
+        } else if self.can_delay(ty) {
+            (CheckedExpr::Unready { ty }, false)
+        } else {
+            self.error(
+                decl.name.span,
+                format!("type '{}' has no default value", self.spell(ty)),
+            );
+            return None;
+        };
         if self.reject_reserved_name(&decl.name.name, decl.name.span) {
             return None;
         }
@@ -1751,6 +2234,7 @@ impl<'a> Checker<'a> {
                 ty,
                 mutable: decl.mutable,
                 auto: decl.conversion == ConversionMode::Auto,
+                ready,
             },
         );
         Some(CheckedStmt::Let {
@@ -1779,11 +2263,13 @@ impl<'a> Checker<'a> {
             }
             Expr::Literal(LiteralExpr::Boolean { value, .. }) => CheckedExpr::Bool(*value),
             Expr::Literal(LiteralExpr::String { value, .. }) => CheckedExpr::Str(value.clone()),
+            Expr::Literal(LiteralExpr::Null { span }) => self.null_literal(*span, expected),
             Expr::Identifier(ident) => self.load(ident),
             Expr::Unary(expr) => self.check_unary(expr, expected),
             Expr::Binary(expr) => self.check_binary(expr, expected),
             Expr::Assignment(expr) => self.check_assignment(expr),
             Expr::Update(expr) => self.check_update(expr),
+            Expr::New(expr) => self.check_new(expr),
             Expr::Call(expr) => self.check_call(expr, allow_void),
             Expr::Conversion(expr) => self.check_conversion(expr),
             Expr::Array(expr) => self.check_array_literal(expr, expected),
@@ -1869,6 +2355,13 @@ impl<'a> Checker<'a> {
                 span: expr.span,
             };
         }
+        if matches!(
+            expr.operator,
+            BinaryOperator::Equal | BinaryOperator::NotEqual
+        ) && (expr_is_null(&expr.left) || expr_is_null(&expr.right))
+        {
+            return self.check_null_compare(expr);
+        }
         let comparison = matches!(
             expr.operator,
             BinaryOperator::Less
@@ -1879,6 +2372,32 @@ impl<'a> Checker<'a> {
                 | BinaryOperator::NotEqual
         );
         let (left, right) = self.check_numeric_operands(&expr.left, &expr.right, expected);
+        if matches!(
+            expr.operator,
+            BinaryOperator::Equal | BinaryOperator::NotEqual
+        ) && left.ty().is_optional()
+            && left.ty() == right.ty()
+        {
+            let inner = left.ty().optional_inner().unwrap_or(left.ty());
+            if inner.is_record() || inner.is_map() {
+                self.error(
+                    expr.span,
+                    format!(
+                        "operator '{}' cannot compare {} values",
+                        operator_token(expr.operator),
+                        if inner.is_map() { "map" } else { "record" }
+                    ),
+                );
+            }
+            return CheckedExpr::Binary {
+                op: expr.operator,
+                ty: CanonicalType::Bln,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: Some(CompareMode::Optional),
+                span: expr.span,
+            };
+        }
         if comparison && (left.ty() == CanonicalType::Type || right.ty() == CanonicalType::Type) {
             let equality = matches!(
                 expr.operator,
@@ -1937,6 +2456,44 @@ impl<'a> Checker<'a> {
                     operator_token(expr.operator)
                 ),
             );
+            return CheckedExpr::Binary {
+                op: expr.operator,
+                ty: CanonicalType::Bln,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span: expr.span,
+            };
+        }
+        if left.ty().is_class() || right.ty().is_class() {
+            let equality = matches!(
+                expr.operator,
+                BinaryOperator::Equal | BinaryOperator::NotEqual
+            );
+            if equality && left.ty() == right.ty() {
+                return CheckedExpr::Binary {
+                    op: expr.operator,
+                    ty: CanonicalType::Bln,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: Some(CompareMode::Same),
+                    span: expr.span,
+                };
+            }
+            let message = if equality {
+                format!(
+                    "operator '{}' cannot compare '{}' with '{}'",
+                    operator_token(expr.operator),
+                    self.spell(left.ty()),
+                    self.spell(right.ty())
+                )
+            } else {
+                format!(
+                    "operator '{}' cannot compare class values",
+                    operator_token(expr.operator)
+                )
+            };
+            self.error(expr.span, message);
             return CheckedExpr::Binary {
                 op: expr.operator,
                 ty: CanonicalType::Bln,
@@ -2087,9 +2644,15 @@ impl<'a> Checker<'a> {
 
     fn check_assignment(&mut self, expr: &AssignmentExpr) -> CheckedExpr {
         match &*expr.target {
-            Expr::Index(index) => return self.check_index_assignment(index, &expr.value),
-            Expr::Slice(slice) => return self.check_slice_assignment(slice, &expr.value),
-            Expr::Member(member) => return self.check_field_assignment(member, &expr.value),
+            Expr::Index(index) => {
+                return self.check_index_assignment(index, &expr.value, expr.op);
+            }
+            Expr::Slice(slice) => {
+                return self.check_slice_assignment(slice, &expr.value, expr.op);
+            }
+            Expr::Member(member) => {
+                return self.check_field_assignment(member, &expr.value, expr.op);
+            }
             Expr::Identifier(_) => {}
             _ => {
                 self.error(
@@ -2109,12 +2672,90 @@ impl<'a> Checker<'a> {
         self.reject_binding_write(&ident.name, ident.span, false);
         let ty = binding.ty;
         let auto = binding.auto;
-        let value = self.check_expr(&expr.value, Some(ty), false);
-        let value = self.apply_conversion(value, ty, auto, expr.value.span());
+        let current = CheckedExpr::Load {
+            name: ident.name.clone(),
+            ty,
+        };
+        let value = self.store_value(expr.op, current, &expr.value, ty, auto, expr.value.span());
+        self.mark_ready(&ident.name);
         CheckedExpr::Assign {
             name: ident.name.clone(),
             ty,
             value: Box::new(value),
+        }
+    }
+
+    fn store_value(
+        &mut self,
+        op: Option<BinaryOperator>,
+        current: CheckedExpr,
+        value: &Expr,
+        ty: CanonicalType,
+        auto: bool,
+        span: Span,
+    ) -> CheckedExpr {
+        let Some(op) = op else {
+            let checked = self.check_expr(value, Some(ty), false);
+            return self.apply_conversion(checked, ty, auto, span);
+        };
+        let rhs = if is_numeric_literal(value) {
+            self.check_expr(value, Some(current.ty()), false)
+        } else {
+            self.check_expr(value, None, false)
+        };
+        let combined = self.finish_op(op, current, rhs, span);
+        self.apply_conversion(combined, ty, auto, span)
+    }
+
+    fn finish_op(
+        &mut self,
+        op: BinaryOperator,
+        left: CheckedExpr,
+        right: CheckedExpr,
+        span: Span,
+    ) -> CheckedExpr {
+        let remainder = op == BinaryOperator::Remainder;
+        match numeric::arithmetic(left.ty(), right.ty(), remainder) {
+            Ok(ty) => {
+                let left = self.promote(left, ty, span);
+                let right = self.promote(right, ty, span);
+                CheckedExpr::Binary {
+                    op,
+                    ty,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                    span,
+                }
+            }
+            Err(NumericError::Remainder) => {
+                self.error(span, "operator '%' requires integer operands");
+                CheckedExpr::Binary {
+                    op,
+                    ty: left.ty(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                    span,
+                }
+            }
+            Err(NumericError::Incompatible) => {
+                self.error(
+                    span,
+                    format!(
+                        "operator '{}' requires two operands of the same numeric type",
+                        operator_token(op)
+                    ),
+                );
+                CheckedExpr::Binary {
+                    op,
+                    ty: left.ty(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                    span,
+                }
+            }
         }
     }
 
@@ -2151,6 +2792,11 @@ impl<'a> Checker<'a> {
             if let Expr::Identifier(object) = &*member.object {
                 if self.imports.contains_key(&object.name) {
                     return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
+                }
+                if self.lookup(&object.name).is_none()
+                    && self.class_names.contains_key(&object.name)
+                {
+                    return self.check_static_call(member, &expr.arguments, expr.span);
                 }
             }
             return self.check_array_method(member, &expr.arguments, expr.span);
@@ -2314,6 +2960,18 @@ impl<'a> Checker<'a> {
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
+        if self.class_names.contains_key(&ident.name) && !self.functions.contains_key(&ident.name) {
+            self.error(ident.span, format!("construct '{}' with new", ident.name));
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            let ty = self
+                .class_names
+                .get(&ident.name)
+                .copied()
+                .map(CanonicalType::Class);
+            return self.dummy(ty);
+        }
         let Some(resolved) = self.functions.get(&ident.name).map(|signature| {
             (
                 signature.ret,
@@ -2418,6 +3076,41 @@ impl<'a> Checker<'a> {
         }
         if from == target {
             return expr;
+        }
+        if let Some(inner) = target.optional_inner() {
+            if matches!(expr, CheckedExpr::Null { .. }) {
+                return CheckedExpr::Null { ty: target };
+            }
+            if from == inner {
+                return CheckedExpr::Wrap {
+                    expr: Box::new(expr),
+                    ty: target,
+                };
+            }
+        }
+        if matches!(expr, CheckedExpr::Null { .. }) {
+            self.error(span, "null requires a nullable type");
+            return expr;
+        }
+        if from.is_optional() && from.optional_inner() == Some(target) {
+            self.error(span, "a nullable value must be checked before it is used");
+            return expr;
+        }
+        if target == CanonicalType::Str && allow && from.is_optional() {
+            let inner = from.optional_inner().unwrap_or(from);
+            if inner == CanonicalType::Str || conversion(inner, CanonicalType::Str).is_some() {
+                let (file, line, column, end_column) = self.located(span);
+                return CheckedExpr::Convert {
+                    from,
+                    to: target,
+                    op: ConvOp::OptionalToStr,
+                    expr: Box::new(expr),
+                    file,
+                    line,
+                    column,
+                    end_column,
+                };
+            }
         }
         if allow {
             if let Some(op) = conversion(from, target) {
@@ -2631,12 +3324,16 @@ impl<'a> Checker<'a> {
             }
         }
         let object = self.check_expr(&expr.object, None, false);
+        let object = self.adopt_object(object, expr.object.span());
         if object.ty() == CanonicalType::ErrorHandle {
             self.error(
                 expr.span,
                 "call a runtime error method, for example error.message()",
             );
             return self.dummy(None);
+        }
+        if let CanonicalType::Class(id) = object.ty() {
+            return self.finish_class_get(object, id, expr);
         }
         let CanonicalType::Record(id) = object.ty() else {
             self.error(
@@ -2664,13 +3361,27 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_field_assignment(&mut self, member: &MemberExpr, value: &Expr) -> CheckedExpr {
+    fn check_field_assignment(
+        &mut self,
+        member: &MemberExpr,
+        value: &Expr,
+        op: Option<BinaryOperator>,
+    ) -> CheckedExpr {
+        if self.peek_type(&member.object).is_some_and(|ty| {
+            ty.is_class() || ty.optional_inner().is_some_and(|inner| inner.is_class())
+        }) {
+            let object = self.check_expr(&member.object, None, false);
+            let object = self.adopt_object(object, member.object.span());
+            if let CanonicalType::Class(id) = object.ty() {
+                return self.finish_class_set(object, id, member, value, op);
+            }
+        }
         let before = self.diagnostics.len();
         if let Some(place) = self.check_place(&Expr::Member(member.clone()), true) {
             let ty = self.place_type(&place);
             let auto = self.field_auto(&place);
-            let checked = self.check_expr(value, Some(ty), false);
-            let value = self.apply_conversion(checked, ty, auto, value.span());
+            let current = self.check_expr(&Expr::Member(member.clone()), None, false);
+            let value = self.store_value(op, current, value, ty, auto, value.span());
             return CheckedExpr::FieldSet {
                 place,
                 value: Box::new(value),
@@ -2817,7 +3528,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_index_assignment(&mut self, index: &IndexExpr, value: &Expr) -> CheckedExpr {
+    fn check_index_assignment(
+        &mut self,
+        index: &IndexExpr,
+        value: &Expr,
+        op: Option<BinaryOperator>,
+    ) -> CheckedExpr {
+        if op.is_some() && self.peek_type(&index.object).is_some_and(|ty| ty.is_map()) {
+            self.error(index.span, "compound assignment is not supported for maps");
+            let _ = self.check_expr(value, None, false);
+            let _ = self.check_expr(&index.index, None, false);
+            return self.dummy(None);
+        }
         if let Some(place) = self.check_place(&index.object, true) {
             let object_ty = self.place_type(&place);
             if object_ty.is_map() {
@@ -2835,8 +3557,16 @@ impl<'a> Checker<'a> {
                 return self.dummy(None);
             }
             let element = array_ty.element().unwrap_or(CanonicalType::Int64);
-            let checked = self.check_expr(value, Some(element), false);
-            let value = self.apply_conversion(checked, element, false, value.span());
+            let current = CheckedExpr::IndexGet {
+                object: Box::new(self.place_load(&place)),
+                index: Box::new(checked_index.clone()),
+                ty: element,
+                file: file.clone(),
+                line,
+                column,
+                end_column,
+            };
+            let value = self.store_value(op, current, value, element, false, value.span());
             return CheckedExpr::IndexSet {
                 place: Some(place),
                 object: None,
@@ -2868,8 +3598,16 @@ impl<'a> Checker<'a> {
             );
             CanonicalType::Int64
         };
-        let checked = self.check_expr(value, Some(element), false);
-        let value = self.apply_conversion(checked, element, false, value.span());
+        let current = CheckedExpr::IndexGet {
+            object: Box::new(object.clone()),
+            index: Box::new(checked_index.clone()),
+            ty: element,
+            file: file.clone(),
+            line,
+            column,
+            end_column,
+        };
+        let value = self.store_value(op, current, value, element, false, value.span());
         CheckedExpr::IndexSet {
             place: None,
             object: Some(Box::new(object)),
@@ -2883,7 +3621,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_slice_assignment(&mut self, slice: &SliceExpr, value: &Expr) -> CheckedExpr {
+    fn check_slice_assignment(
+        &mut self,
+        slice: &SliceExpr,
+        value: &Expr,
+        op: Option<BinaryOperator>,
+    ) -> CheckedExpr {
+        if op.is_some() {
+            self.error(
+                slice.span,
+                "compound assignment is not supported for slices",
+            );
+            let _ = self.check_expr(value, None, false);
+            return self.dummy(None);
+        }
         let start = slice
             .start
             .as_ref()
@@ -2947,11 +3698,140 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn place_load(&mut self, place: &ArrayPlace) -> CheckedExpr {
+        match place {
+            ArrayPlace::Var(name) => {
+                let ty = self
+                    .lookup(name)
+                    .map(|binding| binding.ty)
+                    .unwrap_or(CanonicalType::Int64);
+                CheckedExpr::Load {
+                    name: name.clone(),
+                    ty,
+                }
+            }
+            ArrayPlace::Field { object, field, ty } => {
+                let object_expr = self.place_load(object);
+                if let CanonicalType::Record(id) = object_expr.ty() {
+                    if let Some((index, _)) = self.field_index(id, field) {
+                        return CheckedExpr::FieldGet {
+                            object: Box::new(object_expr),
+                            record: id,
+                            field: index,
+                            ty: *ty,
+                        };
+                    }
+                }
+                self.dummy(Some(*ty))
+            }
+            ArrayPlace::Index {
+                object,
+                index,
+                file,
+                line,
+                column,
+                end_column,
+            } => {
+                let object_expr = self.place_load(object);
+                let element = object_expr.ty().element().unwrap_or(CanonicalType::Int64);
+                CheckedExpr::IndexGet {
+                    object: Box::new(object_expr),
+                    index: index.clone(),
+                    ty: element,
+                    file: file.clone(),
+                    line: *line,
+                    column: *column,
+                    end_column: *end_column,
+                }
+            }
+            ArrayPlace::MapIndex { value_ty, .. } => self.dummy(Some(*value_ty)),
+            ArrayPlace::ClassField {
+                object,
+                class,
+                field,
+                ty,
+                ..
+            } => CheckedExpr::ClassGet {
+                object: object.clone(),
+                class: *class,
+                field: *field,
+                ty: *ty,
+            },
+        }
+    }
+
+    fn class_field_place(&mut self, member: &MemberExpr, mutating: bool) -> Option<ArrayPlace> {
+        let object = self.check_expr(&member.object, None, false);
+        let CanonicalType::Class(id) = object.ty() else {
+            return None;
+        };
+        let Some(index) = self.classes[id.0 as usize]
+            .fields
+            .iter()
+            .position(|field| field.name == member.member.name)
+        else {
+            if self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .any(|method| method.name == member.member.name)
+            {
+                self.error(
+                    member.span,
+                    format!("method '{}' must be called", member.member.name),
+                );
+            } else {
+                self.error(
+                    member.member.span,
+                    format!("unknown field '{}'", member.member.name),
+                );
+            }
+            return None;
+        };
+        let public = self.classes[id.0 as usize].fields[index].public;
+        let const_field = self.classes[id.0 as usize].fields[index].const_field;
+        let ty = self.classes[id.0 as usize].fields[index].ty;
+        let name = self.classes[id.0 as usize].fields[index].name.clone();
+        if !public && self.current_class != Some(id) {
+            self.error(
+                member.member.span,
+                format!("field '{name}' is not accessible"),
+            );
+        }
+        if mutating && const_field {
+            self.error(
+                member.span,
+                format!("cannot assign to constant field '{name}'"),
+            );
+        }
+        if mutating {
+            if let Some(root) = self.frozen_path(&member.object) {
+                self.error(member.span, format!("cannot assign to constant '{root}'"));
+            }
+        }
+        let (file, line, column, end_column) = self.located(member.span);
+        Some(ArrayPlace::ClassField {
+            object: Box::new(object),
+            class: id,
+            field: index,
+            ty,
+            file,
+            line,
+            column,
+            end_column,
+        })
+    }
+
     fn check_place(&mut self, expr: &Expr, mutating: bool) -> Option<ArrayPlace> {
         match expr {
             Expr::Parenthesized { expression, .. } => self.check_place(expression, mutating),
             Expr::Identifier(ident) => {
                 let (scope, binding) = self.binding_at(&ident.name)?;
+                if !binding.ready {
+                    self.error(
+                        ident.span,
+                        format!("variable '{}' is used before it is assigned", ident.name),
+                    );
+                }
                 if mutating {
                     self.reject_iterated_write(&ident.name, scope, ident.span);
                     if !binding.mutable {
@@ -2965,6 +3845,12 @@ impl<'a> Checker<'a> {
                 Some(ArrayPlace::Var(ident.name.clone()))
             }
             Expr::Member(member) => {
+                if self
+                    .peek_type(&member.object)
+                    .is_some_and(|ty| ty.is_class())
+                {
+                    return self.class_field_place(member, mutating);
+                }
                 let object = self.check_place(&member.object, mutating)?;
                 let ty = self.place_type(&object);
                 let CanonicalType::Record(id) = ty else {
@@ -3035,6 +3921,7 @@ impl<'a> Checker<'a> {
                 .unwrap_or(CanonicalType::Int64),
             ArrayPlace::Field { ty, .. } => *ty,
             ArrayPlace::MapIndex { value_ty, .. } => *value_ty,
+            ArrayPlace::ClassField { ty, .. } => *ty,
             ArrayPlace::Index { object, .. } => self
                 .place_type(object)
                 .element()
@@ -3063,8 +3950,23 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         }
         let mutating = matches!(name, "set" | "remove" | "push" | "insert");
+        if self.peek_type(&member.object).is_some_and(|ty| {
+            ty.is_class() || ty.optional_inner().is_some_and(|inner| inner.is_class())
+        }) {
+            let object = self.check_expr(&member.object, None, false);
+            let object = self.adopt_object(object, member.object.span());
+            if let CanonicalType::Class(id) = object.ty() {
+                return self.finish_class_call(object, id, member, arguments, span);
+            }
+        }
         if let Some(place) = self.check_place(&member.object, mutating) {
             let ty = self.place_type(&place);
+            if ty.is_class() {
+                let object = self.check_expr(&member.object, None, false);
+                if let CanonicalType::Class(id) = object.ty() {
+                    return self.finish_class_call(object, id, member, arguments, span);
+                }
+            }
             if ty.is_map() {
                 return self.finish_map_call(name, Some(place), None, arguments, span, member);
             }
@@ -3092,6 +3994,9 @@ impl<'a> Checker<'a> {
         }
         if ty.is_record() {
             return self.reject_record_call(member, arguments, ty);
+        }
+        if let CanonicalType::Class(id) = ty {
+            return self.finish_class_call(object, id, member, arguments, span);
         }
         self.finish_array_call(name, None, Some(object), ty, arguments, span, member)
     }
@@ -3505,6 +4410,7 @@ impl<'a> Checker<'a> {
                     ty: *ty,
                     mutable: *mutable,
                     auto: false,
+                    ready: true,
                 },
             );
         }
@@ -3644,6 +4550,7 @@ impl<'a> Checker<'a> {
                     ty: *ty,
                     mutable: *mutable,
                     auto: false,
+                    ready: true,
                 },
             );
         }
@@ -3836,14 +4743,59 @@ impl<'a> Checker<'a> {
         )
     }
 
+    fn adopt_object(&mut self, object: CheckedExpr, span: Span) -> CheckedExpr {
+        let Some(inner) = object.ty().optional_inner() else {
+            return object;
+        };
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::Unwrap {
+            expr: Box::new(object),
+            ty: inner,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
     fn load(&mut self, ident: &Identifier) -> CheckedExpr {
         match self.lookup(&ident.name) {
-            Some(binding) => CheckedExpr::Load {
-                name: ident.name.clone(),
-                ty: binding.ty,
-            },
+            Some(binding) => {
+                if !binding.ready {
+                    self.error(
+                        ident.span,
+                        format!("variable '{}' is used before it is assigned", ident.name),
+                    );
+                }
+                let narrowed = self.narrowed_type(&ident.name);
+                if let Some(inner) = narrowed.filter(|ty| *ty != binding.ty) {
+                    let (file, line, column, end_column) = self.located(ident.span);
+                    CheckedExpr::Unwrap {
+                        expr: Box::new(CheckedExpr::Load {
+                            name: ident.name.clone(),
+                            ty: binding.ty,
+                        }),
+                        ty: inner,
+                        file,
+                        line,
+                        column,
+                        end_column,
+                    }
+                } else {
+                    CheckedExpr::Load {
+                        name: ident.name.clone(),
+                        ty: binding.ty,
+                    }
+                }
+            }
             None => {
-                self.error(ident.span, format!("unknown name '{}'", ident.name));
+                if ident.name == "this" && self.current_static {
+                    self.error(ident.span, "static method cannot use 'this'");
+                } else if self.class_names.contains_key(&ident.name) {
+                    self.error(ident.span, format!("construct '{}' with new", ident.name));
+                } else {
+                    self.error(ident.span, format!("unknown name '{}'", ident.name));
+                }
                 self.dummy(None)
             }
         }
@@ -3946,6 +4898,958 @@ impl<'a> Checker<'a> {
                 Some(self.finish_float(&format!("-{lexeme}"), ty, span))
             }
             _ => None,
+        }
+    }
+
+    fn class_name(&self, id: ClassId) -> String {
+        self.classes
+            .get(id.0 as usize)
+            .map(|class| class.name.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn collect_classes(&mut self, program: &Program) {
+        for declaration in &program.classes {
+            if declaration.name.name == "Type" {
+                self.error(declaration.name.span, "'Type' is a built-in type");
+                continue;
+            }
+            if self.reject_reserved_name(&declaration.name.name, declaration.name.span) {
+                continue;
+            }
+            if let Some(previous) = self.class_names.get(&declaration.name.name).copied() {
+                let line = self.classes[previous.0 as usize].span.start.line;
+                self.error(
+                    declaration.name.span,
+                    format!(
+                        "class '{}' is already declared at line {line}",
+                        declaration.name.name
+                    ),
+                );
+                continue;
+            }
+            let mut seen = HashMap::new();
+            let mut fields = Vec::new();
+            for field in &declaration.fields {
+                let _ = self.reject_reserved_name(&field.name.name, field.name.span);
+                if seen.insert(field.name.name.clone(), field.span).is_some() {
+                    self.error(
+                        field.name.span,
+                        format!("duplicate member '{}'", field.name.name),
+                    );
+                }
+                fields.push(ClassFieldInfo {
+                    name: field.name.name.clone(),
+                    syntax: field.ty.clone(),
+                    ty: CanonicalType::Void,
+                    auto: field.conversion == ConversionMode::Auto,
+                    const_field: field.const_field,
+                    public: field.public,
+                    span: field.span,
+                });
+            }
+            let mut methods = Vec::new();
+            for method in &declaration.methods {
+                let _ = self.reject_reserved_name(&method.name.name, method.name.span);
+                if seen
+                    .insert(method.name.name.clone(), method.name.span)
+                    .is_some()
+                {
+                    self.error(
+                        method.name.span,
+                        format!("duplicate member '{}'", method.name.name),
+                    );
+                }
+                methods.push(ClassMethodInfo {
+                    name: method.name.name.clone(),
+                    params: Vec::new(),
+                    param_syntax: self.raw_params(&method.parameters),
+                    ret: CanonicalType::Void,
+                    ret_syntax: method.return_type.clone(),
+                    public: method.public,
+                    is_static: method.is_static,
+                    mutating: false,
+                    leaks: false,
+                    span: method.span,
+                });
+            }
+            let init = declaration.init.as_ref().map(|init| ClassInitInfo {
+                params: Vec::new(),
+                param_syntax: self.raw_params(&init.parameters),
+                public: init.public,
+            });
+            let id = ClassId(self.classes.len() as u32);
+            self.class_names.insert(declaration.name.name.clone(), id);
+            self.classes.push(ClassInfo {
+                name: declaration.name.name.clone(),
+                span: declaration.span,
+                fields,
+                methods,
+                init,
+            });
+        }
+    }
+
+    fn raw_params(&self, parameters: &[Parameter]) -> Vec<RawParam> {
+        parameters
+            .iter()
+            .map(|parameter| RawParam {
+                name: parameter.name.name.clone(),
+                syntax: parameter.ty.clone(),
+                auto: parameter.conversion == ConversionMode::Auto,
+                span: parameter.span,
+            })
+            .collect()
+    }
+
+    fn resolve_raw_params(&mut self, raw: &[RawParam]) -> Vec<ParamInfo> {
+        let mut names = HashMap::new();
+        let mut params = Vec::new();
+        for parameter in raw {
+            let ty = self.resolve_type(&parameter.syntax);
+            if ty == CanonicalType::Void {
+                self.error(parameter.span, "a parameter cannot have type void");
+            }
+            if ty.is_void_array() {
+                self.error(parameter.span, "void is not a valid array element type");
+            }
+            if names
+                .insert(parameter.name.clone(), parameter.span)
+                .is_some()
+            {
+                self.error(
+                    parameter.span,
+                    format!("duplicate parameter '{}'", parameter.name),
+                );
+            }
+            let _ = self.reject_reserved_name(&parameter.name, parameter.span);
+            params.push(ParamInfo {
+                name: parameter.name.clone(),
+                ty,
+                auto: parameter.auto,
+            });
+        }
+        params
+    }
+
+    fn finish_class_types(&mut self) {
+        let count = self.classes.len();
+        for index in 0..count {
+            let fields = self.classes[index]
+                .fields
+                .iter()
+                .map(|field| (field.syntax.clone(), field.span))
+                .collect::<Vec<_>>();
+            for (field_index, (syntax, span)) in fields.into_iter().enumerate() {
+                let ty = self.resolve_type(&syntax);
+                if ty == CanonicalType::Void {
+                    self.error(span, "a field cannot have type void");
+                }
+                if ty.is_void_array() {
+                    self.error(span, "void is not a valid array element type");
+                }
+                self.classes[index].fields[field_index].ty = ty;
+            }
+            let method_count = self.classes[index].methods.len();
+            for method_index in 0..method_count {
+                let syntax = self.classes[index].methods[method_index].ret_syntax.clone();
+                let span = self.classes[index].methods[method_index].span;
+                let ret = self.resolve_type(&syntax);
+                if ret.is_void_array() {
+                    self.error(span, "void is not a valid array element type");
+                }
+                let raw = self.classes[index].methods[method_index]
+                    .param_syntax
+                    .clone();
+                let params = self.resolve_raw_params(&raw);
+                self.classes[index].methods[method_index].ret = ret;
+                self.classes[index].methods[method_index].params = params;
+            }
+            if self.classes[index].init.is_some() {
+                let raw = self.classes[index]
+                    .init
+                    .as_ref()
+                    .map(|init| init.param_syntax.clone())
+                    .unwrap_or_default();
+                let params = self.resolve_raw_params(&raw);
+                if let Some(init) = self.classes[index].init.as_mut() {
+                    init.params = params;
+                }
+            }
+        }
+    }
+
+    fn prepare_class_effects(&mut self, program: &Program) {
+        for declaration in &program.classes {
+            let Some(id) = self.class_names.get(&declaration.name.name).copied() else {
+                continue;
+            };
+            if self.classes[id.0 as usize].span != declaration.span {
+                continue;
+            }
+            let flags = classes::method_flags(declaration);
+            for (method, flag) in self.classes[id.0 as usize].methods.iter_mut().zip(flags) {
+                if method.is_static {
+                    method.mutating = false;
+                    method.leaks = false;
+                } else {
+                    method.mutating = flag.mutating;
+                    method.leaks = flag.leaks;
+                }
+            }
+        }
+    }
+
+    fn check_class(&mut self, declaration: &ClassDecl) -> Option<CheckedClass> {
+        let id = self.class_names.get(&declaration.name.name).copied()?;
+        if self.classes[id.0 as usize].span != declaration.span {
+            return None;
+        }
+        let leaks = self.classes[id.0 as usize]
+            .methods
+            .iter()
+            .map(|method| method.leaks)
+            .collect::<Vec<_>>();
+        let defaults = declaration
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let ty = self.classes[id.0 as usize].fields[index].ty;
+                !field.const_field && self.default_value(ty, &mut Vec::new()).is_some()
+            })
+            .collect::<Vec<_>>();
+        for (span, message) in classes::init_issues(declaration, &leaks, &defaults) {
+            self.error(span, message);
+        }
+        self.current_class = Some(id);
+        let mut checked_fields = Vec::new();
+        for (index, field) in declaration.fields.iter().enumerate() {
+            let ty = self.classes[id.0 as usize].fields[index].ty;
+            let auto = self.classes[id.0 as usize].fields[index].auto;
+            let name = self.classes[id.0 as usize].fields[index].name.clone();
+            let const_field = self.classes[id.0 as usize].fields[index].const_field;
+            let initializer = if let Some(expr) = &field.initializer {
+                let value = self.check_expr(expr, Some(ty), false);
+                Some(self.apply_conversion(value, ty, auto, expr.span()))
+            } else if !const_field {
+                self.default_value(ty, &mut Vec::new())
+            } else {
+                None
+            };
+            checked_fields.push(CheckedClassField {
+                name,
+                ty,
+                const_field,
+                initializer,
+            });
+        }
+        self.current_class = None;
+        let init = if let Some(init) = &declaration.init {
+            let params = self.classes[id.0 as usize]
+                .init
+                .as_ref()
+                .map(|info| info.params.clone())
+                .unwrap_or_default();
+            self.in_init = true;
+            let body = self.check_member_body(
+                id,
+                &params,
+                CanonicalType::Void,
+                &init.body,
+                init.span,
+                "",
+                false,
+                false,
+            );
+            self.in_init = false;
+            Some(CheckedInit {
+                params: params
+                    .into_iter()
+                    .map(|param| (param.name, param.ty))
+                    .collect(),
+                body,
+            })
+        } else {
+            None
+        };
+        let mut methods = Vec::new();
+        for (index, method) in declaration.methods.iter().enumerate() {
+            let params = self.classes[id.0 as usize].methods[index].params.clone();
+            let ret = self.classes[id.0 as usize].methods[index].ret;
+            let mutating = self.classes[id.0 as usize].methods[index].mutating;
+            let is_static = self.classes[id.0 as usize].methods[index].is_static;
+            let name = self.classes[id.0 as usize].methods[index].name.clone();
+            let body = self.check_member_body(
+                id,
+                &params,
+                ret,
+                &method.body,
+                method.span,
+                &name,
+                true,
+                is_static,
+            );
+            methods.push(CheckedMethod {
+                name,
+                params: params
+                    .into_iter()
+                    .map(|param| (param.name, param.ty))
+                    .collect(),
+                ret,
+                body,
+                mutating,
+                is_static,
+            });
+        }
+        Some(CheckedClass {
+            name: declaration.name.name.clone(),
+            fields: checked_fields,
+            init,
+            methods,
+        })
+    }
+
+    fn check_member_body(
+        &mut self,
+        id: ClassId,
+        params: &[ParamInfo],
+        ret: CanonicalType,
+        body: &BlockStmt,
+        span: Span,
+        name: &str,
+        require_return: bool,
+        is_static: bool,
+    ) -> Vec<CheckedStmt> {
+        let saved_return = self.current_return;
+        let saved_class = self.current_class;
+        let saved_static = self.current_static;
+        self.current_return = ret;
+        self.current_class = Some(id);
+        self.current_static = is_static;
+        self.scopes.push(HashMap::new());
+        if !is_static {
+            self.scopes.last_mut().unwrap().insert(
+                "this".to_string(),
+                Binding {
+                    ty: CanonicalType::Class(id),
+                    mutable: false,
+                    auto: false,
+                    ready: true,
+                },
+            );
+        }
+        for param in params {
+            if param.ty != CanonicalType::Void {
+                self.scopes.last_mut().unwrap().insert(
+                    param.name.clone(),
+                    Binding {
+                        ty: param.ty,
+                        mutable: true,
+                        auto: param.auto,
+                        ready: true,
+                    },
+                );
+            }
+        }
+        let mut checked = Vec::new();
+        for statement in &body.statements {
+            if let Some(stmt) = self.check_stmt(statement) {
+                checked.push(stmt);
+            }
+        }
+        if require_return && ret != CanonicalType::Void && !guaranteed_return(&body.statements) {
+            self.error(
+                span,
+                format!("function '{name}' must return a value on every path"),
+            );
+        }
+        self.scopes.pop();
+        self.current_return = saved_return;
+        self.current_class = saved_class;
+        self.current_static = saved_static;
+        checked
+    }
+
+    fn check_new(&mut self, expr: &NewExpr) -> CheckedExpr {
+        let Some(id) = self.class_names.get(&expr.name.name).copied() else {
+            self.error(
+                expr.name.span,
+                format!("unknown class '{}'", expr.name.name),
+            );
+            for argument in &expr.arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(None);
+        };
+        self.check_construct(id, &expr.arguments, expr.span)
+    }
+
+    fn check_static_call(
+        &mut self,
+        member: &MemberExpr,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        let Expr::Identifier(object) = &*member.object else {
+            return self.dummy(None);
+        };
+        let Some(id) = self.class_names.get(&object.name).copied() else {
+            self.error(object.span, format!("unknown class '{}'", object.name));
+            return self.dummy(None);
+        };
+        let Some(index) = self.classes[id.0 as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == member.member.name)
+        else {
+            self.error(
+                member.member.span,
+                format!("unknown method '{}'", member.member.name),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(None);
+        };
+        let is_static = self.classes[id.0 as usize].methods[index].is_static;
+        let public = self.classes[id.0 as usize].methods[index].public;
+        let ret = self.classes[id.0 as usize].methods[index].ret;
+        let params = self.classes[id.0 as usize].methods[index]
+            .params
+            .iter()
+            .map(|param| (param.ty, param.auto))
+            .collect::<Vec<_>>();
+        let name = self.classes[id.0 as usize].methods[index].name.clone();
+        let class_name = self.class_name(id);
+        if !is_static {
+            self.error(
+                member.member.span,
+                format!("method '{name}' requires an instance of '{class_name}'"),
+            );
+        }
+        if !public && self.current_class != Some(id) {
+            self.error(
+                member.member.span,
+                format!("method '{name}' is not accessible"),
+            );
+        }
+        let args = self.check_arguments(arguments, &params, span);
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::ClassCall {
+            class: id,
+            method: index,
+            object: None,
+            args,
+            ty: ret,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn check_construct(&mut self, id: ClassId, arguments: &[Expr], span: Span) -> CheckedExpr {
+        let name = self.class_name(id);
+        let init = self.classes[id.0 as usize]
+            .init
+            .as_ref()
+            .map(|init| (init.public, init.params.clone()));
+        let (file, line, column, end_column) = self.located(span);
+        let args = if let Some((public, params)) = init {
+            if !public && self.current_class != Some(id) {
+                self.error(span, format!("constructor of '{name}' is not accessible"));
+            }
+            let pairs = params
+                .iter()
+                .map(|param| (param.ty, param.auto))
+                .collect::<Vec<_>>();
+            self.check_arguments(arguments, &pairs, span)
+        } else if arguments.is_empty() {
+            Vec::new()
+        } else {
+            self.error(
+                span,
+                format!("expected 0 arguments, found {}", arguments.len()),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            Vec::new()
+        };
+        CheckedExpr::ClassNew {
+            class: id,
+            args,
+            ty: CanonicalType::Class(id),
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn finish_class_get(
+        &mut self,
+        object: CheckedExpr,
+        id: ClassId,
+        expr: &MemberExpr,
+    ) -> CheckedExpr {
+        if let Some(index) = self.classes[id.0 as usize]
+            .fields
+            .iter()
+            .position(|field| field.name == expr.member.name)
+        {
+            let public = self.classes[id.0 as usize].fields[index].public;
+            let ty = self.classes[id.0 as usize].fields[index].ty;
+            let name = self.classes[id.0 as usize].fields[index].name.clone();
+            if !public && self.current_class != Some(id) {
+                self.error(
+                    expr.member.span,
+                    format!("field '{name}' is not accessible"),
+                );
+            }
+            return CheckedExpr::ClassGet {
+                object: Box::new(object),
+                class: id,
+                field: index,
+                ty,
+            };
+        }
+        if self.classes[id.0 as usize]
+            .methods
+            .iter()
+            .any(|method| method.name == expr.member.name)
+        {
+            self.error(
+                expr.span,
+                format!("method '{}' must be called", expr.member.name),
+            );
+            return self.dummy(None);
+        }
+        self.error(
+            expr.member.span,
+            format!("unknown field '{}'", expr.member.name),
+        );
+        self.dummy(None)
+    }
+
+    fn finish_class_set(
+        &mut self,
+        object: CheckedExpr,
+        id: ClassId,
+        member: &MemberExpr,
+        value: &Expr,
+        op: Option<BinaryOperator>,
+    ) -> CheckedExpr {
+        let Some(index) = self.classes[id.0 as usize]
+            .fields
+            .iter()
+            .position(|field| field.name == member.member.name)
+        else {
+            if self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .any(|method| method.name == member.member.name)
+            {
+                self.error(
+                    member.span,
+                    format!("method '{}' must be called", member.member.name),
+                );
+            } else {
+                self.error(
+                    member.member.span,
+                    format!("unknown field '{}'", member.member.name),
+                );
+            }
+            let _ = self.check_expr(value, None, false);
+            return self.dummy(None);
+        };
+        let public = self.classes[id.0 as usize].fields[index].public;
+        let const_field = self.classes[id.0 as usize].fields[index].const_field;
+        let ty = self.classes[id.0 as usize].fields[index].ty;
+        let auto = self.classes[id.0 as usize].fields[index].auto;
+        let name = self.classes[id.0 as usize].fields[index].name.clone();
+        if !public && self.current_class != Some(id) {
+            self.error(
+                member.member.span,
+                format!("field '{name}' is not accessible"),
+            );
+        }
+        if const_field && !self.in_init {
+            self.error(
+                member.span,
+                format!("cannot assign to constant field '{name}'"),
+            );
+        }
+        if let Some(root) = self.frozen_path(&member.object) {
+            self.error(member.span, format!("cannot assign to constant '{root}'"));
+        }
+        let current = CheckedExpr::ClassGet {
+            object: Box::new(object.clone()),
+            class: id,
+            field: index,
+            ty,
+        };
+        let value = self.store_value(op, current, value, ty, auto, value.span());
+        let (file, line, column, end_column) = self.located(member.span);
+        CheckedExpr::ClassSet {
+            object: Box::new(object),
+            class: id,
+            field: index,
+            value: Box::new(value),
+            ty,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn finish_class_call(
+        &mut self,
+        object: CheckedExpr,
+        id: ClassId,
+        member: &MemberExpr,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        let Some(index) = self.classes[id.0 as usize]
+            .methods
+            .iter()
+            .position(|method| method.name == member.member.name)
+        else {
+            if let Some(field) = self.classes[id.0 as usize]
+                .fields
+                .iter()
+                .find(|field| field.name == member.member.name)
+            {
+                let spelled = self.spell(field.ty);
+                self.error(
+                    member.span,
+                    format!("cannot call a value of type '{spelled}'"),
+                );
+            } else {
+                self.error(
+                    member.member.span,
+                    format!("unknown method '{}'", member.member.name),
+                );
+            }
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(None);
+        };
+        let public = self.classes[id.0 as usize].methods[index].public;
+        let is_static = self.classes[id.0 as usize].methods[index].is_static;
+        let mutating = self.classes[id.0 as usize].methods[index].mutating;
+        let ret = self.classes[id.0 as usize].methods[index].ret;
+        let params = self.classes[id.0 as usize].methods[index]
+            .params
+            .iter()
+            .map(|param| (param.ty, param.auto))
+            .collect::<Vec<_>>();
+        let name = self.classes[id.0 as usize].methods[index].name.clone();
+        if !public && self.current_class != Some(id) {
+            self.error(
+                member.member.span,
+                format!("method '{name}' is not accessible"),
+            );
+        }
+        if mutating && !is_static {
+            if let Some(root) = self.frozen_path(&member.object) {
+                self.error(
+                    span,
+                    format!("cannot call mutating method '{name}' on constant '{root}'"),
+                );
+            }
+        }
+        let args = self.check_arguments(arguments, &params, span);
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::ClassCall {
+            class: id,
+            method: index,
+            object: Some(Box::new(object)),
+            args,
+            ty: ret,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn peek_type(&self, expr: &Expr) -> Option<CanonicalType> {
+        match unwrap_parens(expr) {
+            Expr::Identifier(ident) => {
+                if let Some(ty) = self.narrowed_type(&ident.name) {
+                    return Some(ty);
+                }
+                self.lookup(&ident.name)
+                    .map(|binding| binding.ty)
+                    .or_else(|| {
+                        if ident.name == "this" {
+                            self.current_class.map(CanonicalType::Class)
+                        } else {
+                            None
+                        }
+                    })
+            }
+            Expr::Call(call) => self.peek_call(call),
+            Expr::Member(member) => {
+                let object = self.peek_type(&member.object)?;
+                let object = object.optional_inner().unwrap_or(object);
+                if let CanonicalType::Class(id) = object {
+                    let class = self.classes.get(id.0 as usize)?;
+                    if let Some(field) = class
+                        .fields
+                        .iter()
+                        .find(|field| field.name == member.member.name)
+                    {
+                        return Some(field.ty);
+                    }
+                    if let Some(method) = class
+                        .methods
+                        .iter()
+                        .find(|method| method.name == member.member.name)
+                    {
+                        return Some(method.ret);
+                    }
+                    return None;
+                }
+                if let CanonicalType::Record(id) = object {
+                    return self.field_index(id, &member.member.name).map(|(_, ty)| ty);
+                }
+                object.element()
+            }
+            Expr::Index(index) => self.peek_type(&index.object).and_then(|ty| ty.element()),
+            Expr::New(new_expr) => self
+                .class_names
+                .get(&new_expr.name.name)
+                .copied()
+                .map(CanonicalType::Class),
+            _ => None,
+        }
+    }
+
+    fn peek_call(&self, call: &CallExpr) -> Option<CanonicalType> {
+        match call.callee.as_ref() {
+            Expr::Identifier(ident) => self
+                .functions
+                .get(&ident.name)
+                .map(|signature| signature.ret),
+            Expr::New(new_expr) => self
+                .class_names
+                .get(&new_expr.name.name)
+                .copied()
+                .map(CanonicalType::Class),
+            Expr::Member(member) => self.peek_type(&Expr::Member(member.clone())),
+            _ => None,
+        }
+    }
+
+    fn frozen_path(&self, expr: &Expr) -> Option<String> {
+        match unwrap_parens(expr) {
+            Expr::Identifier(ident) => {
+                if ident.name == "this" {
+                    return None;
+                }
+                let binding = self.lookup(&ident.name)?;
+                if !binding.mutable {
+                    Some(ident.name.clone())
+                } else {
+                    None
+                }
+            }
+            Expr::Member(member) => {
+                if let Some(name) = self.frozen_path(&member.object) {
+                    return Some(name);
+                }
+                if let Some(CanonicalType::Class(id)) = self.peek_type(&member.object) {
+                    let const_field = self.classes.get(id.0 as usize).is_some_and(|class| {
+                        class
+                            .fields
+                            .iter()
+                            .any(|field| field.name == member.member.name && field.const_field)
+                    });
+                    if const_field {
+                        return Some(member.member.name.clone());
+                    }
+                }
+                None
+            }
+            Expr::Index(index) => self.frozen_path(&index.object),
+            _ => None,
+        }
+    }
+
+    fn null_literal(&mut self, span: Span, expected: Option<CanonicalType>) -> CheckedExpr {
+        if let Some(target) = expected.filter(|ty| ty.is_optional()) {
+            return CheckedExpr::Null { ty: target };
+        }
+        if let Some(target) = expected {
+            self.error(
+                span,
+                format!(
+                    "null requires a nullable type, found '{}'",
+                    self.spell(target)
+                ),
+            );
+            return self.dummy(Some(target));
+        }
+        self.error(span, "null requires a nullable type");
+        self.dummy(None)
+    }
+
+    fn check_null_compare(&mut self, expr: &BinaryExpr) -> CheckedExpr {
+        let left_null = expr_is_null(&expr.left);
+        let right_null = expr_is_null(&expr.right);
+        if left_null && right_null {
+            self.error(expr.span, "null requires a nullable type");
+            return CheckedExpr::Bool(false);
+        }
+        let (value_expr, null_expr, value_on_left) = if right_null {
+            (&expr.left, &expr.right, true)
+        } else {
+            (&expr.right, &expr.left, false)
+        };
+        let value = self.check_expr(value_expr, None, false);
+        if !value.ty().is_optional() {
+            self.error(
+                expr.span,
+                format!("null cannot be compared with '{}'", self.spell(value.ty())),
+            );
+        }
+        let null = self.check_expr(null_expr, Some(value.ty()), false);
+        let (left, right) = if value_on_left {
+            (value, null)
+        } else {
+            (null, value)
+        };
+        CheckedExpr::Binary {
+            op: expr.operator,
+            ty: CanonicalType::Bln,
+            left: Box::new(left),
+            right: Box::new(right),
+            compare: Some(CompareMode::Null),
+            span: expr.span,
+        }
+    }
+
+    fn null_split(
+        &self,
+        expr: &Expr,
+    ) -> (Vec<(String, CanonicalType)>, Vec<(String, CanonicalType)>) {
+        let Expr::Binary(binary) = unwrap_parens(expr) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (ident, positive) = match (
+            binary.operator,
+            unwrap_parens(&binary.left),
+            unwrap_parens(&binary.right),
+        ) {
+            (
+                BinaryOperator::NotEqual,
+                Expr::Identifier(ident),
+                Expr::Literal(LiteralExpr::Null { .. }),
+            )
+            | (
+                BinaryOperator::NotEqual,
+                Expr::Literal(LiteralExpr::Null { .. }),
+                Expr::Identifier(ident),
+            ) => (ident, true),
+            (
+                BinaryOperator::Equal,
+                Expr::Identifier(ident),
+                Expr::Literal(LiteralExpr::Null { .. }),
+            )
+            | (
+                BinaryOperator::Equal,
+                Expr::Literal(LiteralExpr::Null { .. }),
+                Expr::Identifier(ident),
+            ) => (ident, false),
+            _ => return (Vec::new(), Vec::new()),
+        };
+        let Some(inner) = self
+            .lookup(&ident.name)
+            .and_then(|binding| binding.ty.optional_inner())
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let pair = vec![(ident.name.clone(), inner)];
+        if positive {
+            (pair, Vec::new())
+        } else {
+            (Vec::new(), pair)
+        }
+    }
+
+    fn push_narrow(&mut self, pairs: &[(String, CanonicalType)]) {
+        self.narrowed.push(pairs.iter().cloned().collect());
+    }
+
+    fn pop_narrow(&mut self) {
+        self.narrowed.pop();
+    }
+
+    fn narrowed_type(&self, name: &str) -> Option<CanonicalType> {
+        for frame in self.narrowed.iter().rev() {
+            if let Some(ty) = frame.get(name) {
+                return Some(*ty);
+            }
+        }
+        None
+    }
+
+    fn clear_narrow(&mut self, name: &str) {
+        for frame in &mut self.narrowed {
+            frame.remove(name);
+        }
+    }
+
+    fn mark_ready(&mut self, name: &str) {
+        if let Some(binding) = self.binding_mut(name) {
+            binding.ready = true;
+        }
+        self.clear_narrow(name);
+    }
+
+    fn binding_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.get_mut(name) {
+                return Some(binding);
+            }
+        }
+        None
+    }
+
+    fn ready_snapshot(&self) -> HashMap<String, bool> {
+        let mut map = HashMap::new();
+        for scope in &self.scopes {
+            for (name, binding) in scope {
+                map.insert(name.clone(), binding.ready);
+            }
+        }
+        map
+    }
+
+    fn restore_ready(&mut self, map: &HashMap<String, bool>) {
+        for (name, ready) in map {
+            if let Some(binding) = self.binding_mut(name) {
+                binding.ready = *ready;
+            }
+        }
+    }
+
+    fn merge_ready(
+        &mut self,
+        then_ready: &HashMap<String, bool>,
+        else_ready: &HashMap<String, bool>,
+    ) {
+        for (name, then_flag) in then_ready {
+            let else_flag = else_ready.get(name).copied().unwrap_or(false);
+            if let Some(binding) = self.binding_mut(name) {
+                binding.ready = *then_flag && else_flag;
+            }
         }
     }
 
@@ -4064,6 +5968,10 @@ fn manifest_type(ty: &ManifestType) -> Option<CanonicalType> {
     canonical_name(&ty.name)
 }
 
+fn expr_is_null(expr: &Expr) -> bool {
+    matches!(unwrap_parens(expr), Expr::Literal(LiteralExpr::Null { .. }))
+}
+
 fn is_numeric_literal(expr: &Expr) -> bool {
     match unwrap_parens(expr) {
         Expr::Literal(LiteralExpr::Integer { .. } | LiteralExpr::Float { .. }) => true,
@@ -4102,6 +6010,8 @@ fn operator_token(op: BinaryOperator) -> &'static str {
         BinaryOperator::Multiply => "*",
         BinaryOperator::Divide => "/",
         BinaryOperator::Remainder => "%",
+        BinaryOperator::Power => "**",
+        BinaryOperator::FloorDiv => "//",
         BinaryOperator::Less => "<",
         BinaryOperator::LessEqual => "<=",
         BinaryOperator::Greater => ">",
@@ -4154,6 +6064,7 @@ fn catch_type(name: &str) -> Option<&'static str> {
         "IoError" => "IoError",
         "ExternalLibraryError" => "ExternalLibraryError",
         "RuntimeInternalError" => "RuntimeInternalError",
+        "ConstViolationError" => "ConstViolationError",
         _ => return None,
     })
 }

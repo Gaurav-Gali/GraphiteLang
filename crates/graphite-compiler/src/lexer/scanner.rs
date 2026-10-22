@@ -95,12 +95,43 @@ impl<'a> Scanner<'a> {
                 }
             }
             ';' => self.emit(TokenKind::Semicolon, start, None),
-            '*' => self.emit(TokenKind::Star, start, None),
-            '%' => self.emit(TokenKind::Percent, start, None),
-            '/' => self.emit(TokenKind::Slash, start, None),
+            '*' => {
+                if self.peek() == Some('*') && self.peek_second() == Some('=') {
+                    self.bump();
+                    self.bump();
+                    self.emit(TokenKind::StarStarEqual, start, None);
+                } else if self.consume('*') {
+                    self.emit(TokenKind::StarStar, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::StarEqual, start, None);
+                } else {
+                    self.emit(TokenKind::Star, start, None);
+                }
+            }
+            '%' => {
+                if self.consume('=') {
+                    self.emit(TokenKind::PercentEqual, start, None);
+                } else {
+                    self.emit(TokenKind::Percent, start, None);
+                }
+            }
+            '/' => {
+                // `//` stays a line comment. `//=` is floor-division assignment.
+                if self.peek() == Some('/') && self.peek_second() == Some('=') {
+                    self.bump();
+                    self.bump();
+                    self.emit(TokenKind::SlashSlashEqual, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::SlashEqual, start, None);
+                } else {
+                    self.emit(TokenKind::Slash, start, None);
+                }
+            }
             '+' => {
                 if self.consume('+') {
                     self.emit(TokenKind::PlusPlus, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::PlusEqual, start, None);
                 } else {
                     self.emit(TokenKind::Plus, start, None);
                 }
@@ -108,6 +139,8 @@ impl<'a> Scanner<'a> {
             '-' => {
                 if self.consume('-') {
                     self.emit(TokenKind::MinusMinus, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::MinusEqual, start, None);
                 } else {
                     self.emit(TokenKind::Minus, start, None);
                 }
@@ -165,12 +198,7 @@ impl<'a> Scanner<'a> {
                 }
             }
             ':' => self.emit(TokenKind::Colon, start, None),
-            '?' => self.error(
-                DiagnosticKind::UnexpectedCharacter,
-                start,
-                "unexpected character '?'",
-                Some("'?' is not a v0.1 operator".to_string()),
-            ),
+            '?' => self.emit(TokenKind::Question, start, None),
             ch if is_ident_start(ch) => self.finish_identifier(start),
             _ => self.unexpected(start),
         }
@@ -438,7 +466,9 @@ impl<'a> Scanner<'a> {
                 Some(' ' | '\t' | '\n' | '\r') => {
                     self.bump();
                 }
-                Some('/') if self.peek_second() == Some('/') => self.skip_line_comment(),
+                Some('/') if self.peek_second() == Some('/') && self.peek_third() != Some('=') => {
+                    self.skip_line_comment()
+                }
                 Some('/') if self.peek_second() == Some('*') => self.skip_block_comment(),
                 _ => return,
             }
@@ -574,6 +604,13 @@ impl<'a> Scanner<'a> {
 
     fn peek_second(&self) -> Option<char> {
         let mut chars = self.source[self.offset..].chars();
+        chars.next()?;
+        chars.next()
+    }
+
+    fn peek_third(&self) -> Option<char> {
+        let mut chars = self.source[self.offset..].chars();
+        chars.next()?;
         chars.next()?;
         chars.next()
     }

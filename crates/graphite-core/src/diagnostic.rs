@@ -337,6 +337,26 @@ pub fn external_library(detail: impl Into<String>) -> RuntimeError {
     }
 }
 
+pub fn null_access(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "NullAccessError",
+        "GRF-RUN-015",
+        "null value",
+        "null value",
+    )
+}
+
+pub fn const_violation(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "ConstViolationError",
+        "GRF-RUN-014",
+        "mutation of frozen value",
+        "mutation of frozen value",
+    )
+}
+
 pub fn runtime_internal(detail: impl Into<String>) -> RuntimeError {
     RuntimeError {
         kind: "RuntimeInternalError",
@@ -553,5 +573,16 @@ mod tests {
         assert_eq!(internal.kind_name(), "RuntimeInternalError");
         assert_eq!(internal.code, "GRF-RUN-013");
         assert_ne!(input_output("eof").kind_name(), "ExternalLibraryError");
+        let frozen = const_violation(Site {
+            file: "main.grf",
+            line: 3,
+            column: 4,
+            end_column: 8,
+            excerpt: "alias",
+        });
+        assert_eq!(frozen.kind_name(), "ConstViolationError");
+        assert_eq!(frozen.code, "GRF-RUN-014");
+        assert_eq!(frozen.message_text(), "mutation of frozen value");
+        assert_eq!(external_library("x").code, "GRF-RUN-012");
     }
 }

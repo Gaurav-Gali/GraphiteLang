@@ -1,0 +1,396 @@
+import grf.io;
+
+// Every class form the language accepts, in one program.
+// Run: grf run examples/classes/oop.grf
+//
+// A class is a nominal reference type. Fields use `Type name`, the same
+// shape as other declarations. Construct only with `new ClassName(args)`.
+// The constructor is the class name. There is no inheritance, no static
+// fields, no overloading, no super, and no destructors.
+
+int Cell(int start) {
+    io.println("function");
+    return start;
+}
+
+int stamp(str label) {
+    io.println(label);
+    return 1;
+}
+
+int fail() {
+    return 1 / 0;
+}
+
+type Shape {
+    height: flt,
+    width: flt,
+}
+
+void share(Cell item) {
+    item.value += 1;
+}
+
+class Cell {
+    int value;
+
+    Cell(int value) {
+        this.value = value;
+    }
+
+    int getValue() {
+        return this.value;
+    }
+
+    void setValue(int next) {
+        this.value = next;
+    }
+
+    void grow() {
+        this.value *= 2;
+    }
+
+    Cell same() {
+        return this;
+    }
+
+    static int abs(int value) {
+        if (value < 0) {
+            return 0 - value;
+        }
+        return value;
+    }
+
+    private static int sign(int value) {
+        if (value < 0) {
+            return 0 - 1;
+        }
+        return 1;
+    }
+
+    static int direction(int value) {
+        return Cell.sign(value);
+    }
+}
+
+class Account {
+    private int balance = 0;
+    public auto int shown = "10";
+
+    public void deposit(int amount) {
+        this.balance = this.balance + amount;
+    }
+
+    private int scaled() {
+        return this.balance * 2;
+    }
+
+    public int report() {
+        return this.scaled();
+    }
+
+    public int getShown() {
+        return this.shown;
+    }
+
+    public void setShown(str amount) {
+        this.shown = amount;
+    }
+}
+
+class Badge {
+    const int code;
+    int hits;
+
+    Badge(int code) {
+        this.code = code;
+        return;
+    }
+
+    int read() {
+        return this.code;
+    }
+
+    void hit() {
+        this.hits += 1;
+    }
+}
+
+class Marker {
+    bln ready = true;
+    int count;
+}
+
+class Defaults {
+    int count;
+    uint total;
+    flt rate;
+    bln ready;
+    chr mark;
+    str label;
+    int[] scores;
+    int[2] pair;
+    map<str, int> tags;
+    int? missing;
+}
+
+class Token {
+    str text;
+
+    private Token(str text) {
+        this.text = text;
+    }
+
+    static Token make(str text) {
+        return new Token(text);
+    }
+
+    Token copy() {
+        return new Token(this.text);
+    }
+}
+
+class Link {
+    int value;
+    Link? next;
+
+    Link(int value) {
+        this.value = value;
+    }
+}
+
+class Order {
+    int first = stamp("field");
+
+    Order() {
+        io.println("constructor");
+    }
+}
+
+class Boom {
+    int value = fail();
+}
+
+class Sheet {
+    Shape shape;
+    Cell item;
+    Cell[] items;
+    map<str, Cell> named;
+    Link? head;
+
+    Sheet(Cell item) {
+        this.item = item;
+        this.items = [item];
+        this.head = null;
+    }
+
+    void resize(flt height, flt width) {
+        this.shape.height = height;
+        this.shape.width = width;
+    }
+
+    void bump() {
+        this.item.value += 3;
+    }
+
+    int first() {
+        return this.items[0].getValue();
+    }
+
+    void remember(str name, Cell item) {
+        this.named[name] = item;
+    }
+
+    Cell find(str name) {
+        return this.named.get(name);
+    }
+}
+
+class Holder {
+    const Cell item;
+    int value;
+
+    Holder(Cell item) {
+        this.item = item;
+    }
+
+    void setValue(int next) {
+        this.value = next;
+    }
+
+    int itemValue() {
+        return this.item.getValue();
+    }
+}
+
+class Node {
+    Node next;
+
+    Node() {
+        this.next = this;
+    }
+
+    int ping() {
+        return 1;
+    }
+}
+
+class MathBox {
+    int value;
+
+    MathBox(int value) {
+        this.value = value;
+    }
+
+    void mix() {
+        this.value += 4;
+        this.value -= 1;
+        this.value *= 2;
+        this.value /= 3;
+        this.value %= 5;
+        this.value **= 3;
+        this.value //= 2;
+    }
+
+    void floor() {
+        this.value = 0 - 5;
+        this.value //= 2;
+    }
+
+    int power(int exponent) {
+        return this.value ** exponent;
+    }
+}
+
+void main() {
+    io.println("construct");
+    io.println(Cell(1));
+    Cell first = new Cell(1);
+    Cell alias = first;
+    Cell second = new Cell(2);
+    io.println(first == alias);
+    io.println(first == second);
+    io.println(first != second);
+    alias.setValue(4);
+    io.println(first.getValue());
+    io.println(first.same() == first);
+    share(first);
+    io.println(first.getValue());
+
+    io.println("static");
+    io.println(Cell.abs(0 - 3));
+    io.println(first.abs(0 - 3));
+    io.println(Cell.direction(0 - 4));
+
+    io.println("later");
+    Cell pending;
+    pending = new Cell(8);
+    io.println(pending.getValue());
+
+    io.println("private");
+    Account account = new Account();
+    account.deposit(5);
+    io.println(account.report());
+    io.println(account.getShown());
+    account.setShown("4");
+    io.println(account.getShown());
+
+    io.println("const field");
+    Badge badge = new Badge(7);
+    badge.hit();
+    io.println(badge.read());
+    io.println(badge.hits);
+
+    io.println("defaults");
+    Marker marker = new Marker();
+    io.println(marker.ready);
+    io.println(marker.count);
+    Defaults blank = new Defaults();
+    io.println(blank.count);
+    io.println(blank.total);
+    io.println(blank.rate);
+    io.println(blank.ready);
+    io.println(int(blank.mark));
+    io.println(f"[{blank.label}]");
+    io.println(blank.scores);
+    io.println(blank.pair);
+    io.println(blank.tags);
+    io.println(blank.missing);
+
+    io.println("factory");
+    Token made = Token.make("abc");
+    Token copied = made.copy();
+    io.println(made.text);
+    io.println(copied.text);
+    io.println(made == copied);
+
+    io.println("order");
+    Order built = new Order();
+    io.println(built.first);
+
+    io.println("failure");
+    try {
+        Boom crashed = new Boom();
+        io.println(crashed.value);
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+    }
+
+    io.println("nested");
+    Sheet sheet = new Sheet(first);
+    sheet.resize(2.0, 5.0);
+    io.println(sheet.shape.height);
+    io.println(sheet.shape.width);
+    sheet.shape.height = 3.0;
+    io.println(sheet.shape.height);
+    sheet.bump();
+    io.println(sheet.item.getValue());
+    io.println(sheet.first());
+    io.println(sheet.items[0] == first);
+    sheet.remember("a", second);
+    io.println(sheet.find("a") == second);
+    second.setValue(9);
+    io.println(sheet.find("a").getValue());
+
+    io.println("nullable");
+    Link head = new Link(1);
+    head.next = new Link(2);
+    head.next.next = new Link(3);
+    sheet.head = head;
+    Link? cursor = sheet.head;
+    loop (cursor != null) {
+        io.println(cursor.value);
+        cursor = cursor.next;
+    }
+
+    io.println("freeze");
+    Cell live = new Cell(5);
+    const Cell frozen = live;
+    Holder holder = new Holder(live);
+    holder.setValue(2);
+    io.println(holder.value);
+    io.println(holder.itemValue());
+    io.println(frozen.getValue());
+    try {
+        live.setValue(9);
+        io.println("mutated");
+    } catch (ConstViolationError error) {
+        io.println(error.kind());
+    }
+
+    io.println("cycle");
+    Node node = new Node();
+    io.println(node.next == node);
+    io.println(node.next.ping());
+
+    io.println("operators");
+    MathBox box = new MathBox(3);
+    box.mix();
+    io.println(box.value);
+    box.floor();
+    io.println(box.value);
+    box.value = 2;
+    io.println(box.power(10));
+    first.grow();
+    io.println(first.getValue());
+}

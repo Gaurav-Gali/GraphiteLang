@@ -1,34 +1,21 @@
 import grf.io;
 
-type User {
-  name : auto str,
-  age : auto int,
-}
-
-type Device {
-  device : str,
-}
-
 void main() {
-  Device d1 = {device : "laptop"};
-  Device d2 = {device : "mobile"};
-  User u1 = {name : "graphite", age : 21};
-  
-  map<str, Device[]> m = {
-    u1.name : [
-      d1, d2
-    ],
-  };
+  int[] arr = [1,2,3,4];
 
-  io.println(m);
+  arrayOps ops = new arrayOps(arr);
 
-  try {
-    auto int a = io.input(">> ");
-    int b = a / 0;
-  } catch(DivisionByZeroError err) {
-    io.println(err.kind());
-  } catch(Error err) {
-    io.println(err.message());
+  io.println(ops.get());
+}
+
+class arrayOps {
+  private int[] arr;
+
+  arrayOps(int[] arr) {
+    this.arr = arr;
+  }
+
+  int[] get() {
+    return this.arr;
   }
 }
-

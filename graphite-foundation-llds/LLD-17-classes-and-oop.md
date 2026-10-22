@@ -1,6 +1,6 @@
-# LLD-15 --- Stage 13: Classes and Object-Oriented Programming
+# LLD-17 --- Stage 13: Classes and Object-Oriented Programming
 
-**Status:** Proposed implementation specification\
+**Status:** Implementation specification\
 **Stage:** 13\
 **Depends on:** Stages 7--12, especially records, collections, universal
 `const`, `Type`/`typeOf()`, structured diagnostics, and exceptions.
@@ -52,18 +52,29 @@ dynamic dispatch.
 
   Receiver                            `this`
 
-  Construction                        `ClassName(arguments)`
+  Construction                        `new ClassName(arguments)`
 
-  Constructor                         At most one `init(...)`; if absent,
-                                      only zero-argument construction is
-                                      possible when all fields are
-                                      initialized
+  Constructor                         At most one, named after the class.
+                                      If absent, only `new ClassName()`
+                                      is possible when all fields are
+                                      initialized. An omitted modifier
+                                      means `public`
 
-  Visibility                          `public` / `private`; omitted
-                                      modifier defaults to `private`
+  Visibility                          `public` / `private`. Fields,
+                                      methods, and the constructor
+                                      default to `public`
 
-  Methods                             Instance methods only; one method
-                                      per name per class
+  Fields                              `Type name`, including `auto T`,
+                                      with `public` or `private` before
+                                      the type. Same fixed-target
+                                      conversions as record fields.
+                                      Static fields are not supported
+
+  Methods                             Instance methods and `static`
+                                      methods; one method per name per
+                                      class. Static methods have no
+                                      `this` and are called as
+                                      `ClassName.method(arguments)`
 
   Inheritance/interfaces/traits       Unsupported and deferred
 
@@ -87,10 +98,11 @@ dynamic dispatch.
                                       type only; no object/member
                                       introspection
 
-  Rust lowering                       Generated per-class representation
-                                      and shared-identity handle;
-                                      implementation must preserve this
-                                      spec
+  Rust lowering                       Per-class data in a runtime heap.
+                                      Values are handles. A tracing
+                                      collector reclaims unreachable
+                                      cycles. Addresses and destructor
+                                      timing are not observable
 
   Exceptions                          Existing Stage 12 runtime-error
                                       propagation; add a structured
@@ -105,7 +117,7 @@ dynamic dispatch.
 class Counter {
     private int value = 0;
 
-    public init(int start) {
+    Counter(int start) {
         this.value = start;
     }
 
@@ -125,9 +137,18 @@ because declaration collection builds member tables before checking
 bodies. Fields and methods are declarations, not executable statements.
 
 Class names occupy the existing type namespace and must not collide with
-another class or record type. Ordinary value/function namespace behavior
-remains unchanged. Class fields must have declared, statically known
-types; no untyped escape hatch is introduced.
+another class or record type. Ordinary value and function names stay in
+their own namespace, so a function may use the same spelling as a class.
+In an expression, `new Counter(arguments)` constructs the class.
+`Counter(arguments)` is an ordinary function call. Construction does
+not fall back to a function, and a function call does not construct.
+
+Class fields must have declared, statically known types. `auto T` is
+allowed and has the same meaning as on a record field: the field's type
+is the fixed target `T`, not a dynamic type. `auto int` is `int64`.
+Initialization and later writes use the centralized conversion registry.
+A failed conversion remains `NumericConversionError` (`GRF-RUN-006`).
+No untyped escape hatch is introduced.
 
 ### 5.2 Fields
 
@@ -135,44 +156,58 @@ types; no untyped escape hatch is introduced.
 public str displayName;
 private int loginCount = 0;
 private const str id = "fixed";
+int count = 1;
+private auto int converted = "1";
 ```
 
-Conceptual field grammar:
+Field grammar matches an ordinary declaration. `public` and `private`
+sit before the type, the same way `auto` does. The declaration ends
+with a semicolon:
 
 ``` text
-[visibility] [const] Type fieldName [= initializer] ;
+[visibility] [const] [auto] Type fieldName [= initializer] ;
 ```
 
-Use the language's established field/type declaration punctuation. Field
-initializers are evaluated separately for every instance in declaration
-order, before `init`. An initializer cannot use `this` or refer to
-another instance field because the instance is not initialized yet. Use
-the constructor for argument-dependent initialization. Initializers must
-type-check under the existing conversion rules.
+An omitted visibility modifier means `public`, so `int age;` is a
+public field. `Type` includes `auto T`, written `auto int count`.
+Methods keep ordinary function syntax, with the return type before the
+name: `[visibility] [static] ReturnType name(parameters) { ... }`.
+An omitted method visibility means `public`. Constructor and method
+parameters use that same function-parameter form, `Type name`, as in
+`Counter(int start)`. A field written as `name: Type` is rejected.
+Field initializers are evaluated separately for every instance in
+declaration order, before the constructor. An initializer cannot use `this` or
+refer to another instance field because the instance is not initialized
+yet. Use the constructor for argument-dependent initialization.
+Initializers and later assignments type-check under the existing
+conversion rules, including `auto` field writes.
 
-No implicit zero/null default is invented by Stage 13. A field must be
-initialized by a valid initializer or by the constructor before it is
-read or construction completes.
+A non-const field without an initializer starts at the type's default
+value and is already initialized. A const field, or a field whose type
+has no default (a class), must still be initialized by an initializer or
+by the constructor before it is read or construction completes.
 
 ### 5.3 Constructor
 
 ``` grf
-public init(str name, int age) {
+public Person(str name, int age) {
     this.name = name;
     this.age = age;
 }
 ```
 
--   `init` is the sole constructor name; at most one per class.
+-   The constructor is named after the class; at most one per class.
+-   An omitted visibility modifier means `public`.
+    `private Person` is callable only from methods of that same class.
+    Fields, methods, and the constructor default to `public`.
 -   Constructors have no explicit return type and cannot return a value.
--   Construct with `ClassName(arguments)`, not `new`.
--   If `init` is declared, calls must match its argument count and
+-   Construct with `new ClassName(arguments)`.
+-   If a constructor is declared, calls must match its argument count and
     types.
--   Without `init`, `ClassName()` is allowed only when every field is
-    initialized by its field initializer and all const-field rules are
-    satisfied.
--   Constructors cannot be invoked as ordinary instance methods
-    (`object.init(...)` is an error).
+-   Without a constructor, `new ClassName()` is allowed only when every
+    field is initialized by its field initializer and all const-field
+    rules are satisfied.
+-   Constructors cannot be invoked as ordinary instance methods.
 -   Constructor overloading is not supported.
 -   `return;` may be used only if it exits after all required fields are
     definitely initialized; no value may be returned.
@@ -188,8 +223,12 @@ public int totalWith(int amount) {
 Methods have an explicit return type, including `void`, and use ordinary
 Graphite parameter syntax. `this` is an implicit receiver, cannot be
 redeclared, and is valid only inside a constructor or instance method.
+A `static` method has no receiver. It is called as
+`ClassName.method(arguments)` and cannot use `this`. Calling a static
+method on an instance evaluates the receiver and then calls the method
+without passing it. Static fields are not supported.
 
--   Use `this.field` and `this.method(args)` inside class bodies.
+-   Use `this.field` and `this.method(args)` inside instance bodies.
 -   Use `object.field` and `object.method(args)` outside.
 -   Bare member names are not implicitly rewritten to `this.member`.
 -   `this` cannot be reassigned.
@@ -204,7 +243,7 @@ redeclared, and is valid only inside a constructor or instance method.
     the existing import system.
 -   `private`: accessible only inside methods and the constructor
     declared by that same class.
--   Omitted visibility means `private`.
+-   Omitted visibility on a field, method, or constructor means `public`.
 -   No `protected`, package-private, friend, or new module-visibility
     system is introduced.
 -   Public fields can be read/written subject to type and const rules.
@@ -250,12 +289,18 @@ For `ClassName(args)`:
 5.  Invoke `init`, if declared.
 6.  Mark the instance initialized and return its reference.
 
-No reference to a partially initialized object may escape. In
-particular, `this` cannot be returned, stored globally, inserted into a
-collection, passed to an external function, or otherwise published
-before construction completes. Calls to instance methods during
-construction are allowed only after all fields are initialized;
-otherwise reject the call or field read at compile time.
+No partially constructed instance is observable. Before `init` completes:
+
+-   `this.method(...)` is allowed only after every field is definitely
+    initialized. A call or field read before that point is a
+    compile-time error.
+-   `this` must not escape. Reject storing `this` in another object, an
+    array, or a map; returning `this`; and passing `this` to a function
+    or method other than an instance method of this same class.
+-   A same-class method called during `init` is still inside
+    construction. It may read and assign this instance's fields. It may
+    not publish `this` through another object, collection, return, or
+    external call.
 
 ### 7.2 Definite initialization
 
@@ -474,39 +519,50 @@ gain no `throws` clause.
 Add a structured runtime kind for attempted mutation of frozen state:
 
   ----------------------------------------------------------------------------------------
-  Proposed code     Catch type              Message                      Condition
-  ----------------- ----------------------- ---------------------------- -----------------
-  `GRF-RUN-012`     `ConstViolationError`   `mutation of frozen value`   Mutation
-                                                                         attempted on
-                                                                         frozen object or
-                                                                         reachable frozen
-                                                                         state
+  Code            Catch type               Message                     Condition
+  --------------- ------------------------ --------------------------- ----------------
+  `GRF-RUN-014`   `ConstViolationError`    `mutation of frozen value`  Mutation of a
+                                                                       frozen object or
+                                                                       its reachable
+                                                                       frozen state
 
-  ----------------------------------------------------------------------------------------
+  -------------------------------------------------------------------------------------
 
-Add `ConstViolationError` to the Stage 12 catch-type registry.
-`RuntimeError` must catch it through the existing broad-catch behavior.
-If an equivalent stable code already exists in the implementation, reuse
-it instead of duplicating it. Map by structured error kind, never by
-parsing message text. Update Stage 11/12 registries and tests as needed.
+`GRF-RUN-012` remains `ExternalLibraryError`. `GRF-RUN-013` remains
+`RuntimeInternalError`. Do not renumber existing codes.
+`ConstViolationError` matches `catch (ConstViolationError ...)`,
+`catch (RuntimeError ...)`, and `catch (Error ...)`. Matching uses the
+structured error kind, not the message or the code text.
 
 ## 14. Rust lowering
 
-Each class lowers to a dedicated generated representation containing
-declared fields and internal initialization/frozen-state metadata. A
-shared-identity handle is required. A conceptual example is:
+Each class lowers to data stored in a runtime-owned heap. A Graphite
+class value is a handle into that heap. The heap uses a tracing
+collector: it traces from handles that are live in the generated program
+and reclaims unreachable objects, including cycles. Shared reference
+counts alone do not satisfy this requirement when a cycle can remain
+allocated after every Graphite handle is gone.
+
+A conceptual layout is:
 
 ``` rust
 struct CounterData {
     value: i64,
     frozen: bool,
 }
-type CounterRef = Rc<RefCell<CounterData>>;
+// Counter is a handle into the traced heap, not Rc<RefCell<CounterData>>.
 ```
 
-This is illustrative, not a mandatory exact implementation. Any
-representation must preserve Graphite behavior and must not expose Rust
-borrow panics.
+The collector is a thread-local mark-sweep heap. A Graphite class value
+is a `Rooted` handle. Roots are live stack bindings, parameters,
+temporaries, record fields, array elements, and map values. Fields
+inside a class object store raw handles and are traced, not rooted, so
+an unreachable cycle is reclaimed when no root remains. Collection runs
+at allocation. `with` and `with_mut` do not hold the heap borrow across
+a nested Graphite call; re-entry is `RuntimeInternalError`
+(`GRF-RUN-013`) rather than a Rust panic. Freeze traversal uses the same
+edges and is cycle-safe. The collector must not expose Rust borrow
+panics, object addresses, numeric identity, or destruction timing.
 
 -   Assignment clones the handle, not the object.
 -   Equality compares handle/object identity without comparing fields.
@@ -529,14 +585,13 @@ borrow panics.
 
 ### 14.1 Memory and cycles
 
-Class references can form cycles. Plain reference counting alone does
-not reclaim strongly connected unreachable cycles. Before release,
-choose and document a reclamation strategy that handles cycles, such as
-tracing collection, a cycle-aware arena/heap, or another sound strategy.
-A prototype may temporarily use reference counting only if the
-limitation is explicitly documented; do not claim full cycle
-reclamation. No destructor timing or raw address is observable in
-Graphite. Freeze traversal must be cycle-safe.
+Class fields may refer to other instances, including cycles. Stage 13
+requires the tracing heap in §14. An unreachable cycle is reclaimed.
+Reference counting may be used inside the heap only as part of a
+cycle-aware collector, not as the sole reclamation strategy. No
+destructor timing or raw address is observable in Graphite. Freeze
+traversal must be cycle-safe. A test may observe reclamation through a
+runtime allocation counter that is not a Graphite language feature.
 
 ## 15. Lexer, parser, declaration collection, and semantic analysis
 
@@ -602,10 +657,9 @@ Required compile-time diagnostics cover:
 -   Class instance used as map key.
 -   Class/record mismatch and invalid class comparisons.
 
-Runtime mutation of frozen state uses the structured code/kind in §13.
-Reuse an existing code if the implementation already defines the same
-failure. Never make compiler decisions by parsing human-readable
-diagnostic messages.
+Runtime mutation of frozen state uses `ConstViolationError` and
+`GRF-RUN-014`, as specified in §13. Never make compiler decisions by
+parsing human-readable diagnostic messages.
 
 ## 17. Formatting and built-ins
 
@@ -623,8 +677,16 @@ diagnostic messages.
 
 ### Positive tests
 
--   Class declaration, private/public fields, methods, field
-    initializers.
+-   Class declaration with `Type name` fields, `private` and `public`
+    modifiers, methods, and field initializers.
+-   `auto int` field initialization and assignment use the fixed `int64`
+    conversion registry.
+-   `ClassName(arguments)` constructs the class when that class exists,
+    including when a function uses the same spelling. A failed
+    construction does not call that function.
+-   Omitted `init` visibility is public. `private init` succeeds inside
+    the class and fails outside it.
+-   After every field is initialized, `init` may call `this.method()`.
 -   Explicit constructor and default construction when all fields have
     initializers.
 -   Forward class type references and mutually referring class fields.
@@ -634,6 +696,9 @@ diagnostic messages.
 -   Mutations through aliases are visible before freeze.
 -   Const binding freezes aliases and nested reachable objects.
 -   Freeze traversal terminates on cycles.
+-   An unreachable cycle is reclaimed by the tracing heap. The test
+    observes a runtime allocation counter, not a Graphite address or
+    destructor.
 -   `typeOf(instance)`, `typeOf(this)`, `Type.name()`, and descriptor
     display.
 -   Constructor/method errors are catchable using Stage 12.
@@ -647,12 +712,17 @@ diagnostic messages.
 -   Wrong constructor arity/type; constructor returns a value.
 -   Read of uninitialized field, incomplete constructor, const field
     assigned twice.
--   `this` escapes before construction completes.
+-   `this` escapes before construction completes: stored in another
+    object, array, or map; returned; or passed outside the class.
+-   C-style field declaration (`int value`) is rejected.
+-   `private init` called from outside the declaring class.
 -   Inheritance/interface/trait/overload/override syntax.
 -   Class as map key; incompatible class equality; ordering class
     instances.
 -   `str`, interpolation, or `lengthOf` on a class instance.
--   Mutation through an alias after freeze.
+-   Mutation through an alias after freeze reports
+    `error[GRF-RUN-014]` and is caught by `ConstViolationError`,
+    `RuntimeError`, and `Error`.
 -   Rust borrow conflicts must never leak as Rust panics.
 
 ### Cross-stage regression tests
@@ -681,9 +751,9 @@ diagnostic messages.
 7.  Implement member access/method calls and structured errors.
 8.  Integrate classes with arrays, maps, and record fields.
 9.  Integrate class descriptors with `Type` and `typeOf()`.
-10. Add `ConstViolationError` to Stage 11/12 registries and exception
-    tests.
-11. Implement Rust lowering and cycle-safe memory management.
+10. Add `ConstViolationError` as `GRF-RUN-014`, matched by
+    `RuntimeError` and `Error`, without renumbering earlier codes.
+11. Implement the tracing heap. Do not stop at reference counting.
 12. Add positive, negative, and cross-stage regression suites.
 13. Update language reference and stable error registry.
 
@@ -711,3 +781,28 @@ Stage 13 is complete only when:
 -   Existing record/collection behavior passes regression tests.
 -   Code generation accepts only a valid typed AST and artifacts remain
     in the prescribed build directory.
+-   Unreachable class cycles are reclaimed, and no Graphite program can
+    observe an address or destruction time.
+
+## 21. Locked Stage 13 resolutions
+
+1.  Class fields use `Type name`, for example `public int name = ""`
+    and `private int age`. `public` and `private` precede the type.
+    Omitted visibility means `public` for fields, methods, and the
+    constructor. Methods keep return-type-before-name function syntax.
+    The constructor is the class name, for example `Counter(int start)`.
+2.  `new Counter(arguments)` constructs a class. A bare `Counter(arguments)`
+    calls a function of that name and does not construct. Construction
+    does not fall back to a function.
+3.  The constructor defaults to `public`. `private Counter` is visible
+    only inside its class. Fields and methods default to `public`.
+    `static` methods have no `this` and are called as `Counter.sign(1)`.
+4.  `this.method()` is allowed in the constructor after definite
+    initialization. `this` cannot be stored elsewhere, returned, or
+    passed outside the class before the constructor completes.
+5.  `ConstViolationError` is `GRF-RUN-014`. Codes `012` and `013` stay
+    unchanged. `Error` and `RuntimeError` catch the new kind.
+6.  `auto T` class fields use the record conversion rules. `auto int` is
+    a fixed `int64` field.
+7.  Class storage is a traced heap. Unreachable cycles are reclaimed.
+    Reference counting alone is not the Stage 13 memory strategy.

@@ -435,7 +435,7 @@ The parser builds a declaration node containing:
 
 The parser does not convert initializer values or verify assignment compatibility.
 
-A declaration without `=` is a syntax error. v0.1 does not provide implicit default initialization. The same initializer requirement applies to a C-style loop's variable-declaration initializer.
+A declaration without `=` starts at the type's default value: numeric `0` or `0.0`, `false`, `""`, an empty array or map, or a record of those defaults. `const` still requires a value. A class variable has no default and is constructed with `new`. The same rule applies to a C-style loop's variable declaration.
 
 ### 8.3 Return statements
 
@@ -1302,7 +1302,7 @@ At minimum, reject:
 9. Missing closing brace in interpolation.
 10. Unterminated interpolated string.
 11. Trailing comma in a parameter list, unless the grammar is explicitly changed to allow it.
-12. Unsupported compound assignment operators.
+12. The arrow sequence `->`. Compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `//=`) and `**` are supported.
 13. Unsupported class declarations.
 14. Top-level statements that are not declarations.
 15. Unexpected tokens after EOF-related malformed input.

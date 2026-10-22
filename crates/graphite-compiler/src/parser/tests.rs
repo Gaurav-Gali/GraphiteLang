@@ -456,15 +456,22 @@ void main() {
 ",
         "unary '+'",
     );
-    assert_rejected(
+    let compound = parse_clean(
         "\
 void main() {
     int index = 0;
     index += 1;
+    index **= 2;
 }
 ",
-        "'+='",
     );
+    let Stmt::Expression(statement) = &function(&compound, "main").body.statements[1] else {
+        panic!("expected compound assignment");
+    };
+    let Expr::Assignment(assignment) = &statement.expression else {
+        panic!("expected assignment");
+    };
+    assert_eq!(assignment.op, Some(BinaryOperator::Add));
     assert_rejected(
         "\
 void main() {
@@ -520,13 +527,24 @@ void main() {
 
 #[test]
 fn rejects_missing_initializer_and_character_syntax() {
-    assert_rejected(
+    let program = parse_clean(
         "\
 void main() {
     int age;
 }
 ",
-        "'='",
+    );
+    let Stmt::VariableDecl(age) = &function(&program, "main").body.statements[0] else {
+        panic!("expected a variable");
+    };
+    assert!(age.initializer.is_none());
+    assert_rejected(
+        "\
+void main() {
+    const int age;
+}
+",
+        "a constant requires a value",
     );
 
     let source = "\
@@ -557,13 +575,10 @@ fn colon_is_a_slice_token_and_question_stays_lexical() {
             .iter()
             .any(|diagnostic| diagnostic.message.contains("';'"))
     );
-    let question = lex("test.grf", "void main() {\n    int a = 1;\n    a?b;\n}\n");
-    assert!(
-        question
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.kind == DiagnosticKind::UnexpectedCharacter)
-    );
+    let question = lex("test.grf", "void main() {\n    int? a = null;\n}\n");
+    assert!(question.diagnostics.is_empty());
+    let parsed = parse("test.grf", &question.tokens);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 }
 
 #[test]
@@ -608,14 +623,15 @@ import grf.io;
         "void main() {\n    int a, auto int b = [1, 2];\n}\n",
         "auto is not allowed",
     );
-    assert_rejected(
+    let class_only = parse_clean(
         "\
 class Person {
 }
 ",
-        "function declaration",
     );
-    assert_rejected("io.println(\"Hello\");\n", "function declaration");
+    assert_eq!(class_only.classes.len(), 1);
+    assert_eq!(class_only.classes[0].name.name, "Person");
+    assert_rejected("io.println(\"Hello\");\n", "function or class declaration");
 }
 
 #[test]
@@ -755,7 +771,7 @@ void main() {
     assert_eq!(scores.ty.arguments.len(), 2);
     assert_eq!(scores.ty.arguments[0].kind, TypeKind::Str);
     assert_eq!(scores.ty.arguments[1].kind, TypeKind::Int);
-    let Expr::Record(literal) = &scores.initializer else {
+    let Expr::Record(literal) = scores.initializer.as_ref().expect("initializer") else {
         panic!("expected a brace literal");
     };
     assert!(matches!(literal.entries[1], BraceEntry::Spread { .. }));
@@ -829,12 +845,123 @@ fn throw_is_reserved_and_not_a_statement() {
 }
 
 #[test]
+fn class_declarations_use_field_and_function_syntax() {
+    let program = parse_clean(
+        "\
+class Counter {
+    public int value = 0;
+    private const str label = \"n\";
+    int age;
+    Counter(int start) {
+        this.value = start;
+    }
+    public int getValue() {
+        return this.value;
+    }
+    static int abs(int value) {
+        return value;
+    }
+    private void hidden() {
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert_eq!(program.classes.len(), 1);
+    let class = &program.classes[0];
+    assert_eq!(class.name.name, "Counter");
+    assert_eq!(class.fields.len(), 3);
+    assert!(class.fields[0].public);
+    assert!(!class.fields[0].const_field);
+    assert!(class.fields[0].initializer.is_some());
+    assert!(!class.fields[1].public);
+    assert!(class.fields[1].const_field);
+    assert!(class.fields[2].public);
+    assert!(class.fields[2].initializer.is_none());
+    assert_eq!(class.fields[2].name.name, "age");
+    let init = class.init.as_ref().expect("constructor");
+    assert!(init.public);
+    assert_eq!(init.parameters.len(), 1);
+    assert_eq!(init.parameters[0].name.name, "start");
+    assert_eq!(class.methods.len(), 3);
+    assert!(class.methods[0].public);
+    assert!(class.methods[1].public);
+    assert!(class.methods[1].is_static);
+    assert!(!class.methods[2].public);
+    assert_eq!(class.methods[0].name.name, "getValue");
+
+    let omitted = parse_clean(
+        "\
+class Secret {
+    Secret() {
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert!(omitted.classes[0].init.as_ref().unwrap().public);
+
+    assert_rejected(
+        "\
+class Counter extends Other {
+    value: int = 0;
+}
+
+void main() {
+}
+",
+        "inheritance is not supported",
+    );
+    assert_rejected(
+        "\
+class Counter {
+    value: int;
+}
+
+void main() {
+}
+",
+        "class fields use Type name",
+    );
+    assert_rejected(
+        "\
+class Counter {
+    init(start: int) {
+    }
+}
+
+void main() {
+}
+",
+        "the constructor is 'Counter'",
+    );
+    assert_rejected(
+        "\
+class Counter {
+    Counter() {
+    }
+    Counter() {
+    }
+}
+
+void main() {
+}
+",
+        "duplicate constructor",
+    );
+}
+
+#[test]
 fn reserved_keywords_cannot_be_declaration_names() {
     let keywords = [
         "import", "auto", "const", "void", "int", "uint", "flt", "int16", "int32", "int64",
         "uint16", "uint32", "uint64", "flt32", "flt64", "bln", "chr", "str", "if", "else", "loop",
         "break", "continue", "return", "type", "map", "true", "false", "try", "catch", "finally",
-        "throw",
+        "throw", "class", "public", "private", "this", "init", "new", "static", "null",
     ];
     for keyword in keywords {
         let message = format!("'{keyword}' is a reserved keyword");

@@ -645,7 +645,9 @@ Requirements:
     specified in this stage's LLD.
 
 The LLD must explicitly compare class ownership/identity with Stage 7
-record value semantics.
+record value semantics. Field syntax, construction versus function
+calls, `init` visibility, `this` escape, `GRF-RUN-014`, `auto` fields,
+and cycle collection are locked in LLD-17.
 
 **Outcome:** Graphite gains a statically typed OOP model that composes
 with records, collections, const, descriptors, and exceptions.

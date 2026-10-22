@@ -1,0 +1,247 @@
+import grf.io;
+
+// Stage 13 classes. A class is a nominal reference type.
+// Fields use Type name, the same shape as other declarations.
+// public and private come before the type. Omitted visibility is public
+// for fields and methods. Construct with new ClassName(arguments).
+// The constructor is the class name. static methods have no this.
+
+// A function may share a class's name. new builds the class.
+// The bare name calls the function.
+int Counter(int start) {
+    io.println("function");
+    return start;
+}
+
+int boom() {
+    io.println("before failure");
+    return 1 / 0;
+}
+
+class Counter {
+    public int value;
+    private str label = "counter";
+    str shown = "counter";
+    Counter(int start) {
+        this.value = start;
+        io.println("built");
+    }
+    public int getValue() {
+        return this.value;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+    public str name() {
+        return this.label;
+    }
+    public Counter same(Counter item) {
+        return item;
+    }
+    static int sign(int value) {
+        if (value < 0) {
+            return 0 - 1;
+        }
+        return 1;
+    }
+    void grow() {
+        this.value *= 2;
+    }
+}
+
+class Account {
+    public auto int balance = "10";
+    public void setBalance(str amount) {
+        this.balance = amount;
+    }
+    public int getBalance() {
+        return this.balance;
+    }
+}
+
+// Omitted constructor visibility is public. this.next = this seeds a cycle.
+class Node {
+    public Node next;
+    Node() {
+        this.next = this;
+    }
+    public int ping() {
+        return 1;
+    }
+}
+
+// A private constructor is callable from a method of the same class.
+class Token {
+    public str text = "";
+    private Token(str text) {
+        this.text = text;
+    }
+    public Token copy() {
+        return new Token(this.text);
+    }
+}
+
+// No constructor: every field has an initializer, so new Empty() is legal.
+class Empty {
+    public bln ready = true;
+}
+
+class Boom {
+    public int value = boom();
+}
+
+type Wrap {
+    item: Counter,
+}
+
+class Box {
+    public Wrap wrap;
+    public Counter[] items;
+    Box(Counter item) {
+        Wrap wrap = { item: item };
+        this.wrap = wrap;
+        Counter[] made = [item];
+        this.items = made;
+    }
+    public int wrapped() {
+        return this.wrap.item.getValue();
+    }
+    public int first() {
+        return this.items[0].getValue();
+    }
+}
+
+// A const class field freezes that object. The other fields stay mutable.
+class Holder {
+    public const Counter item;
+    public int value = 0;
+    Holder(Counter start) {
+        this.item = start;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+    public int itemValue() {
+        return this.item.getValue();
+    }
+}
+
+void main() {
+    io.println("construct");
+    Counter first = new Counter(1);
+    Counter alias = first;
+    Counter second = new Counter(2);
+    io.println(first == alias);
+    io.println(first == second);
+    io.println(first != second);
+    alias.setValue(4);
+    io.println(first.getValue());
+    io.println(first.name());
+    io.println(first.shown);
+    io.println(first.same(first) == first);
+
+    io.println("freeze");
+    Counter live = new Counter(5);
+    const Counter frozen = live;
+    io.println(live.getValue());
+    try {
+        live.setValue(9);
+        io.println("mutated");
+    } catch (ConstViolationError error) {
+        io.println(error.kind());
+        io.println(error.code());
+        io.println(error.message());
+    }
+    try {
+        live.setValue(9);
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+    }
+    try {
+        live.setValue(9);
+    } catch (Error error) {
+        io.println(error.kind());
+    }
+    io.println(frozen.getValue());
+
+    io.println("auto");
+    Account account = new Account();
+    io.println(account.getBalance());
+    account.setBalance("4");
+    io.println(account.getBalance());
+    try {
+        account.setBalance("nope");
+        io.println("converted");
+    } catch (NumericConversionError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+
+    io.println("type");
+    Type kind = typeOf(new Counter(7));
+    io.println(kind.name());
+    io.println(str(kind));
+
+    io.println("collections");
+    Counter[] items = [new Counter(3)];
+    Counter fromArray = items[0];
+    io.println(fromArray == items[0]);
+    fromArray.setValue(8);
+    io.println(items[0].getValue());
+    map<str, Counter> byName = { "a": new Counter(6) };
+    Counter found = byName.get("a");
+    io.println(found == byName.get("a"));
+    found.setValue(11);
+    io.println(byName.get("a").getValue());
+
+    io.println("cycle");
+    Node node = new Node();
+    io.println(node.next == node);
+    io.println(node.next.ping());
+
+    io.println("empty");
+    Empty marker = new Empty();
+    io.println(marker.ready);
+
+    io.println("failure");
+    try {
+        Boom failed = new Boom();
+        io.println(failed.value);
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    io.println("nested");
+    Counter shared = new Counter(1);
+    Box box = new Box(shared);
+    io.println(box.wrapped());
+    io.println(box.items[0] == shared);
+    io.println(box.first());
+    Holder holder = new Holder(shared);
+    holder.setValue(2);
+    io.println(holder.value);
+    io.println(holder.itemValue());
+    try {
+        shared.setValue(3);
+        io.println("shared");
+    } catch (ConstViolationError error) {
+        io.println(error.message());
+    }
+
+    io.println(Counter.sign(0 - 4));
+    int power = 2 ** 10;
+    io.println(power);
+    int bucket = 0 - 5;
+    bucket //= 2;
+    io.println(bucket);
+    int grown = 3;
+    grown += 4;
+    grown *= 2;
+    grown -= 1;
+    grown /= 3;
+    grown %= 5;
+    io.println(grown);
+    first.grow();
+    io.println(first.getValue());
+}

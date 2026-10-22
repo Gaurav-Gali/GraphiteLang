@@ -99,9 +99,12 @@ pub fn semantic_code(message: &str) -> &'static str {
         }
     } else if message.contains("reserved") || message == "'Type' is a built-in type" {
         "GRF-NAM-003"
-    } else if message.starts_with("unknown type ") {
+    } else if message.starts_with("unknown type ") || message.starts_with("unknown class ") {
         "GRF-NAM-006"
-    } else if message.starts_with("unknown field ") || message.contains("has no field") {
+    } else if message.starts_with("unknown field ")
+        || message.contains("has no field")
+        || message.starts_with("unknown method ")
+    {
         "GRF-NAM-007"
     } else if message.contains("was not found") && message.starts_with("domain ") {
         "GRF-DEP-001"
@@ -136,18 +139,41 @@ pub fn semantic_code(message: &str) -> &'static str {
         "GRF-SEM-010"
     } else if message.contains("short-circuit") {
         "GRF-SEM-011"
+    } else if message.contains("not accessible") {
+        "GRF-SEM-023"
+    } else if message.contains("not initialized")
+        || message.contains("before it is initialized")
+        || message.contains("before every field")
+        || message.contains("has no default")
+        || message.contains("used before it is assigned")
+    {
+        "GRF-SEM-024"
+    } else if message.contains("cannot escape") {
+        "GRF-SEM-025"
+    } else if message.contains("nullable")
+        || message.contains("null requires")
+        || message.contains("null cannot")
+    {
+        "GRF-SEM-026"
     } else if message.contains("call") || message.contains("member") || message.contains("library")
     {
         "GRF-SEM-012"
     } else if message.contains("assignment target")
         || message.contains("requires a mutable variable")
+        || message.contains("compound assignment")
     {
         "GRF-SEM-013"
     } else if message.contains("increment and decrement") {
         "GRF-SEM-014"
     } else if message.contains("do not support slicing") {
         "GRF-SEM-015"
-    } else if message.contains("expects") || message.contains("has no method") {
+    } else if message.contains("expects")
+        || message.contains("has no method")
+        || message.starts_with("construct ")
+        || message.contains("requires an instance")
+        || message.contains("static method")
+        || (message.starts_with("expected ") && message.contains("argument"))
+    {
         "GRF-SEM-016"
     } else if message.contains("being iterated") {
         "GRF-SEM-017"

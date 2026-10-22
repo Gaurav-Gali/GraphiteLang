@@ -8,9 +8,11 @@ pub fn format_ast(program: &Program) -> String {
     let _ = writeln!(out, "Program");
     let import_count = program.imports.len();
     let type_count = program.types.len();
+    let class_count = program.classes.len();
     let function_count = program.functions.len();
     for (index, import) in program.imports.iter().enumerate() {
-        let last = index + 1 == import_count && type_count == 0 && function_count == 0;
+        let last =
+            index + 1 == import_count && type_count == 0 && class_count == 0 && function_count == 0;
         write_line(
             &mut out,
             "",
@@ -19,7 +21,7 @@ pub fn format_ast(program: &Program) -> String {
         );
     }
     for (index, declaration) in program.types.iter().enumerate() {
-        let last = index + 1 == type_count && function_count == 0;
+        let last = index + 1 == type_count && class_count == 0 && function_count == 0;
         let fields = declaration
             .fields
             .iter()
@@ -37,6 +39,20 @@ pub fn format_ast(program: &Program) -> String {
             "",
             last,
             &format!("Type {} {{ {fields} }}", declaration.name.name),
+        );
+    }
+    for (index, declaration) in program.classes.iter().enumerate() {
+        let last = index + 1 == class_count && function_count == 0;
+        let fields = declaration.fields.len();
+        let methods = declaration.methods.len();
+        write_line(
+            &mut out,
+            "",
+            last,
+            &format!(
+                "Class {} {{ fields: {fields}, methods: {methods} }}",
+                declaration.name.name
+            ),
         );
     }
     for (index, function) in program.functions.iter().enumerate() {
@@ -101,13 +117,12 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 .trim_end(),
             );
             let child = child_prefix(prefix, last);
-            write_line(out, &child, true, "Initializer");
-            write_expression(
-                out,
-                &child_prefix(&child, true),
-                true,
-                &declaration.initializer,
-            );
+            if let Some(initializer) = &declaration.initializer {
+                write_line(out, &child, true, "Initializer");
+                write_expression(out, &child_prefix(&child, true), true, initializer);
+            } else {
+                write_line(out, &child, true, "Default");
+            }
         }
         Stmt::Return(return_statement) => {
             write_line(out, prefix, last, "Return");
@@ -304,6 +319,17 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
                 write_line(out, &child, true, "Arguments");
             }
         }
+        Expr::New(new_expr) => {
+            write_line(out, prefix, last, &format!("New {}", new_expr.name.name));
+            let child = child_prefix(prefix, last);
+            let arg_count = new_expr.arguments.len();
+            for (index, argument) in new_expr.arguments.iter().enumerate() {
+                write_expression(out, &child, index + 1 == arg_count, argument);
+            }
+            if arg_count == 0 {
+                write_line(out, &child, true, "Arguments");
+            }
+        }
         Expr::Call(call) => {
             write_line(out, prefix, last, "Call");
             let child = child_prefix(prefix, last);
@@ -482,6 +508,9 @@ fn format_type(ty: &TypeSyntax) -> String {
             Some(limit) => name.push_str(&format!("[{limit}]")),
         }
     }
+    if ty.optional {
+        name.push('?');
+    }
     name
 }
 
@@ -491,6 +520,7 @@ fn format_literal(literal: &LiteralExpr) -> String {
         LiteralExpr::Float { lexeme, .. } => format!("Float {lexeme}"),
         LiteralExpr::Boolean { value, .. } => format!("Boolean {value}"),
         LiteralExpr::String { value, .. } => format!("String {value:?}"),
+        LiteralExpr::Null { .. } => "Null".to_string(),
     }
 }
 
@@ -501,6 +531,8 @@ fn binary_symbol(operator: BinaryOperator) -> &'static str {
         BinaryOperator::Multiply => "*",
         BinaryOperator::Divide => "/",
         BinaryOperator::Remainder => "%",
+        BinaryOperator::Power => "**",
+        BinaryOperator::FloorDiv => "//",
         BinaryOperator::Equal => "==",
         BinaryOperator::NotEqual => "!=",
         BinaryOperator::Less => "<",

@@ -802,4 +802,6 @@ Runtime: `GRF-RUN-001` array index out of bounds, `002` missing map key,
 `006` numeric conversion failure, `007` input/output failure, `008`
 slice assignment length mismatch, `009` destructuring length mismatch,
 `010` array exceeds its maximum length, `011` invalid insertion
-position.
+position. Later stages add `012` external library failure, `013`
+structured internal runtime failure, and `014` frozen-value mutation
+without renumbering these codes.

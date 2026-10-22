@@ -1524,3 +1524,620 @@ fn try_requires_a_handler_and_known_catch_types() {
     );
     assert!(record.is_empty(), "{record}");
 }
+
+fn diagnostic_text(source: &str) -> String {
+    analyze_source(source)
+        .diagnostics
+        .iter()
+        .map(|diagnostic| format!("{} {}", diagnostic.code, diagnostic.message))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn classes_are_reference_types_with_checked_construction() {
+    let program = "\
+class Counter {
+    public int value;
+    Counter(int start) {
+        this.value = start;
+    }
+    public int getValue() {
+        return this.value;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+}
+
+int Counter(int start) {
+    return start;
+}
+
+void main() {
+    Counter first = new Counter(1);
+    Counter alias = first;
+    io.println(first == alias);
+    io.println(first != new Counter(2));
+}
+";
+    let missing_import = diagnostic_text(program);
+    assert!(
+        missing_import.contains("unknown name 'io'"),
+        "{missing_import}"
+    );
+
+    let source = "\
+import grf.io;
+
+class Counter {
+    public int value;
+    Counter(int start) {
+        this.value = start;
+    }
+    public int getValue() {
+        return this.value;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+}
+
+int Counter(int start) {
+    return start;
+}
+
+class Early {
+    int value;
+    Early(bln flag) {
+        if (flag) {
+            this.value = 1;
+        } else {
+            this.value = 2;
+        }
+    }
+}
+
+class Node {
+    public Node next;
+    Node() {
+        Node local = this;
+        this.next = local;
+    }
+}
+
+class Open {
+    str name = \"Ada\";
+}
+
+void main() {
+    Counter first = new Counter(1);
+    Counter alias = first;
+    io.println(first == alias);
+    io.println(first.getValue());
+    alias.setValue(4);
+    Open person = new Open();
+    io.println(person.name);
+}
+";
+    let accepted = analyze_source(source);
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let rust = generate(accepted.program.as_ref().unwrap());
+    assert!(rust.contains("graphite_core::heap::alloc"), "{rust}");
+    assert!(rust.contains("graphite_core::heap::Rooted"), "{rust}");
+    assert!(rust.contains("grf_new_Counter"), "{rust}");
+    assert!(!rust.contains("Rc<"), "{rust}");
+    assert!(!rust.contains("grf_fns::Counter("), "{rust}");
+
+    let hidden = diagnostic_text(
+        "\
+class Secret {
+    private int value = 1;
+    private int read() {
+        return this.value;
+    }
+    private Secret() {
+    }
+    public Secret make() {
+        return new Secret();
+    }
+}
+
+void main() {
+    Secret item = new Secret();
+    int leaked = item.value;
+    int called = item.read();
+}
+",
+    );
+    assert!(
+        hidden.contains("GRF-SEM-023 field 'value' is not accessible"),
+        "{hidden}"
+    );
+    assert!(
+        hidden.contains("GRF-SEM-023 method 'read' is not accessible"),
+        "{hidden}"
+    );
+    assert!(
+        hidden.contains("GRF-SEM-023 constructor of 'Secret' is not accessible"),
+        "{hidden}"
+    );
+    assert_eq!(hidden.matches("not accessible").count(), 3, "{hidden}");
+
+    let unready = diagnostic_text(
+        "\
+class Slot {
+    int value;
+}
+
+class Gap {
+    Slot item;
+    Gap() {
+        Slot early = this.item;
+        this.touch();
+        this.item = new Slot();
+    }
+    void touch() {
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert!(
+        unready.contains("GRF-SEM-024 field 'item' is read before it is initialized"),
+        "{unready}"
+    );
+    assert!(
+        unready
+            .contains("GRF-SEM-024 cannot call method 'touch' before every field is initialized"),
+        "{unready}"
+    );
+
+    let partial = diagnostic_text(
+        "\
+class Slot {
+    int value;
+}
+
+class Gap {
+    Slot item;
+    Gap(bln flag) {
+        if (flag) {
+            this.item = new Slot();
+        }
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert!(
+        partial.contains("GRF-SEM-024 field 'item' is not initialized"),
+        "{partial}"
+    );
+
+    let looping = diagnostic_text(
+        "\
+class Slot {
+    int value;
+}
+
+class Gap {
+    Slot item;
+    Gap() {
+        loop () {
+            this.item = new Slot();
+            break;
+        }
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert!(
+        looping.contains("GRF-SEM-024 field 'item' is not initialized"),
+        "{looping}"
+    );
+
+    let escaped = diagnostic_text(
+        "\
+class Node {
+    Node next;
+    Node() {
+        Node[] items = [this];
+        this.next = this;
+    }
+}
+
+void take(Node node) {
+}
+
+class Leaky {
+    Node next;
+    Leaky() {
+        take(this);
+        this.next = new Node();
+    }
+}
+
+void main() {
+}
+",
+    );
+    assert!(
+        escaped.contains("GRF-SEM-025 this cannot escape before construction finishes"),
+        "{escaped}"
+    );
+
+    let constant = diagnostic_text(
+        "\
+class Box {
+    const int value = 1;
+    Box() {
+        this.value = 2;
+    }
+}
+
+void main() {
+    const Box item = new Box();
+    item.value = 3;
+}
+",
+    );
+    assert!(
+        constant.contains("GRF-SEM-001 cannot assign to constant field 'value'"),
+        "{constant}"
+    );
+    assert!(
+        constant.contains("GRF-SEM-001 cannot assign to constant 'item'"),
+        "{constant}"
+    );
+
+    let frozen_method = diagnostic_text(
+        "\
+class Counter {
+    int value = 0;
+    Counter() {
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+}
+
+void main() {
+    const Counter item = new Counter();
+    item.setValue(1);
+}
+",
+    );
+    assert!(
+        frozen_method
+            .contains("GRF-SEM-001 cannot call mutating method 'setValue' on constant 'item'"),
+        "{frozen_method}"
+    );
+
+    let compared = diagnostic_text(
+        "\
+class Counter {
+    int value = 0;
+}
+
+class Other {
+    int value = 0;
+}
+
+void main() {
+    Counter left = new Counter();
+    Other right = new Other();
+    bln same = left == right;
+    bln ordered = left < left;
+}
+",
+    );
+    assert!(
+        compared.contains("GRF-TYP-002 operator '==' cannot compare 'Counter' with 'Other'"),
+        "{compared}"
+    );
+    assert!(
+        compared.contains("GRF-TYP-002 operator '<' cannot compare class values"),
+        "{compared}"
+    );
+
+    let keyed = diagnostic_text(
+        "\
+class Counter {
+    int value = 0;
+}
+
+void main() {
+    map<Counter, int> scores = {};
+}
+",
+    );
+    assert!(
+        keyed.contains("GRF-TYP-006 'Counter' cannot be a map key"),
+        "{keyed}"
+    );
+
+    let printed = diagnostic_text(
+        "\
+import grf.io;
+
+class Counter {
+    int value = 0;
+}
+
+void main() {
+    Counter item = new Counter();
+    io.println(item);
+    io.println(str(item));
+    io.println(f\"{item}\");
+    uint64 size = lengthOf(item);
+}
+",
+    );
+    assert!(
+        printed.contains("cannot convert 'Counter' to 'str'"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "GRF-TYP-008 lengthOf requires a str, array, record, or map value; 'Counter' has no defined length"
+        ),
+        "{printed}"
+    );
+
+    let arity = diagnostic_text(
+        "\
+class Counter {
+    int value = 0;
+}
+
+void main() {
+    Counter item = new Counter(1);
+}
+",
+    );
+    assert!(
+        arity.contains("GRF-SEM-016 expected 0 arguments, found 1"),
+        "{arity}"
+    );
+
+    let collision = diagnostic_text(
+        "\
+class Counter {
+    int value = 0;
+}
+
+type Counter {
+    value: int,
+}
+
+void main() {
+}
+",
+    );
+    assert!(
+        collision.contains("GRF-NAM-002 record type 'Counter' is already declared"),
+        "{collision}"
+    );
+
+    let defaults = diagnostic_text(
+        "\
+import grf.io;
+
+type Point {
+    x: flt,
+    y: flt,
+}
+
+class Origin {
+    Point point;
+    int count;
+    Origin() {
+    }
+    flt x() {
+        return this.point.x;
+    }
+}
+
+void main() {
+    int count;
+    count = 10;
+    str name;
+    Origin here = new Origin();
+    io.println(count);
+    io.println(name);
+    io.println(here.x());
+    io.println(here.count);
+}
+",
+    );
+    assert!(defaults.is_empty(), "{defaults}");
+
+    let class_value = diagnostic_text(
+        "\
+class Counter {
+    int value;
+}
+
+void main() {
+    Counter item;
+    item = item;
+}
+",
+    );
+    assert!(
+        class_value.contains("GRF-SEM-024 variable 'item' is used before it is assigned"),
+        "{class_value}"
+    );
+}
+
+#[test]
+fn class_record_fields_can_be_assigned_directly() {
+    let nested = diagnostic_text(
+        "\
+import grf.io;
+
+type rect {
+    height: auto flt,
+    width: auto flt,
+    area: auto flt,
+}
+
+class Calc {
+    public rect r;
+    Calc(auto flt h, auto flt w) {
+        this.r.height = h;
+        this.r.width = w;
+    }
+    Calc area() {
+        this.r.area = this.r.height * this.r.width;
+        return this;
+    }
+    rect get() {
+        return this.r;
+    }
+}
+
+void main() {
+    Calc c = new Calc(2.0, 5.0);
+    c.r.height = 4.0;
+    io.println(c.area().get());
+}
+",
+    );
+    assert!(nested.is_empty(), "{nested}");
+
+    let constant = diagnostic_text(
+        "\
+type rect {
+    height: auto flt,
+}
+
+class Locked {
+    const rect r;
+    Locked() {
+        this.r.height = 1.0;
+    }
+}
+
+void main() {
+    const Locked item = new Locked();
+    item.r.height = 2.0;
+}
+",
+    );
+    assert!(
+        constant.contains("GRF-SEM-001 cannot assign to constant field 'r'"),
+        "{constant}"
+    );
+    assert!(
+        constant.contains("GRF-SEM-001 cannot assign to constant 'item'"),
+        "{constant}"
+    );
+
+    let hidden = diagnostic_text(
+        "\
+type rect {
+    height: auto flt,
+}
+
+class Hidden {
+    private rect r;
+}
+
+void main() {
+    Hidden item = new Hidden();
+    item.r.height = 1.0;
+}
+",
+    );
+    assert!(
+        hidden.contains("GRF-SEM-023 field 'r' is not accessible"),
+        "{hidden}"
+    );
+}
+
+#[test]
+fn nullable_values_default_to_null_and_classes_can_be_assigned_later() {
+    let program = diagnostic_text(
+        "\
+import grf.io;
+
+class node {
+    int value;
+    node? next;
+    node(int value) {
+        this.value = value;
+        this.next = null;
+    }
+    int read() {
+        return this.value;
+    }
+}
+
+void main() {
+    int? number;
+    number = null;
+    number = 4;
+    node item;
+    item = new node(1);
+    io.println(item.read());
+    node? link = null;
+    link = new node(2);
+    if (link != null) {
+        io.println(link.read());
+        link.next = null;
+    }
+    node head = new node(1);
+    head.next = new node(2);
+    head.next.next = new node(3);
+    io.println(head.next.value);
+}
+",
+    );
+    assert!(program.is_empty(), "{program}");
+
+    let bare = diagnostic_text(
+        "\
+void main() {
+    int? number = null;
+    int plain = null;
+}
+",
+    );
+    assert!(
+        bare.contains("GRF-SEM-026 null requires a nullable type"),
+        "{bare}"
+    );
+
+    let unchecked = diagnostic_text(
+        "\
+class node {
+    int value;
+    node(int value) {
+        this.value = value;
+    }
+}
+
+void main() {
+    node? link = null;
+    node item = link;
+}
+",
+    );
+    assert!(
+        unchecked.contains("GRF-SEM-026 a nullable value must be checked before it is used"),
+        "{unchecked}"
+    );
+}

@@ -191,7 +191,7 @@ enum TokenKind {
 }
 ```
 
-This enum is the v0.1 inventory. Keep keyword variants aligned with the frozen syntax LLD. `class`, `private`, `this`, `public`, `new`, and `constructor` are ordinary identifiers. `+=`, `-=`, `*=`, `/=`, `%=`, `->`, `:`, and `?` have no token kinds. Do not allow the lexer inventory to accidentally define the language.
+This enum started as the v0.1 inventory. `class`, `public`, `private`, `this`, `init`, `new`, and `static` are now keywords. `+=`, `-=`, `*=`, `/=`, `%=`, `**`, `**=`, and `//=` are tokens. `->`, `:`, and `?` still have no token kinds. `//` remains a line comment.
 
 `grf.json` is a JSON manifest, not Graphite source. It MUST be loaded by a JSON parser and manifest validator, not by the `.grf` lexer. The Graphite lexer must tokenize import paths such as `import grf.io;` and call paths such as `io.println(...)` without resolving their meaning.
 
@@ -239,7 +239,7 @@ v0.1 keywords:
 
 `auto` is always `KwAuto`, never `Identifier`. Bare `auto` is still that keyword; rejecting a missing target type is a later phase.
 
-`class`, `private`, `this`, `public`, `new`, `constructor`, `library`, `extends`, `super`, `override`, `try`, `catch`, and `finally` are identifiers in v0.1. They become keywords only when a later specification adds them, together with grammar, semantic rules, and tests.
+`constructor`, `library`, `extends`, `super`, and `override` stay identifiers. `class`, `public`, `private`, `this`, `init`, `new`, `static`, `try`, `catch`, and `finally` are keywords.
 
 Library names such as `grf`, `io`, `fileIo`, `coolDev`, and `netHttp` are identifiers, not keywords.
 
@@ -395,10 +395,10 @@ Examples:
 - `||` is `OrOr`; a lone `|` is an unexpected character unless explicitly supported.
 - `++` is `PlusPlus`. `--` is `MinusMinus`. Both are v0.1 operators. The lexer does not distinguish prefix from postfix.
 - `->` is not an operator. It tokenizes as `Minus` then `Greater`. The parser rejects that sequence as an arrow.
-- `+=`, `-=`, `*=`, `/=`, and `%=` are not operators. Each tokenizes as the arithmetic operator followed by `Equal`. The parser rejects that sequence as a compound assignment.
+- `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, and `//=` are single tokens. `**` is the power operator. `//` remains a line comment, so floor division is written with `//=`.
 - `:` and `?` are unexpected characters in v0.1.
 
-The scanner should test multi-character operators before their one-character prefixes. `++` must win over `+`. `==` must win over `=`. There is no `+=` token that could win over `+`.
+The scanner should test multi-character operators before their one-character prefixes. `++` must win over `+`. `==` must win over `=`. `+=` must win over `+`. `**=` must win over `**`.
 
 ## 12. Punctuation
 
@@ -569,7 +569,7 @@ For the initial implementation, straightforward code and correct spans are more 
 - `import grf.io;` followed by `io.println("Hello");` produces the Example B stream, including `KwImport`, the semicolon, and a second `Identifier("io")` on the call.
 - `auto` is `KwAuto`. `automation` is one identifier. `int auto = 1;` yields `KwInt`, `KwAuto`, `Equal`, not an identifier named `auto`.
 - `++` is `PlusPlus` and `--` is `MinusMinus`, including in `index++` and `++index`.
-- `class`, `private`, `this`, `public`, `new`, and `constructor` are `Identifier` tokens.
+- `constructor`, `library`, `extends`, and `implements` are `Identifier` tokens. `class`, `public`, `private`, `this`, `init`, `new`, and `static` are keywords.
 - Interpolated strings produce the expected structured token sequence.
 - EOF span is correct.
 
@@ -615,9 +615,9 @@ The lexer stage is complete when:
 
 ## 19. Frozen lexical decisions
 
-- The v0.1 keyword inventory is the list in section 7. `auto` is reserved. `class`, `private`, `this`, `public`, `new`, and `constructor` are not.
+- The v0.1 keyword inventory is the list in section 7. `auto` is reserved. `class`, `public`, `private`, `this`, `init`, `new`, and `static` are reserved. `constructor` is not.
 - `++` and `--` are tokens. Prefix versus postfix is a parser decision.
-- `->`, `:`, `?`, and compound assignments are not tokens.
+- `->`, `:`, and `?` are not tokens. Compound assignments `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, and `//=` are tokens. `**` is a token. `//` is a line comment.
 - The Example B import/call stream in section 13 is normative.
 - JSON manifest validation and schema policy are separate from the `.grf` lexer.
 

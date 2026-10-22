@@ -2243,4 +2243,546 @@ flt area(auto rectangle rect) {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "beside\n");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn classes_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-classes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+int Counter(int start) {
+    io.println("function");
+    return start;
+}
+
+int boom() {
+    io.println("before");
+    return 1 / 0;
+}
+
+class Counter {
+    public int value;
+    Counter(int start) {
+        this.value = start;
+        io.println("built");
+    }
+    public int getValue() {
+        return this.value;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+    public Counter same(Counter item) {
+        return item;
+    }
+    static int sign(int value) {
+        if (value < 0) {
+            return 0 - 1;
+        }
+        return 1;
+    }
+    void grow() {
+        this.value *= 2;
+    }
+}
+
+class Account {
+    public auto int balance = "10";
+    public void setBalance(str amount) {
+        this.balance = amount;
+    }
+    public int getBalance() {
+        return this.balance;
+    }
+}
+
+class Node {
+    public Node next;
+    Node() {
+        this.next = this;
+    }
+    public int ping() {
+        return 1;
+    }
+}
+
+class Boom {
+    public int value = boom();
+}
+
+type Wrap {
+    item: Counter,
+}
+
+class Box {
+    public Wrap wrap;
+    public Counter[] items;
+    Box(Counter item) {
+        Wrap wrap = { item: item };
+        this.wrap = wrap;
+        Counter[] made = [item];
+        this.items = made;
+    }
+    public int wrapped() {
+        return this.wrap.item.getValue();
+    }
+    public int first() {
+        return this.items[0].getValue();
+    }
+}
+
+class Holder {
+    public const Counter item;
+    public int value = 0;
+    Holder(Counter start) {
+        this.item = start;
+    }
+    public void setValue(int next) {
+        this.value = next;
+    }
+    public int itemValue() {
+        return this.item.getValue();
+    }
+}
+
+void main() {
+    Counter first = new Counter(1);
+    Counter alias = first;
+    Counter second = new Counter(2);
+    io.println(first == alias);
+    io.println(first == second);
+    io.println(first != second);
+    alias.setValue(4);
+    io.println(first.getValue());
+    io.println(first.same(first) == first);
+
+    Counter live = new Counter(5);
+    const Counter frozen = live;
+    io.println(live.getValue());
+    try {
+        live.setValue(9);
+        io.println("mutated");
+    } catch (ConstViolationError error) {
+        io.println(error.kind());
+        io.println(error.code());
+        io.println(error.message());
+    }
+    try {
+        live.setValue(9);
+    } catch (RuntimeError error) {
+        io.println(error.kind());
+    }
+    try {
+        live.setValue(9);
+    } catch (Error error) {
+        io.println(error.kind());
+    }
+    io.println(frozen.getValue());
+
+    Account account = new Account();
+    io.println(account.getBalance());
+    account.setBalance("4");
+    io.println(account.getBalance());
+    try {
+        account.setBalance("nope");
+        io.println("converted");
+    } catch (NumericConversionError error) {
+        io.println(error.kind());
+        io.println(error.code());
+    }
+
+    Type kind = typeOf(new Counter(7));
+    io.println(kind.name());
+    io.println(str(kind));
+
+    Counter[] items = [new Counter(3)];
+    Counter fromArray = items[0];
+    io.println(fromArray == items[0]);
+    fromArray.setValue(8);
+    io.println(items[0].getValue());
+
+    map<str, Counter> byName = { "a": new Counter(6) };
+    Counter found = byName.get("a");
+    io.println(found == byName.get("a"));
+    found.setValue(11);
+    io.println(byName.get("a").getValue());
+
+    Node node = new Node();
+    io.println(node.next == node);
+    io.println(node.next.ping());
+
+    try {
+        Boom failed = new Boom();
+        io.println(failed.value);
+    } catch (DivisionByZeroError error) {
+        io.println(error.kind());
+        io.println(error.message());
+    }
+
+    Counter shared = new Counter(1);
+    Box box = new Box(shared);
+    io.println(box.wrapped());
+    io.println(box.items[0] == shared);
+    io.println(box.first());
+    Holder holder = new Holder(shared);
+    holder.setValue(2);
+    io.println(holder.value);
+    io.println(holder.itemValue());
+    try {
+        shared.setValue(3);
+        io.println("shared");
+    } catch (ConstViolationError error) {
+        io.println(error.message());
+    }
+    io.println(Counter.sign(0 - 4));
+    int power = 2 ** 10;
+    io.println(power);
+    int bucket = 0 - 5;
+    bucket //= 2;
+    io.println(bucket);
+    int grown = 3;
+    grown += 4;
+    grown *= 2;
+    grown -= 1;
+    grown /= 3;
+    grown %= 5;
+    io.println(grown);
+    first.grow();
+    io.println(first.getValue());
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+built
+built
+true
+false
+true
+4
+true
+built
+5
+ConstViolationError
+GRF-RUN-014
+mutation of frozen value
+ConstViolationError
+ConstViolationError
+5
+10
+4
+NumericConversionError
+GRF-RUN-006
+built
+Counter
+<class 'Counter'>
+built
+true
+8
+built
+true
+11
+true
+1
+before
+DivisionByZeroError
+division by zero
+built
+1
+true
+1
+2
+1
+mutation of frozen value
+-1
+1024
+-3
+4
+8
+"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn defaults_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-defaults-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+type Point {
+    x: flt,
+    y: flt,
+}
+
+class Origin {
+    Point point;
+    int count;
+    Origin() {
+    }
+    flt x() {
+        return this.point.x;
+    }
+}
+
+void main() {
+    int count;
+    io.println(count);
+    count = 10;
+    io.println(count);
+    str name;
+    io.println(name);
+    flt scale;
+    io.println(scale);
+    bln flag;
+    io.println(flag);
+    Origin here = new Origin();
+    io.println(here.x());
+    io.println(here.count);
+    int[] nums;
+    io.println(nums.length());
+    int[2] pair;
+    io.println(pair[0]);
+    io.println(pair[1]);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+0
+10
+
+0
+false
+0
+0
+0
+0
+0
+"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nested_class_record_fields_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-nested-fields-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+type rect {
+    height: auto flt,
+    width: auto flt,
+    area: auto flt,
+}
+
+type pair {
+    value: int,
+}
+
+class Calc {
+    public rect r;
+    public pair extra;
+
+    Calc(auto flt h, auto flt w) {
+        this.r.height = h;
+        this.r.width = w;
+        this.extra.value = 1;
+    }
+
+    Calc area() {
+        this.r.area = this.r.height * this.r.width;
+        return this;
+    }
+}
+
+void main() {
+    Calc c = new Calc(2.0, 5.0);
+    c.area();
+    io.println(c.r.height);
+    io.println(c.r.width);
+    io.println(c.r.area);
+    io.println(c.extra.value);
+    c.r.height = 4.0;
+    io.println(c.r.height);
+    c.extra.value += 3;
+    io.println(c.extra.value);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+2
+5
+10
+1
+4
+4
+"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nullable_values_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-nullable-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+class node {
+    int value;
+    node? next;
+
+    node(int value) {
+        this.value = value;
+    }
+}
+
+void main() {
+    int? number;
+    io.println(number);
+    number = 10;
+    io.println(number);
+
+    node item;
+    item = new node(1);
+    io.println(item.value);
+
+    node? head = new node(2);
+    if (head != null) {
+        head.next = new node(3);
+        io.println(head.value);
+        node? link = head.next;
+        if (link != null) {
+            io.println(link.value);
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+null
+10
+1
+2
+3
+"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nullable_field_chain_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-null-chain-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+class node {
+    int value;
+    node? next;
+
+    node(int value) {
+        this.value = value;
+    }
+}
+
+void main() {
+    node head = new node(1);
+    head.next = new node(2);
+    head.next.next = new node(3);
+    io.println(head.value);
+    io.println(head.next.value);
+    io.println(head.next.next.value);
+
+    node? temp = head;
+    loop (temp != null) {
+        io.println(temp.value);
+        temp = temp.next;
+    }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+1
+2
+3
+1
+2
+3
+"
+        );
+
+        fs::write(
+            &path,
+            r#"
+class node {
+    int value;
+    node? next;
+
+    node(int value) {
+        this.value = value;
+    }
+}
+
+void main() {
+    node head = new node(1);
+    head.next.next = new node(2);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("error[GRF-RUN-015]: null value"),
+            "{}",
+            output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

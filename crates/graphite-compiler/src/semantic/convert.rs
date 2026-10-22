@@ -50,6 +50,7 @@ pub enum ConvOp {
     RecordToStr,
     MapToStr,
     TypeToStr,
+    OptionalToStr,
 }
 
 pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {

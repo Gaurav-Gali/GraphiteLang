@@ -134,12 +134,17 @@ impl<'a> Parser<'a> {
         }
 
         let mut types = Vec::new();
+        let mut classes = Vec::new();
         let mut functions = Vec::new();
         while !self.is_at_end() {
             let before = self.index;
             if self.check(TokenKind::KwType) {
                 if let Some(declaration) = self.parse_type_decl() {
                     types.push(declaration);
+                }
+            } else if self.check(TokenKind::KwClass) {
+                if let Some(declaration) = self.parse_class() {
+                    classes.push(declaration);
                 }
             } else if self.check(TokenKind::KwConst) {
                 let token = self.bump();
@@ -165,7 +170,7 @@ impl<'a> Parser<'a> {
                     ParserDiagnosticKind::InvalidDeclaration,
                     self.current().span,
                     format!(
-                        "expected a function declaration, found {}",
+                        "expected a function or class declaration, found {}",
                         self.describe_current()
                     ),
                 );
@@ -181,8 +186,245 @@ impl<'a> Parser<'a> {
         Program {
             imports,
             types,
+            classes,
             functions,
             span: Span { start, end },
+        }
+    }
+
+    fn parse_class(&mut self) -> Option<ClassDecl> {
+        let start = self.bump().span.start;
+        let name = self.expect_identifier("expected a class name")?;
+        if self.check(TokenKind::Identifier)
+            && matches!(self.current().lexeme.as_str(), "extends" | "implements")
+        {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "inheritance is not supported",
+            );
+            self.bump();
+            if self.check(TokenKind::Identifier) {
+                self.bump();
+            }
+        }
+        if !self.consume(TokenKind::LeftBrace, "expected '{' after class name") {
+            self.synchronize_top_level();
+            return None;
+        }
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        let mut init = None;
+        while !self.check(TokenKind::RightBrace) && !self.is_at_end() {
+            let before = self.index;
+            self.parse_class_member(&name.name, &mut fields, &mut methods, &mut init);
+            if self.index == before && !self.is_at_end() && !self.check(TokenKind::RightBrace) {
+                self.bump_unless_eof();
+            }
+        }
+        let end = if self.check(TokenKind::RightBrace) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected '}' after class members",
+            );
+            self.current().span.end
+        };
+        Some(ClassDecl {
+            name,
+            fields,
+            init,
+            methods,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_class_member(
+        &mut self,
+        class_name: &str,
+        fields: &mut Vec<ClassField>,
+        methods: &mut Vec<ClassMethod>,
+        init: &mut Option<ClassInit>,
+    ) {
+        let mut public = false;
+        let mut saw_visibility = false;
+        let member_start = self.current().span.start;
+        if self.check(TokenKind::KwPublic) || self.check(TokenKind::KwPrivate) {
+            public = self.check(TokenKind::KwPublic);
+            saw_visibility = true;
+            self.bump();
+        }
+        let is_static = if self.check(TokenKind::KwStatic) {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let visible = !saw_visibility || public;
+        if self.check(TokenKind::KwInit) {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                format!("the constructor is '{class_name}'"),
+            );
+            self.bump();
+            if self.check(TokenKind::LeftParen) {
+                self.bump();
+                let _ = self.parse_parameter_list();
+                let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
+            }
+            if self.check(TokenKind::LeftBrace) {
+                let _ = self.parse_block();
+            }
+            return;
+        }
+        if self.check(TokenKind::Identifier)
+            && self.current().lexeme == class_name
+            && self.peek_kind() == TokenKind::LeftParen
+        {
+            if is_static {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    self.current().span,
+                    "the constructor cannot be static",
+                );
+            }
+            self.finish_constructor(visible, init);
+            return;
+        }
+        let const_field = if self.check(TokenKind::KwConst) {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        if self.check(TokenKind::Identifier) && self.peek_kind() == TokenKind::Colon {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "class fields use Type name",
+            );
+            while !self.check(TokenKind::Semicolon)
+                && !self.check(TokenKind::RightBrace)
+                && !self.is_at_end()
+            {
+                self.bump();
+            }
+            let _ = self.consume(TokenKind::Semicolon, "expected ';' after field");
+            return;
+        }
+        if self.starts_type() || self.check(TokenKind::KwAuto) {
+            let conversion = self.parse_conversion();
+            let Some(ty) = self.parse_type() else {
+                return;
+            };
+            let Some(name) = self.expect_identifier("expected a name") else {
+                return;
+            };
+            if self.check(TokenKind::Semicolon) || self.check(TokenKind::Equal) {
+                let initializer = if self.check(TokenKind::Equal) {
+                    self.bump();
+                    Some(self.parse_expression())
+                } else {
+                    None
+                };
+                let end = if self.consume(TokenKind::Semicolon, "expected ';' after field") {
+                    self.previous_end().unwrap_or(name.span.end)
+                } else {
+                    name.span.end
+                };
+                if is_static {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        name.span,
+                        "static fields are not supported",
+                    );
+                    return;
+                }
+                fields.push(ClassField {
+                    span: Span {
+                        start: member_start,
+                        end,
+                    },
+                    name,
+                    ty,
+                    conversion,
+                    const_field,
+                    public: !saw_visibility || public,
+                    initializer,
+                });
+                return;
+            }
+            if const_field {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    name.span,
+                    "const is only valid on a field",
+                );
+            }
+            if conversion == ConversionMode::Auto {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    name.span,
+                    "auto is only valid on a field",
+                );
+            }
+            if !self.consume(TokenKind::LeftParen, "expected '(' after method name") {
+                return;
+            }
+            let parameters = self.parse_parameter_list();
+            let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
+            let body = self.parse_block();
+            methods.push(ClassMethod {
+                public: visible,
+                is_static,
+                span: Span {
+                    start: member_start,
+                    end: body.span.end,
+                },
+                return_type: ty,
+                name,
+                parameters,
+                body,
+            });
+            return;
+        }
+        self.error(
+            ParserDiagnosticKind::InvalidDeclaration,
+            self.current().span,
+            "expected a field, method, or constructor",
+        );
+        self.bump_unless_eof();
+    }
+
+    fn finish_constructor(&mut self, public: bool, init: &mut Option<ClassInit>) {
+        let start = self.current().span.start;
+        self.bump();
+        if !self.consume(TokenKind::LeftParen, "expected '(' after the constructor") {
+            return;
+        }
+        let parameters = self.parse_parameter_list();
+        let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
+        let body = self.parse_block();
+        let constructor = ClassInit {
+            public,
+            parameters,
+            span: Span {
+                start,
+                end: body.span.end,
+            },
+            body,
+        };
+        if init.is_some() {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                constructor.span,
+                "duplicate constructor",
+            );
+        } else {
+            *init = Some(constructor);
         }
     }
 
@@ -611,14 +853,26 @@ impl<'a> Parser<'a> {
         require_semicolon: bool,
     ) -> Option<VariableDecl> {
         let start = head.span.start;
-        if !self.consume(TokenKind::Equal, "expected '=' in variable declaration") {
+        let initializer = if self.check(TokenKind::Equal) {
+            self.bump();
+            Some(self.parse_expression())
+        } else if head.mutable {
+            None
+        } else {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                head.name.span,
+                "a constant requires a value",
+            );
             if require_semicolon {
                 self.synchronize_statement();
             }
             return None;
-        }
-        let initializer = self.parse_expression();
-        let mut end = initializer.span().end;
+        };
+        let mut end = initializer
+            .as_ref()
+            .map(|initializer| initializer.span().end)
+            .unwrap_or(head.span.end);
         if require_semicolon
             && self.consume(
                 TokenKind::Semicolon,
@@ -753,7 +1007,8 @@ impl<'a> Parser<'a> {
             if let Some(head) = self.parse_binding_head() {
                 if self.check(TokenKind::Comma) {
                     self.parse_iteration(vec![head])
-                } else if self.consume(TokenKind::Equal, "expected '=' in loop binding") {
+                } else if self.check(TokenKind::Equal) {
+                    self.bump();
                     let initializer = self.parse_expression();
                     if self.check(TokenKind::Semicolon) {
                         self.bump();
@@ -761,7 +1016,7 @@ impl<'a> Parser<'a> {
                             name: head.name,
                             ty: head.ty,
                             conversion: head.conversion,
-                            initializer,
+                            initializer: Some(initializer),
                             mutable: head.mutable,
                             span: head.span,
                         };
@@ -772,7 +1027,30 @@ impl<'a> Parser<'a> {
                             iterable: initializer,
                         }
                     }
+                } else if self.check(TokenKind::Semicolon) && head.mutable {
+                    self.bump();
+                    let declaration = VariableDecl {
+                        name: head.name,
+                        ty: head.ty,
+                        conversion: head.conversion,
+                        initializer: None,
+                        mutable: head.mutable,
+                        span: head.span,
+                    };
+                    self.parse_cstyle_tail(Some(declaration))
+                } else if !head.mutable {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        head.name.span,
+                        "a constant requires a value",
+                    );
+                    self.parse_cstyle_tail(None)
                 } else {
+                    self.error(
+                        ParserDiagnosticKind::ExpectedToken,
+                        self.current().span,
+                        "expected '=' in loop binding",
+                    );
                     self.parse_cstyle_tail(None)
                 }
             } else {
@@ -899,17 +1177,32 @@ impl<'a> Parser<'a> {
 
     fn parse_assignment(&mut self) -> Expr {
         let left = self.parse_or();
-        if self.check(TokenKind::Equal) {
-            let _operator = self.bump();
-            let value = self.parse_assignment();
-            let span = covering(left.span(), value.span());
-            return Expr::Assignment(AssignmentExpr {
-                target: Box::new(left),
-                value: Box::new(value),
-                span,
-            });
-        }
-        left
+        let Some(op) = self.assignment_operator() else {
+            return left;
+        };
+        self.bump();
+        let value = self.parse_assignment();
+        let span = covering(left.span(), value.span());
+        Expr::Assignment(AssignmentExpr {
+            target: Box::new(left),
+            value: Box::new(value),
+            op,
+            span,
+        })
+    }
+
+    fn assignment_operator(&self) -> Option<Option<BinaryOperator>> {
+        Some(match self.current().kind {
+            TokenKind::Equal => None,
+            TokenKind::PlusEqual => Some(BinaryOperator::Add),
+            TokenKind::MinusEqual => Some(BinaryOperator::Subtract),
+            TokenKind::StarEqual => Some(BinaryOperator::Multiply),
+            TokenKind::SlashEqual => Some(BinaryOperator::Divide),
+            TokenKind::PercentEqual => Some(BinaryOperator::Remainder),
+            TokenKind::SlashSlashEqual => Some(BinaryOperator::FloorDiv),
+            TokenKind::StarStarEqual => Some(BinaryOperator::Power),
+            _ => return None,
+        })
     }
 
     fn parse_or(&mut self) -> Expr {
@@ -965,7 +1258,7 @@ impl<'a> Parser<'a> {
     fn parse_additive(&mut self) -> Expr {
         let mut left = self.parse_multiplicative();
         while matches!(self.current().kind, TokenKind::Plus | TokenKind::Minus) {
-            if self.reject_compound_or_arrow() {
+            if self.reject_arrow() {
                 let _discarded = self.parse_multiplicative();
                 continue;
             }
@@ -987,17 +1280,6 @@ impl<'a> Parser<'a> {
             self.current().kind,
             TokenKind::Star | TokenKind::Slash | TokenKind::Percent
         ) {
-            if self.peek_kind() == TokenKind::Equal {
-                let spelled = match self.current().kind {
-                    TokenKind::Star => "*=",
-                    TokenKind::Slash => "/=",
-                    TokenKind::Percent => "%=",
-                    _ => "compound assignment",
-                };
-                self.reject_sequence(spelled);
-                let _discarded = self.parse_unary();
-                continue;
-            }
             let operator = match self.current().kind {
                 TokenKind::Star => BinaryOperator::Multiply,
                 TokenKind::Slash => BinaryOperator::Divide,
@@ -1012,14 +1294,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Expr {
-        if self.check(TokenKind::Plus) && self.peek_kind() == TokenKind::Equal {
-            self.reject_sequence("+=");
-            return self.parse_unary();
-        }
-        if self.check(TokenKind::Minus) && self.peek_kind() == TokenKind::Equal {
-            self.reject_sequence("-=");
-            return self.parse_unary();
-        }
         if self.check(TokenKind::Minus) && self.peek_kind() == TokenKind::Greater {
             self.reject_sequence("->");
             return self.parse_unary();
@@ -1063,7 +1337,17 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::PlusPlus) || self.check(TokenKind::MinusMinus) {
             return self.finish_update(UpdatePosition::Prefix);
         }
-        self.parse_postfix()
+        self.parse_power()
+    }
+
+    fn parse_power(&mut self) -> Expr {
+        let left = self.parse_postfix();
+        if !self.check(TokenKind::StarStar) {
+            return left;
+        }
+        self.bump();
+        let right = self.parse_unary();
+        binary(left, BinaryOperator::Power, right)
     }
 
     fn parse_postfix(&mut self) -> Expr {
@@ -1333,6 +1617,14 @@ impl<'a> Parser<'a> {
 
     fn parse_primary(&mut self) -> Expr {
         match self.current().kind {
+            TokenKind::KwNew => self.parse_new(),
+            TokenKind::KwThis => {
+                let token = self.bump();
+                Expr::Identifier(Identifier {
+                    name: "this".to_string(),
+                    span: token.span,
+                })
+            }
             TokenKind::Identifier => {
                 let token = self.bump();
                 Expr::Identifier(Identifier {
@@ -1367,6 +1659,10 @@ impl<'a> Parser<'a> {
                     value: token.kind == TokenKind::KwTrue,
                     span: token.span,
                 })
+            }
+            TokenKind::KwNull => {
+                let token = self.bump();
+                Expr::Literal(LiteralExpr::Null { span: token.span })
             }
             TokenKind::InterpolatedStringStart => self.parse_interpolated_string(),
             kind if self.starts_conversion_at(kind) => self.parse_explicit_conversion(),
@@ -1607,11 +1903,17 @@ impl<'a> Parser<'a> {
             }
             bounds.push(Some(bound));
         }
+        let mut optional = false;
+        if self.check(TokenKind::Question) {
+            end = self.bump().span.end;
+            optional = true;
+        }
         Some(TypeSyntax {
             kind,
             name,
             bounds,
             arguments,
+            optional,
             span: Span {
                 start: token.span.start,
                 end,
@@ -1647,22 +1949,66 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn reject_compound_or_arrow(&mut self) -> bool {
-        let kind = self.current().kind;
-        let next = self.peek_kind();
-        if kind == TokenKind::Plus && next == TokenKind::Equal {
-            self.reject_sequence("+=");
-            return true;
-        }
-        if kind == TokenKind::Minus && next == TokenKind::Equal {
-            self.reject_sequence("-=");
-            return true;
-        }
-        if kind == TokenKind::Minus && next == TokenKind::Greater {
+    fn reject_arrow(&mut self) -> bool {
+        if self.current().kind == TokenKind::Minus && self.peek_kind() == TokenKind::Greater {
             self.reject_sequence("->");
             return true;
         }
         false
+    }
+
+    fn parse_new(&mut self) -> Expr {
+        let start = self.bump().span.start;
+        let Some(name) = self.expect_identifier("expected a class name after 'new'") else {
+            return Expr::Literal(LiteralExpr::Integer {
+                lexeme: "0".to_string(),
+                span: self.current().span,
+            });
+        };
+        if !self.consume(TokenKind::LeftParen, "expected '(' after the class name") {
+            return Expr::New(NewExpr {
+                span: Span {
+                    start,
+                    end: name.span.end,
+                },
+                name,
+                arguments: Vec::new(),
+            });
+        }
+        let mut arguments = Vec::new();
+        if !self.check(TokenKind::RightParen) && !self.is_at_end() {
+            loop {
+                if self.check(TokenKind::RightParen) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidExpression,
+                        self.current().span,
+                        "a trailing comma is not allowed in an argument list",
+                    );
+                    break;
+                }
+                arguments.push(self.parse_expression());
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightParen) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ')' after arguments",
+            );
+            self.current().span.end
+        };
+        Expr::New(NewExpr {
+            name,
+            arguments,
+            span: Span { start, end },
+        })
     }
 
     fn reject_sequence(&mut self, spelled: &str) {
@@ -1727,6 +2073,9 @@ impl<'a> Parser<'a> {
             }
             index += 1;
         }
+        if self.kind_at(index) == TokenKind::Question {
+            index += 1;
+        }
         if self.kind_at(index) != TokenKind::Identifier {
             return None;
         }
@@ -1751,11 +2100,14 @@ impl<'a> Parser<'a> {
             || matches!(
                 self.current().kind,
                 TokenKind::Identifier
+                    | TokenKind::KwThis
+                    | TokenKind::KwNew
                     | TokenKind::IntegerLiteral
                     | TokenKind::FloatLiteral
                     | TokenKind::StringLiteral
                     | TokenKind::KwTrue
                     | TokenKind::KwFalse
+                    | TokenKind::KwNull
                     | TokenKind::InterpolatedStringStart
                     | TokenKind::LeftParen
                     | TokenKind::LeftBracket
@@ -1775,6 +2127,7 @@ impl<'a> Parser<'a> {
             name: String::new(),
             bounds: Vec::new(),
             arguments: Vec::new(),
+            optional: false,
             span: token.span,
         };
         self.bump();
@@ -1869,6 +2222,7 @@ impl<'a> Parser<'a> {
             && !self.starts_type()
             && !self.check(TokenKind::KwImport)
             && !self.check(TokenKind::KwType)
+            && !self.check(TokenKind::KwClass)
         {
             if self.check(TokenKind::RightBrace) {
                 self.bump();
