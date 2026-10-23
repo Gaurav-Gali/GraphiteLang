@@ -442,6 +442,31 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             write_optional_expr(out, &child, true, "Step", slice.step.as_deref());
             write_expression(out, &child, false, &slice.object);
         }
+        Expr::Lambda(lambda) => {
+            write_line(out, prefix, last, "Lambda");
+            let child = child_prefix(prefix, last);
+            write_line(
+                out,
+                &child,
+                false,
+                &format!("Return {}", format_type(&lambda.ret)),
+            );
+            if lambda.params.is_empty() {
+                write_line(out, &child, false, "Parameters");
+            } else {
+                write_line(out, &child, false, "Parameters");
+                let params = child_prefix(&child, false);
+                for (index, parameter) in lambda.params.iter().enumerate() {
+                    write_line(
+                        out,
+                        &params,
+                        index + 1 == lambda.params.len(),
+                        &format_parameter(parameter),
+                    );
+                }
+            }
+            write_block(out, &child, true, &lambda.body);
+        }
         Expr::Ternary(ternary) => {
             write_line(out, prefix, last, "Ternary");
             let child = child_prefix(prefix, last);
@@ -465,7 +490,18 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
 }
 
 fn format_parameter(parameter: &Parameter) -> String {
-    format_typed_name(parameter.conversion, &parameter.ty, &parameter.name.name)
+    let base = format_typed_name(parameter.conversion, &parameter.ty, &parameter.name.name);
+    match &parameter.callable {
+        Some(params) => {
+            let nested = params
+                .iter()
+                .map(format_parameter)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{base}({nested})")
+        }
+        None => base,
+    }
 }
 
 fn format_typed_name(conversion: ConversionMode, ty: &TypeSyntax, name: &str) -> String {

@@ -307,6 +307,13 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
             let _ = scan_expr(&ternary.else_branch, tainted, scan);
             false
         }
+        Expr::Lambda(lambda) => {
+            let mut nested = tainted.clone();
+            for statement in &lambda.body.statements {
+                scan_stmt(statement, &mut nested, scan);
+            }
+            false
+        }
         Expr::Index(index) => {
             let _ = scan_expr(&index.object, tainted, scan);
             let _ = scan_expr(&index.index, tainted, scan);
@@ -356,6 +363,7 @@ fn direct_receiver(expr: &Expr, tainted: &HashSet<String>) -> bool {
     }
 }
 
+#[derive(Clone)]
 struct Flow {
     assigned: Vec<bool>,
     tainted_vars: HashSet<String>,
@@ -715,6 +723,11 @@ fn walk_expr(
             let _ = walk_expr(&ternary.condition, class, leaks, checking, flow, issues);
             let _ = walk_expr(&ternary.then_branch, class, leaks, checking, flow, issues);
             let _ = walk_expr(&ternary.else_branch, class, leaks, checking, flow, issues);
+            false
+        }
+        Expr::Lambda(lambda) => {
+            let mut nested = flow.clone();
+            walk_block(&lambda.body, class, leaks, checking, &mut nested, issues);
             false
         }
         Expr::Index(index) => {

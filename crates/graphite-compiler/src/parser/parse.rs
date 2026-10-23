@@ -108,6 +108,7 @@ pub fn parse(source_name: &str, tokens: &[Token]) -> ParseOutput {
         tokens,
         index: 0,
         diagnostics: Vec::new(),
+        soft_terminator: 0,
     };
     let program = parser.parse_program();
     ParseOutput {
@@ -121,6 +122,8 @@ struct Parser<'a> {
     tokens: &'a [Token],
     index: usize,
     diagnostics: Vec<ParserDiagnostic>,
+    /// Unbraced lambda bodies leave `,` `)` and `;` for the enclosing syntax.
+    soft_terminator: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -589,15 +592,29 @@ impl<'a> Parser<'a> {
         let conversion = self.parse_conversion();
         let ty = self.parse_type()?;
         let name = self.expect_identifier("expected a parameter name")?;
-        let span = Span {
-            start,
-            end: name.span.end,
+        let mut end = name.span.end;
+        let callable = if self.check(TokenKind::LeftParen) {
+            self.bump();
+            let nested = self.parse_parameter_list();
+            if self.check(TokenKind::RightParen) {
+                end = self.bump().span.end;
+            } else {
+                self.error(
+                    ParserDiagnosticKind::ExpectedToken,
+                    self.current().span,
+                    "expected ')' after callable parameters",
+                );
+            }
+            Some(nested)
+        } else {
+            None
         };
         Some(Parameter {
             name,
             ty,
             conversion,
-            span,
+            callable,
+            span: Span { start, end },
         })
     }
 
@@ -740,13 +757,25 @@ impl<'a> Parser<'a> {
         self.finish_expression_statement(expression)
     }
 
+    fn finish_statement_end(&mut self, fallback: SourcePosition, message: &str) -> SourcePosition {
+        if self.soft_terminator > 0
+            && matches!(
+                self.current().kind,
+                TokenKind::Comma | TokenKind::RightParen | TokenKind::Semicolon
+            )
+        {
+            return fallback;
+        }
+        if self.consume(TokenKind::Semicolon, message) {
+            self.previous_end().unwrap_or(fallback)
+        } else {
+            fallback
+        }
+    }
+
     fn finish_expression_statement(&mut self, expression: Expr) -> Stmt {
         let start = expression.span().start;
-        let end = if self.consume(TokenKind::Semicolon, "expected ';' after expression") {
-            self.previous_end().unwrap_or(expression.span().end)
-        } else {
-            expression.span().end
-        };
+        let end = self.finish_statement_end(expression.span().end, "expected ';' after expression");
         Stmt::Expression(ExpressionStmt {
             expression,
             span: Span { start, end },
@@ -1036,15 +1065,12 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let end = if self.consume(TokenKind::Semicolon, "expected ';' after return") {
-            self.previous_end().unwrap_or(self.current().span.end)
-        } else {
-            value
-                .as_ref()
-                .map(Expr::span)
-                .map(|span| span.end)
-                .unwrap_or(self.current().span.end)
-        };
+        let fallback = value
+            .as_ref()
+            .map(Expr::span)
+            .map(|span| span.end)
+            .unwrap_or(self.current().span.end);
+        let end = self.finish_statement_end(fallback, "expected ';' after return");
         Stmt::Return(ReturnStmt {
             value,
             span: Span { start, end },
@@ -1814,6 +1840,141 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn starts_lambda(&self) -> bool {
+        if self.peek_kind() != TokenKind::LeftParen {
+            return false;
+        }
+        let keyword =
+            type_kind(self.current().kind).is_some() && self.current().kind != TokenKind::KwMap;
+        if !keyword && self.current().kind != TokenKind::Identifier {
+            return false;
+        }
+        self.lambda_parameters_at(self.index + 2, keyword)
+    }
+
+    fn lambda_parameters_at(&self, index: usize, allow_empty: bool) -> bool {
+        if self.kind_at(index) == TokenKind::RightParen {
+            return allow_empty && self.can_start_lambda_body(self.kind_at(index + 1));
+        }
+        self.lambda_parameter_at(index)
+    }
+
+    fn lambda_parameter_at(&self, mut index: usize) -> bool {
+        if self.kind_at(index) == TokenKind::KwAuto {
+            index += 1;
+        }
+        let kind = self.kind_at(index);
+        if kind == TokenKind::KwMap || type_kind(kind).is_none() && kind != TokenKind::Identifier {
+            return false;
+        }
+        index += 1;
+        let Some(index) = self.skip_type_suffix(index) else {
+            return false;
+        };
+        self.kind_at(index) == TokenKind::Identifier
+    }
+
+    /// Skip `?` and array bounds that are part of a type (`[]` or `[4]`).
+    /// `arr[i]` is an index expression, so it is not a lambda parameter.
+    fn skip_type_suffix(&self, mut index: usize) -> Option<usize> {
+        if self.kind_at(index) == TokenKind::Question {
+            index += 1;
+        }
+        while self.kind_at(index) == TokenKind::LeftBracket {
+            let inside = self.kind_at(index + 1);
+            if inside == TokenKind::RightBracket {
+                index += 2;
+                continue;
+            }
+            if inside == TokenKind::IntegerLiteral
+                && self.kind_at(index + 2) == TokenKind::RightBracket
+            {
+                index += 3;
+                continue;
+            }
+            return None;
+        }
+        Some(index)
+    }
+
+    fn can_start_lambda_body(&self, kind: TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::LeftBrace
+                | TokenKind::KwReturn
+                | TokenKind::KwIf
+                | TokenKind::KwLoop
+                | TokenKind::KwConst
+                | TokenKind::KwAuto
+                | TokenKind::KwTry
+                | TokenKind::Identifier
+                | TokenKind::KwThis
+                | TokenKind::KwNew
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+                | TokenKind::KwNull
+                | TokenKind::IntegerLiteral
+                | TokenKind::FloatLiteral
+                | TokenKind::StringLiteral
+                | TokenKind::InterpolatedStringStart
+                | TokenKind::Bang
+                | TokenKind::Tilde
+                | TokenKind::Minus
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus
+                | TokenKind::LeftParen
+                | TokenKind::LeftBracket
+        ) || (type_kind(kind).is_some() && kind != TokenKind::KwMap)
+    }
+
+    fn parse_lambda(&mut self) -> Expr {
+        let start = self.current().span.start;
+        let Some(ret) = self.parse_type() else {
+            return Expr::Identifier(Identifier {
+                name: String::new(),
+                span: self.current().span,
+            });
+        };
+        let _ = self.consume(TokenKind::LeftParen, "expected '(' after lambda return type");
+        let params = self.parse_parameter_list();
+        if self.check(TokenKind::RightParen) {
+            self.bump();
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ')' after lambda parameters",
+            );
+        }
+        let (body, end) = if self.check(TokenKind::LeftBrace) {
+            let block = self.parse_block();
+            let end = block.span.end;
+            (block, end)
+        } else {
+            self.soft_terminator += 1;
+            let statement = self.parse_statement();
+            self.soft_terminator -= 1;
+            let span = statement
+                .as_ref()
+                .map(statement_span)
+                .unwrap_or(self.current().span);
+            let end = span.end;
+            (
+                BlockStmt {
+                    statements: statement.into_iter().collect(),
+                    span,
+                },
+                end,
+            )
+        };
+        Expr::Lambda(LambdaExpr {
+            ret,
+            params,
+            body,
+            span: Span { start, end },
+        })
+    }
+
     fn parse_primary(&mut self) -> Expr {
         match self.current().kind {
             TokenKind::KwNew => self.parse_new(),
@@ -1824,6 +1985,7 @@ impl<'a> Parser<'a> {
                     span: token.span,
                 })
             }
+            TokenKind::Identifier if self.starts_lambda() => self.parse_lambda(),
             TokenKind::Identifier => {
                 let token = self.bump();
                 Expr::Identifier(Identifier {
@@ -1864,6 +2026,7 @@ impl<'a> Parser<'a> {
                 Expr::Literal(LiteralExpr::Null { span: token.span })
             }
             TokenKind::InterpolatedStringStart => self.parse_interpolated_string(),
+            _ if self.starts_lambda() => self.parse_lambda(),
             kind if self.starts_conversion_at(kind) => self.parse_explicit_conversion(),
             TokenKind::LeftBracket => self.parse_array_literal(),
             TokenKind::LeftBrace => self.parse_record_literal(),

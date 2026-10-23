@@ -1,0 +1,140 @@
+import grf.io;
+
+int square(int x) {
+    return x ** 2;
+}
+
+int execute(int value, int operation(int x)) {
+    return operation(value);
+}
+
+int transform(int value, int operation(int x)) {
+    return operation(value);
+}
+
+int combine(int value, int first(int x), int second(int x)) {
+    int intermediate = first(value);
+    return second(intermediate);
+}
+
+int compose(int value, int outer(int x), int inner(int x)) {
+    return outer(inner(value));
+}
+
+void run_callback(void callback()) {
+    callback();
+}
+
+void notify(int value, void callback(int x)) {
+    callback(value);
+}
+
+void repeat(int count, void callback(int index)) {
+    int i = 0;
+    loop (i < count) {
+        callback(i);
+        i = i + 1;
+    }
+}
+
+int negate(int x) {
+    return 0 - x;
+}
+
+int process(int value, int operation(int x)) {
+    return operation(value);
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+
+int apply(int value, int operation(auto int x)) {
+    return operation(value);
+}
+
+int run_twice(int value, int operation(int x)) {
+    return operation(operation(value));
+}
+
+int validate_and_process(int value, bln validator(int x), int processor(int x)) {
+    if (validator(value)) {
+        return processor(value);
+    }
+    return 0;
+}
+
+void main() {
+    int result = square(5);
+    io.println(result);
+
+    int answer = execute(5, int (int x) return x ** 2);
+    io.println(answer);
+
+    int squared = execute(6, int (int x) return x ** 2);
+    int doubled = execute(6, int (int x) return x * 2);
+    int incremented = execute(6, int (int x) return x + 1);
+    io.println(squared);
+    io.println(doubled);
+    io.println(incremented);
+
+    auto int multiply = int (int x) return x * 10;
+    int first = multiply(5);
+    int second = multiply(8);
+    io.println(first);
+    io.println(second);
+
+    auto int calculate = int (int x) {
+        int squared_value = x ** 2;
+        int final_value = squared_value + 10;
+        return final_value;
+    };
+    io.println(calculate(4));
+
+    auto int triple = int (int x) return x * 3;
+    int transformed = transform(7, triple);
+    io.println(transformed);
+
+    int combined = combine(
+        5,
+        int (int x) return x + 3,
+        int (int x) return x * 2
+    );
+    io.println(combined);
+
+    int composition_result = compose(
+        4,
+        int (int x) return x + 10,
+        int (int x) return x ** 2
+    );
+    io.println(composition_result);
+
+    run_callback(void () io.println("Callback executed!"));
+    notify(42, void (int x) io.println(x));
+    repeat(3, void (int index) io.println(index));
+
+    int negative_value = process(12, negate);
+    io.println(negative_value);
+
+    auto int add_ten = int (int x) return add(x, 10);
+    io.println(add_ten(5));
+
+    int conversion_result = apply(9, int (int x) return x * x);
+    io.println(conversion_result);
+
+    int final_result = run_twice(3, int (int x) return x + 4);
+    io.println(final_result);
+
+    int valid_result = validate_and_process(
+        5,
+        bln (int x) return x > 0,
+        int (int x) return x * 10
+    );
+    int invalid_result = validate_and_process(
+        -5,
+        bln (int x) return x > 0,
+        int (int x) return x * 10
+    );
+    io.println(valid_result);
+    io.println(invalid_result);
+}

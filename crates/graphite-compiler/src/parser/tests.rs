@@ -1084,3 +1084,111 @@ fn reserved_keywords_cannot_be_declaration_names() {
         );
     }
 }
+
+#[test]
+fn lambdas_end_at_the_enclosing_delimiter() {
+    let program = parse_clean(
+        "\
+import grf.io;
+
+int execute(int value, int operation(int x)) {
+    return operation(value);
+}
+
+int combine(int value, int first(int x), int second(int x)) {
+    return second(first(value));
+}
+
+void run(void callback()) {
+    callback();
+}
+
+void main() {
+    auto int square = int (int x) return x ** 2;
+    int answer = execute(5, int (int x) return x ** 2);
+    int combined = combine(5, int (int x) return x + 3, int (int x) return x * 2);
+    auto int calculate = int (int x) {
+        int squared_value = x ** 2;
+        return squared_value;
+    };
+    run(void () io.println(\"ok\"));
+    int value = int();
+}
+",
+    );
+    let operation = &program.functions[0].parameters[1];
+    assert_eq!(operation.name.name, "operation");
+    let nested = operation.callable.as_ref().expect("callable parameter");
+    assert_eq!(nested.len(), 1);
+    assert_eq!(nested[0].name.name, "x");
+    assert!(program.functions[2].parameters[0].callable.as_ref().unwrap().is_empty());
+
+    let main = &program.functions[3].body.statements;
+    let Stmt::VariableDecl(square) = &main[0] else {
+        panic!("stored lambda");
+    };
+    let Expr::Lambda(lambda) = square.initializer.as_ref().unwrap() else {
+        panic!("initializer is a lambda");
+    };
+    assert_eq!(lambda.body.statements.len(), 1);
+    assert!(matches!(lambda.body.statements[0], Stmt::Return(_)));
+
+    let Stmt::VariableDecl(answer) = &main[1] else {
+        panic!("call");
+    };
+    let Expr::Call(call) = answer.initializer.as_ref().unwrap() else {
+        panic!("execute call");
+    };
+    assert!(matches!(call.arguments[1], Expr::Lambda(_)));
+
+    let Stmt::VariableDecl(combined) = &main[2] else {
+        panic!("combine");
+    };
+    let Expr::Call(call) = combined.initializer.as_ref().unwrap() else {
+        panic!("combine call");
+    };
+    assert!(matches!(call.arguments[1], Expr::Lambda(_)));
+    assert!(matches!(call.arguments[2], Expr::Lambda(_)));
+
+    let Stmt::VariableDecl(calculate) = &main[3] else {
+        panic!("block lambda");
+    };
+    let Expr::Lambda(lambda) = calculate.initializer.as_ref().unwrap() else {
+        panic!("block");
+    };
+    assert_eq!(lambda.body.statements.len(), 2);
+
+    let Stmt::VariableDecl(conversion) = &main[5] else {
+        panic!("conversion");
+    };
+    assert!(matches!(
+        conversion.initializer.as_ref().unwrap(),
+        Expr::Conversion(_)
+    ));
+}
+
+#[test]
+fn calling_a_callable_with_an_index_is_not_a_lambda() {
+    let program = parse_clean(
+        "\
+int[] calc(int[] arr, int fn(int x)) {
+    int i = 0;
+    arr[i] = fn(arr[i]);
+    return arr;
+}
+
+void main() {
+}
+",
+    );
+    let Stmt::Expression(statement) = &program.functions[0].body.statements[1] else {
+        panic!("assignment statement");
+    };
+    let Expr::Assignment(assignment) = &statement.expression else {
+        panic!("assignment");
+    };
+    let Expr::Call(call) = &*assignment.value else {
+        panic!("fn(arr[0]) is a call, not a lambda");
+    };
+    assert!(matches!(call.callee.as_ref(), Expr::Identifier(name) if name.name == "fn"));
+}

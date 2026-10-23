@@ -311,7 +311,10 @@ void main() {
 }
 ",
     );
-    assert!(calls.contains("unknown name 'add'"), "{calls}");
+    assert!(
+        calls.contains("expected 'int64', found '(int64, int64) -> int64'"),
+        "{calls}"
+    );
 }
 
 #[test]
@@ -2240,5 +2243,76 @@ void main() {
     assert!(
         unchecked.contains("GRF-SEM-026 a nullable value must be checked before it is used"),
         "{unchecked}"
+    );
+}
+
+#[test]
+fn lambdas_store_callables_and_reject_captures() {
+    let valid = analyze_source(
+        "\
+import grf.io;
+
+int apply(int value, int operation(auto int x)) return operation(value);
+int negate(int x) return 0 - x;
+int add(int a, int b) return a + b;
+
+void main() {
+    auto int square = int (int x) return x ** 2;
+    int result = square(5);
+    int converted = apply(9, int (int x) return x * x);
+    int negative = apply(12, negate);
+    square = int (int x) return x + 1;
+    auto int add_ten = int (int x) return add(x, 10);
+    io.println(add_ten(result));
+    io.println(converted);
+    io.println(negative);
+}
+",
+    );
+    assert!(
+        valid.diagnostics.is_empty(),
+        "{:?}",
+        valid
+            .diagnostics
+            .iter()
+            .map(|diagnostic| &diagnostic.message)
+            .collect::<Vec<_>>()
+    );
+
+    let rejected = messages(
+        "\
+int apply(int value, int operation(auto int x)) {
+    return operation(value);
+}
+
+void main() {
+    int factor = 10;
+    auto int multiply = int (int x) return x * factor;
+    int plain = int (int x) return x ** 2;
+    int bad = apply(5, int (flt x) return x ** 2);
+    auto int fact = int (int n) {
+        if (n <= 1) return 1;
+        return n * fact(n - 1);
+    };
+    auto int square = int (int x) return x ** 2;
+    int n = square;
+}
+",
+    );
+    assert!(rejected.contains("cannot capture 'factor'"), "{rejected}");
+    assert!(rejected.contains("cannot capture 'fact'"), "{rejected}");
+    assert!(
+        rejected.contains("cannot convert a lambda to 'int64'"),
+        "{rejected}"
+    );
+    assert!(rejected.contains("flt64"), "{rejected}");
+    assert!(
+        rejected.contains("expected 'int64', found '(flt64) -> int64'")
+            || rejected.contains("expected '(int64) -> int64'"),
+        "{rejected}"
+    );
+    assert!(
+        rejected.contains("expected 'int64', found '(int64) -> int64'"),
+        "{rejected}"
     );
 }

@@ -610,6 +610,18 @@ void main() {
     }
 
     #[test]
+    fn lambdas_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/lambdas/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "25\n25\n36\n12\n7\n50\n80\n26\n21\n16\n26\nCallback executed!\n42\n0\n1\n2\n-12\n15\n81\n11\n50\n0\n"
+        );
+    }
+
+    #[test]
     fn sample_program_runs() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.grf");

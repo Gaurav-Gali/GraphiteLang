@@ -1,11 +1,17 @@
 import grf.io;
 
 void main() {
-  int[] arr = [1,2,3,4];
+  str[] arr = io.input(">>> ").split("");
+  auto int[] arr_int = forEach(arr, int (str x) return int(x));
 
-  int n = 9;
+  io.println(arr_int);
+}
 
-  int m = n >= 10 ? 20 : 10;
+int[] forEach(str[] arr, int fn(str x)) {
+  int[] n = [];
+  loop(str i = arr.iter()) {
+    n.push(fn(i));
+  }
 
-  io.println(f"{n} - {m}");
+  return n;
 }

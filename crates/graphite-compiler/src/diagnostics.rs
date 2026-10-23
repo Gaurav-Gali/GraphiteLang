@@ -150,6 +150,8 @@ pub fn semantic_code(message: &str) -> &'static str {
         "GRF-SEM-024"
     } else if message.contains("cannot escape") {
         "GRF-SEM-025"
+    } else if message.contains("cannot capture") {
+        "GRF-SEM-027"
     } else if message.contains("nullable")
         || message.contains("null requires")
         || message.contains("null cannot")

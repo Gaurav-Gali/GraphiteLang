@@ -84,6 +84,9 @@ pub struct Parameter {
     pub name: Identifier,
     pub ty: TypeSyntax,
     pub conversion: ConversionMode,
+    /// Nested parameters when this parameter is callable, as in `int op(int x)`.
+    /// `Some` with an empty list is a zero-argument callable.
+    pub callable: Option<Vec<Parameter>>,
     pub span: Span,
 }
 
@@ -216,6 +219,14 @@ pub struct TernaryExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LambdaExpr {
+    pub ret: TypeSyntax,
+    pub params: Vec<Parameter>,
+    pub body: BlockStmt,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionStmt {
     pub expression: Expr,
     pub span: Span,
@@ -279,6 +290,7 @@ pub enum Expr {
     Index(IndexExpr),
     Slice(SliceExpr),
     Ternary(TernaryExpr),
+    Lambda(LambdaExpr),
     Parenthesized { expression: Box<Expr>, span: Span },
 }
 
@@ -301,6 +313,7 @@ impl Expr {
             Expr::Index(index) => index.span,
             Expr::Slice(slice) => slice.span,
             Expr::Ternary(ternary) => ternary.span,
+            Expr::Lambda(lambda) => lambda.span,
             Expr::Parenthesized { span, .. } => *span,
         }
     }

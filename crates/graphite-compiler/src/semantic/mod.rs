@@ -58,6 +58,20 @@ pub struct MapId(pub u32);
 pub struct ClassId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallableId(pub u32);
+
+/// Parameter types and return type of a callable value.
+///
+/// `autos` records which parameters convert at the call. Compatibility
+/// compares `params` and `ret` and ignores `autos`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallableSignature {
+    pub params: Vec<CanonicalType>,
+    pub autos: Vec<bool>,
+    pub ret: CanonicalType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalType {
     Void,
     Int16,
@@ -84,6 +98,8 @@ pub enum CanonicalType {
     },
     /// `T?`. The inner type is never itself optional.
     Optional(OptionalKind),
+    /// A function value. The signature lives in the program's callable table.
+    Callable(CallableId),
 }
 
 /// The type inside `T?`. One level of nullability.
@@ -191,12 +207,16 @@ impl CanonicalType {
                 name
             }
             CanonicalType::Optional(kind) => format!("Option<{}>", kind.canonical().rust_name()),
+            CanonicalType::Callable(_) => "fn()".to_string(),
         }
     }
 
     pub fn optional(self) -> Option<CanonicalType> {
         let kind = match self {
-            CanonicalType::Optional(_) | CanonicalType::Void | CanonicalType::ErrorHandle => {
+            CanonicalType::Optional(_)
+            | CanonicalType::Void
+            | CanonicalType::ErrorHandle
+            | CanonicalType::Callable(_) => {
                 return None;
             }
             CanonicalType::Int16 => OptionalKind::Int16,
@@ -272,6 +292,7 @@ impl CanonicalType {
                 name
             }
             CanonicalType::Optional(kind) => format!("{}?", kind.canonical().spelling()),
+            CanonicalType::Callable(_) => "callable".to_string(),
         }
     }
 
@@ -410,7 +431,7 @@ impl CanonicalType {
             CanonicalType::Class(id) => Leaf::Class(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
-            CanonicalType::Optional(_) => Leaf::Void,
+            CanonicalType::Optional(_) | CanonicalType::Callable(_) => Leaf::Void,
         }
     }
 
@@ -566,6 +587,7 @@ pub struct CheckedProgram {
     pub records: Vec<CheckedRecord>,
     pub classes: Vec<CheckedClass>,
     pub maps: Vec<MapShape>,
+    pub callables: Vec<CallableSignature>,
     pub functions: Vec<CheckedFn>,
 }
 
@@ -866,6 +888,29 @@ pub enum CheckedExpr {
         column: u32,
         end_column: u32,
     },
+    /// A non-capturing lambda. Its type is `Callable`.
+    Lambda {
+        params: Vec<(String, CanonicalType)>,
+        body: Box<Vec<CheckedStmt>>,
+        ret: CanonicalType,
+        ty: CanonicalType,
+    },
+    /// A named function used as a value.
+    FunctionRef {
+        name: String,
+        ty: CanonicalType,
+    },
+    /// A call through a callable value.
+    Invoke {
+        callee: Box<CheckedExpr>,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        callee_name: String,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
     HandleCall {
         name: String,
         method: String,
@@ -1097,6 +1142,9 @@ impl CheckedExpr {
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. }
+            | CheckedExpr::Lambda { ty, .. }
+            | CheckedExpr::FunctionRef { ty, .. }
+            | CheckedExpr::Invoke { ty, .. }
             | CheckedExpr::HandleCall { ty, .. } => *ty,
             CheckedExpr::Convert { to, .. } | CheckedExpr::NumCast { to, .. } => *to,
             CheckedExpr::Array { ty, .. }
@@ -1137,6 +1185,7 @@ pub enum CheckedPart {
     Expr(CheckedExpr),
 }
 
+#[derive(Clone)]
 struct Signature {
     params: Vec<ParamInfo>,
     ret: CanonicalType,
@@ -1187,6 +1236,9 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         iterating: Vec::new(),
         narrowed: Vec::new(),
         allow_convert: false,
+        callables: Vec::new(),
+        lambda_floor: None,
+        lambda_var: None,
     };
     checker.collect_imports(program);
     checker.collect_classes(program);
@@ -1230,6 +1282,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
                     .collect(),
                 classes: checked_classes,
                 maps: checker.maps,
+                callables: checker.callables,
                 functions,
             })
         } else {
@@ -1291,6 +1344,8 @@ struct RawParam {
     syntax: TypeSyntax,
     auto: bool,
     span: Span,
+    name_span: Span,
+    callable: Option<Vec<Parameter>>,
 }
 
 struct ClassInfo {
@@ -1323,6 +1378,11 @@ struct Checker<'a> {
     iterating: Vec<IterLock>,
     narrowed: Vec<HashMap<String, CanonicalType>>,
     allow_convert: bool,
+    callables: Vec<CallableSignature>,
+    /// Scope index of the innermost lambda. Bindings below it are captures.
+    lambda_floor: Option<usize>,
+    /// Name of the callable variable currently being initialized.
+    lambda_var: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1669,6 +1729,7 @@ impl<'a> Checker<'a> {
                 name
             }
             CanonicalType::Optional(kind) => format!("{}?", self.spell(kind.canonical())),
+            CanonicalType::Callable(id) => self.spell_callable(id),
             other => other.spelling(),
         }
     }
@@ -1766,33 +1827,7 @@ impl<'a> Checker<'a> {
     fn collect_functions(&mut self, program: &Program) {
         for function in &program.functions {
             let ret = self.resolve_type(&function.return_type);
-            let mut params = Vec::new();
-            let mut names = HashMap::new();
-            for parameter in &function.parameters {
-                let ty = self.resolve_type(&parameter.ty);
-                if ty == CanonicalType::Void {
-                    self.error(parameter.ty.span, "a parameter cannot have type void");
-                }
-                if ty.is_void_array() {
-                    self.error(parameter.ty.span, "void is not a valid array element type");
-                }
-                let _ = self.reject_unspecified_type(ty, parameter.ty.span);
-                if names
-                    .insert(parameter.name.name.clone(), parameter.span)
-                    .is_some()
-                {
-                    self.error(
-                        parameter.name.span,
-                        format!("duplicate parameter '{}'", parameter.name.name),
-                    );
-                }
-                let _ = self.reject_reserved_name(&parameter.name.name, parameter.name.span);
-                params.push(ParamInfo {
-                    name: parameter.name.name.clone(),
-                    ty,
-                    auto: parameter.conversion == ConversionMode::Auto,
-                });
-            }
+            let params = self.resolve_parameters(&function.parameters);
             self.reject_unspecified_type(ret, function.return_type.span);
             if ret.is_void_array() {
                 self.error(
@@ -2255,7 +2290,8 @@ impl<'a> Checker<'a> {
             CanonicalType::Class(_)
             | CanonicalType::Type
             | CanonicalType::Void
-            | CanonicalType::ErrorHandle => None,
+            | CanonicalType::ErrorHandle
+            | CanonicalType::Callable(_) => None,
         }
     }
 
@@ -2277,6 +2313,9 @@ impl<'a> Checker<'a> {
             return None;
         }
         let (value, ready) = if let Some(initializer) = &decl.initializer {
+            if let Some(lambda) = as_lambda(initializer) {
+                return self.bind_lambda_variable(decl, ty, lambda);
+            }
             let saved = self.allow_convert;
             self.allow_convert = decl.conversion == ConversionMode::Auto;
             let value = self.check_expr(initializer, Some(ty), false);
@@ -2332,6 +2371,172 @@ impl<'a> Checker<'a> {
         })
     }
 
+    fn bind_lambda_variable(
+        &mut self,
+        decl: &VariableDecl,
+        declared: CanonicalType,
+        lambda: &LambdaExpr,
+    ) -> Option<CheckedStmt> {
+        let saved_name = self.lambda_var.clone();
+        self.lambda_var = Some(decl.name.name.clone());
+        let value = self.check_lambda(lambda);
+        self.lambda_var = saved_name;
+        if decl.conversion != ConversionMode::Auto {
+            self.error(
+                decl.ty.span,
+                format!("cannot convert a lambda to '{}'", self.spell(declared)),
+            );
+            return None;
+        }
+        let CanonicalType::Callable(id) = value.ty() else {
+            return None;
+        };
+        let ret = self
+            .callables
+            .get(id.0 as usize)
+            .map(|sig| sig.ret)
+            .unwrap_or(CanonicalType::Void);
+        if ret != declared {
+            self.error(
+                decl.ty.span,
+                format!(
+                    "type mismatch: expected a lambda returning '{}', found '{}'",
+                    self.spell(declared),
+                    self.spell(ret)
+                ),
+            );
+        }
+        if self.reject_reserved_name(&decl.name.name, decl.name.span) {
+            return None;
+        }
+        if self
+            .scopes
+            .last()
+            .is_some_and(|scope| scope.contains_key(&decl.name.name))
+        {
+            self.error(
+                decl.name.span,
+                format!("'{}' is already declared in this scope", decl.name.name),
+            );
+            return None;
+        }
+        let ty = value.ty();
+        self.scopes.last_mut().unwrap().insert(
+            decl.name.name.clone(),
+            Binding {
+                ty,
+                mutable: decl.mutable,
+                auto: false,
+                ready: true,
+            },
+        );
+        Some(CheckedStmt::Let {
+            name: decl.name.name.clone(),
+            ty,
+            value,
+            mutable: decl.mutable,
+        })
+    }
+
+    fn check_lambda(&mut self, lambda: &LambdaExpr) -> CheckedExpr {
+        let ret = self.resolve_type(&lambda.ret);
+        if ret.is_void_array() {
+            self.error(lambda.ret.span, "void is not a valid array element type");
+        }
+        let _ = self.reject_unspecified_type(ret, lambda.ret.span);
+        let params = self.resolve_parameters(&lambda.params);
+        let id = self.intern_callable(&params, ret);
+        let saved_return = self.current_return;
+        let saved_loop = self.loop_depth;
+        let saved_finally = self.finally_depth;
+        let saved_floor = self.lambda_floor;
+        self.current_return = ret;
+        self.loop_depth = 0;
+        self.finally_depth = 0;
+        self.scopes.push(HashMap::new());
+        self.lambda_floor = Some(self.scopes.len() - 1);
+        for param in &params {
+            self.scopes.last_mut().unwrap().insert(
+                param.name.clone(),
+                Binding {
+                    ty: param.ty,
+                    mutable: true,
+                    auto: param.auto,
+                    ready: true,
+                },
+            );
+        }
+        let body = self.check_block_stmts(&lambda.body);
+        if ret != CanonicalType::Void && !guaranteed_return(&lambda.body.statements) {
+            self.error(lambda.span, "lambda must return a value on every path");
+        }
+        self.scopes.pop();
+        self.current_return = saved_return;
+        self.loop_depth = saved_loop;
+        self.finally_depth = saved_finally;
+        self.lambda_floor = saved_floor;
+        CheckedExpr::Lambda {
+            params: params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty))
+                .collect(),
+            body: Box::new(body),
+            ret,
+            ty: CanonicalType::Callable(id),
+        }
+    }
+
+    fn finish_invoke(
+        &mut self,
+        callee: CheckedExpr,
+        id: CallableId,
+        arguments: &[Expr],
+        span: Span,
+        callee_name: &str,
+    ) -> CheckedExpr {
+        let sig = self
+            .callables
+            .get(id.0 as usize)
+            .cloned()
+            .unwrap_or(CallableSignature {
+                params: Vec::new(),
+                autos: Vec::new(),
+                ret: CanonicalType::Void,
+            });
+        let params = sig
+            .params
+            .iter()
+            .zip(sig.autos.iter())
+            .map(|(ty, auto)| (*ty, *auto))
+            .collect::<Vec<_>>();
+        let args = self.check_arguments(arguments, &params, span);
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::Invoke {
+            callee: Box::new(callee),
+            args,
+            ty: sig.ret,
+            callee_name: callee_name.to_string(),
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn binding_scope(&self, name: &str) -> Option<usize> {
+        self.scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+    }
+
+    fn reject_capture(&mut self, name: &str, scope: usize, span: Span) -> bool {
+        if self.lambda_floor.is_some_and(|floor| scope < floor) {
+            self.error(span, format!("lambda cannot capture '{name}'"));
+            return true;
+        }
+        false
+    }
+
     fn check_expr(
         &mut self,
         expr: &Expr,
@@ -2347,6 +2552,7 @@ impl<'a> Checker<'a> {
                 self.check_expr(expression, expected, allow_void)
             }
             Expr::Ternary(ternary) => self.check_ternary(ternary, expected, allow_void),
+            Expr::Lambda(lambda) => self.check_lambda(lambda),
             Expr::Literal(LiteralExpr::Integer { lexeme, span }) => {
                 self.integer_literal(lexeme, expected, *span)
             }
@@ -2925,9 +3131,23 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         };
         let Some(binding) = self.lookup(&ident.name) else {
-            self.error(ident.span, format!("unknown name '{}'", ident.name));
+            if self.lambda_var.as_deref() == Some(ident.name.as_str()) {
+                self.error(
+                    ident.span,
+                    format!("lambda cannot capture '{}'", ident.name),
+                );
+            } else {
+                self.error(ident.span, format!("unknown name '{}'", ident.name));
+            }
+            let _ = self.check_expr(&expr.value, None, false);
             return self.dummy(None);
         };
+        if let Some(scope) = self.binding_scope(&ident.name) {
+            if self.reject_capture(&ident.name, scope, ident.span) {
+                let _ = self.check_expr(&expr.value, None, false);
+                return self.dummy(Some(binding.ty));
+            }
+        }
         self.reject_binding_write(&ident.name, ident.span, false);
         let ty = binding.ty;
         let auto = binding.auto;
@@ -3047,9 +3267,21 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         };
         let Some(binding) = self.lookup(&ident.name) else {
-            self.error(ident.span, format!("unknown name '{}'", ident.name));
+            if self.lambda_var.as_deref() == Some(ident.name.as_str()) {
+                self.error(
+                    ident.span,
+                    format!("lambda cannot capture '{}'", ident.name),
+                );
+            } else {
+                self.error(ident.span, format!("unknown name '{}'", ident.name));
+            }
             return self.dummy(None);
         };
+        if let Some(scope) = self.binding_scope(&ident.name) {
+            if self.reject_capture(&ident.name, scope, ident.span) {
+                return self.dummy(Some(binding.ty));
+            }
+        }
         self.reject_binding_write(&ident.name, ident.span, true);
         if binding.mutable && !binding.ty.is_integer() {
             self.error(
@@ -3088,6 +3320,10 @@ impl<'a> Checker<'a> {
                 return self.check_type_of(&expr.arguments, expr.span);
             }
             return self.check_user_call(ident, &expr.arguments, expr.span);
+        }
+        let callee = self.check_expr(&expr.callee, None, false);
+        if let CanonicalType::Callable(id) = callee.ty() {
+            return self.finish_invoke(callee, id, &expr.arguments, expr.span, "lambda");
         }
         self.error(expr.span, "unsupported call target");
         for argument in &expr.arguments {
@@ -3239,6 +3475,46 @@ impl<'a> Checker<'a> {
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
+        if let Some(scope) = self.binding_scope(&ident.name) {
+            if self.reject_capture(&ident.name, scope, ident.span) {
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            }
+            if let Some(binding) = self.lookup(&ident.name) {
+                if let CanonicalType::Callable(id) = binding.ty {
+                    let callee = CheckedExpr::Load {
+                        name: ident.name.clone(),
+                        ty: binding.ty,
+                    };
+                    return self.finish_invoke(callee, id, arguments, span, &ident.name);
+                }
+                if !self.functions.contains_key(&ident.name) {
+                    self.error(
+                        ident.span,
+                        format!(
+                            "cannot call a value of type '{}'",
+                            self.spell(binding.ty)
+                        ),
+                    );
+                    for argument in arguments {
+                        let _ = self.check_expr(argument, None, false);
+                    }
+                    return self.dummy(None);
+                }
+            }
+        }
+        if self.lambda_var.as_deref() == Some(ident.name.as_str()) {
+            self.error(
+                ident.span,
+                format!("lambda cannot capture '{}'", ident.name),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(None);
+        }
         if self.class_names.contains_key(&ident.name) && !self.functions.contains_key(&ident.name) {
             self.error(ident.span, format!("construct '{}' with new", ident.name));
             for argument in arguments {
@@ -3357,6 +3633,20 @@ impl<'a> Checker<'a> {
             return expr;
         }
         if from == target {
+            return expr;
+        }
+        if let (CanonicalType::Callable(from_id), CanonicalType::Callable(to_id)) = (from, target) {
+            if self.callable_compatible(from_id, to_id) {
+                return expr;
+            }
+            self.error(
+                span,
+                format!(
+                    "type mismatch: expected '{}', found '{}'",
+                    self.spell(target),
+                    self.spell(from)
+                ),
+            );
             return expr;
         }
         if let Some(inner) = target.optional_inner() {
@@ -5413,6 +5703,23 @@ impl<'a> Checker<'a> {
     }
 
     fn load(&mut self, ident: &Identifier) -> CheckedExpr {
+        if let Some(scope) = self.binding_scope(&ident.name) {
+            if self.reject_capture(&ident.name, scope, ident.span) {
+                return self.dummy(None);
+            }
+        } else if self.lambda_var.as_deref() == Some(ident.name.as_str()) {
+            self.error(
+                ident.span,
+                format!("lambda cannot capture '{}'", ident.name),
+            );
+            return self.dummy(None);
+        } else if let Some(signature) = self.functions.get(&ident.name).cloned() {
+            let id = self.intern_callable(&signature.params, signature.ret);
+            return CheckedExpr::FunctionRef {
+                name: ident.name.clone(),
+                ty: CanonicalType::Callable(id),
+            };
+        }
         match self.lookup(&ident.name) {
             Some(binding) => {
                 if !binding.ready {
@@ -5652,31 +5959,56 @@ impl<'a> Checker<'a> {
                 syntax: parameter.ty.clone(),
                 auto: parameter.conversion == ConversionMode::Auto,
                 span: parameter.span,
+                name_span: parameter.name.span,
+                callable: parameter.callable.clone(),
             })
             .collect()
+    }
+
+    fn resolve_parameters(&mut self, parameters: &[Parameter]) -> Vec<ParamInfo> {
+        let raw = self.raw_params(parameters);
+        self.resolve_raw_params(&raw)
     }
 
     fn resolve_raw_params(&mut self, raw: &[RawParam]) -> Vec<ParamInfo> {
         let mut names = HashMap::new();
         let mut params = Vec::new();
         for parameter in raw {
-            let ty = self.resolve_type(&parameter.syntax);
-            if ty == CanonicalType::Void {
-                self.error(parameter.span, "a parameter cannot have type void");
-            }
-            if ty.is_void_array() {
-                self.error(parameter.span, "void is not a valid array element type");
-            }
+            let ty = if let Some(nested) = &parameter.callable {
+                let nested_params = self.resolve_parameters(nested);
+                let ret = self.resolve_type(&parameter.syntax);
+                if ret.is_void_array() {
+                    self.error(
+                        parameter.syntax.span,
+                        "void is not a valid array element type",
+                    );
+                }
+                let _ = self.reject_unspecified_type(ret, parameter.syntax.span);
+                CanonicalType::Callable(self.intern_callable(&nested_params, ret))
+            } else {
+                let ty = self.resolve_type(&parameter.syntax);
+                if ty == CanonicalType::Void {
+                    self.error(parameter.syntax.span, "a parameter cannot have type void");
+                }
+                if ty.is_void_array() {
+                    self.error(
+                        parameter.syntax.span,
+                        "void is not a valid array element type",
+                    );
+                }
+                let _ = self.reject_unspecified_type(ty, parameter.syntax.span);
+                ty
+            };
             if names
                 .insert(parameter.name.clone(), parameter.span)
                 .is_some()
             {
                 self.error(
-                    parameter.span,
+                    parameter.name_span,
                     format!("duplicate parameter '{}'", parameter.name),
                 );
             }
-            let _ = self.reject_reserved_name(&parameter.name, parameter.span);
+            let _ = self.reject_reserved_name(&parameter.name, parameter.name_span);
             params.push(ParamInfo {
                 name: parameter.name.clone(),
                 ty,
@@ -5684,6 +6016,46 @@ impl<'a> Checker<'a> {
             });
         }
         params
+    }
+
+    fn intern_callable(&mut self, params: &[ParamInfo], ret: CanonicalType) -> CallableId {
+        let shape_params: Vec<CanonicalType> = params.iter().map(|param| param.ty).collect();
+        let shape_autos: Vec<bool> = params.iter().map(|param| param.auto).collect();
+        if let Some(index) = self.callables.iter().position(|sig| {
+            sig.params == shape_params && sig.autos == shape_autos && sig.ret == ret
+        }) {
+            return CallableId(index as u32);
+        }
+        let id = CallableId(self.callables.len() as u32);
+        self.callables.push(CallableSignature {
+            params: shape_params,
+            autos: shape_autos,
+            ret,
+        });
+        id
+    }
+
+    fn callable_compatible(&self, from: CallableId, to: CallableId) -> bool {
+        let Some(left) = self.callables.get(from.0 as usize) else {
+            return false;
+        };
+        let Some(right) = self.callables.get(to.0 as usize) else {
+            return false;
+        };
+        left.params == right.params && left.ret == right.ret
+    }
+
+    fn spell_callable(&self, id: CallableId) -> String {
+        let Some(sig) = self.callables.get(id.0 as usize) else {
+            return "callable".to_string();
+        };
+        let params = sig
+            .params
+            .iter()
+            .map(|ty| self.spell(*ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("({}) -> {}", params, self.spell(sig.ret))
     }
 
     fn finish_class_types(&mut self) {
@@ -6733,6 +7105,14 @@ fn catch_type(name: &str) -> Option<&'static str> {
         "ConstViolationError" => "ConstViolationError",
         _ => return None,
     })
+}
+
+fn as_lambda(expr: &Expr) -> Option<&LambdaExpr> {
+    match expr {
+        Expr::Lambda(lambda) => Some(lambda),
+        Expr::Parenthesized { expression, .. } => as_lambda(expression),
+        _ => None,
+    }
 }
 
 fn guaranteed_return(statements: &[Stmt]) -> bool {

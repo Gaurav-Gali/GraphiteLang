@@ -15,9 +15,9 @@ use crate::parser::{BinaryOperator, UnaryOperator};
 use crate::semantic::convert::{ConvOp, conversion};
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
-    ArrayMethod, ArrayPlace, CanonicalType, CheckedClass, CheckedExpr, CheckedFn, CheckedPart,
-    CheckedProgram, CheckedRecord, CheckedStmt, ClassId, Leaf, LoopSourceKind, MapEntry, MapMethod,
-    MapShape, RecordId, TextMethod,
+    ArrayMethod, ArrayPlace, CallableSignature, CanonicalType, CheckedClass, CheckedExpr, CheckedFn,
+    CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId, Leaf, LoopSourceKind,
+    MapEntry, MapMethod, MapShape, RecordId, TextMethod,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -41,6 +41,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         records: &program.records,
         classes: &program.classes,
         maps: &program.maps,
+        callables: &program.callables,
         source_name,
         source,
         constructor_return: false,
@@ -99,6 +100,7 @@ struct Emitter<'a> {
     records: &'a [CheckedRecord],
     classes: &'a [CheckedClass],
     maps: &'a [MapShape],
+    callables: &'a [CallableSignature],
     source_name: &'a str,
     source: &'a str,
     constructor_return: bool,
@@ -1075,6 +1077,40 @@ impl Emitter<'_> {
                 *column,
                 *end_column,
             ),
+            CheckedExpr::Lambda {
+                params,
+                body,
+                ret,
+                ty,
+            } => self.emit_closure(params, body, *ret, *ty),
+            CheckedExpr::FunctionRef { name, .. } => {
+                if name == "main" {
+                    "crate::grf_user_main".to_string()
+                } else {
+                    format!("crate::grf_fns::{}", rust_ident(name))
+                }
+            }
+            CheckedExpr::Invoke {
+                callee,
+                args,
+                callee_name,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                let callee = self.emit_expr(callee);
+                let args = args
+                    .iter()
+                    .map(|arg| self.emit_expr(arg))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let site = self.locate(file, *line, *column, *end_column);
+                format!(
+                    "match ({callee})({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee_name}\", {site})) }}"
+                )
+            }
             CheckedExpr::Call {
                 path,
                 args,
@@ -3183,6 +3219,9 @@ impl Emitter<'_> {
     }
 
     fn ty_name(&self, ty: CanonicalType) -> String {
+        if let CanonicalType::Callable(id) = ty {
+            return self.callable_fn_type(id.0 as usize);
+        }
         match ty {
             CanonicalType::Record(id) => self
                 .records
@@ -3225,6 +3264,75 @@ impl Emitter<'_> {
             CanonicalType::Optional(kind) => format!("Option<{}>", self.ty_name(kind.canonical())),
             other => other.rust_name(),
         }
+    }
+
+    fn callable_fn_type(&self, index: usize) -> String {
+        let Some(sig) = self.callables.get(index) else {
+            return "fn()".to_string();
+        };
+        let params = sig
+            .params
+            .iter()
+            .map(|ty| self.ty_name(*ty))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = if sig.ret == CanonicalType::Void {
+            "()".to_string()
+        } else {
+            self.ty_name(sig.ret)
+        };
+        format!("fn({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError>")
+    }
+
+    fn emit_closure(
+        &mut self,
+        params: &[(String, CanonicalType)],
+        body: &[CheckedStmt],
+        ret: CanonicalType,
+        ty: CanonicalType,
+    ) -> String {
+        let saved_out = std::mem::take(&mut self.out);
+        let saved_indent = self.indent;
+        let saved_tries = std::mem::take(&mut self.tries);
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_ret = std::mem::take(&mut self.fn_ret);
+        let saved_ctor = self.constructor_return;
+        self.indent = saved_indent + 1;
+        self.constructor_return = false;
+        self.fn_ret = if ret == CanonicalType::Void {
+            "()".to_string()
+        } else {
+            self.ty_name(ret)
+        };
+        for statement in body {
+            self.emit_stmt(statement);
+        }
+        if ret == CanonicalType::Void {
+            self.line("return Ok(());");
+        } else {
+            self.line("unreachable!();");
+        }
+        let body_text = std::mem::take(&mut self.out);
+        self.out = saved_out;
+        self.indent = saved_indent;
+        self.tries = saved_tries;
+        self.loops = saved_loops;
+        self.fn_ret = saved_ret;
+        self.constructor_return = saved_ctor;
+        let params = params
+            .iter()
+            .map(|(name, ty)| format!("mut {}: {}", rust_ident(name), self.ty_name(*ty)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret_name = if ret == CanonicalType::Void {
+            "()".to_string()
+        } else {
+            self.ty_name(ret)
+        };
+        let closure = format!(
+            "|{params}| -> Result<{ret_name}, graphite_core::diagnostic::RuntimeError> {{\n{body_text}}}"
+        );
+        format!("(({closure}) as {})", self.ty_name(ty))
     }
 
     fn fresh_label(&mut self) -> String {
