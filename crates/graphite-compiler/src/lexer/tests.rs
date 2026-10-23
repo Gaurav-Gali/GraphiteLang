@@ -210,6 +210,28 @@ fn operators_use_longest_match() {
             TokenKind::Eof,
         ]
     );
+    assert_eq!(
+        kinds("& | ^ ~ << >> &= |= ^= <<= >>="),
+        vec![
+            TokenKind::Amp,
+            TokenKind::Pipe,
+            TokenKind::Caret,
+            TokenKind::Tilde,
+            TokenKind::LessLess,
+            TokenKind::Greater,
+            TokenKind::Greater,
+            TokenKind::AmpEqual,
+            TokenKind::PipeEqual,
+            TokenKind::CaretEqual,
+            TokenKind::LessLessEqual,
+            TokenKind::GreaterGreaterEqual,
+            TokenKind::Eof,
+        ]
+    );
+    assert_eq!(
+        kinds("and or"),
+        vec![TokenKind::KwAnd, TokenKind::KwOr, TokenKind::Eof]
+    );
     assert_eq!(kinds("// comment"), vec![TokenKind::Eof]);
     assert_eq!(
         kinds("+ - * / % = ! < >"),
@@ -308,7 +330,7 @@ fn compound_assignments_are_single_tokens() {
 }
 
 #[test]
-fn colon_question_and_lone_ampersand_are_unexpected() {
+fn colon_question_ampersand_and_pipe_are_tokens() {
     let question = lex("op.grf", "?");
     assert!(question.diagnostics.is_empty());
     assert_eq!(
@@ -319,16 +341,10 @@ fn colon_question_and_lone_ampersand_are_unexpected() {
             .collect::<Vec<_>>(),
         vec![TokenKind::Question, TokenKind::Eof]
     );
-    for source in ["&", "|"] {
-        let result = lex("op.grf", source);
-        assert_eq!(result.tokens.len(), 1);
-        assert_eq!(result.tokens[0].kind, TokenKind::Eof);
-        assert_eq!(result.diagnostics.len(), 1);
-        assert_eq!(
-            result.diagnostics[0].kind,
-            DiagnosticKind::UnexpectedCharacter
-        );
-    }
+    assert!(lex("op.grf", "&").diagnostics.is_empty());
+    assert_eq!(kinds("&"), vec![TokenKind::Amp, TokenKind::Eof]);
+    assert!(lex("op.grf", "|").diagnostics.is_empty());
+    assert_eq!(kinds("|"), vec![TokenKind::Pipe, TokenKind::Eof]);
     let result = lex("op.grf", "a:b");
     assert_eq!(
         result

@@ -12,12 +12,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::parser::{BinaryOperator, UnaryOperator};
-use crate::semantic::convert::ConvOp;
+use crate::semantic::convert::{ConvOp, conversion};
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
     ArrayMethod, ArrayPlace, CanonicalType, CheckedClass, CheckedExpr, CheckedFn, CheckedPart,
     CheckedProgram, CheckedRecord, CheckedStmt, ClassId, Leaf, LoopSourceKind, MapEntry, MapMethod,
-    MapShape, RecordId,
+    MapShape, RecordId, TextMethod,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -287,6 +287,7 @@ impl Emitter<'_> {
                 column,
                 end_column,
             } => {
+                let element = value.ty().element().unwrap_or(CanonicalType::Int64);
                 let value = self.emit_expr(value);
                 let site = self.locate(file, *line, *column, *end_column);
                 let values = self.fresh_tmp();
@@ -297,8 +298,10 @@ impl Emitter<'_> {
                 ));
                 for (index, (name, ty, mutable)) in bindings.iter().enumerate() {
                     let binding = if *mutable { "let mut" } else { "let" };
+                    let item = format!("{values}[{index}].clone()");
+                    let stored = self.emit_coercion(element, *ty, &item, &site);
                     self.line(&format!(
-                        "{binding} {}: {} = {values}[{index}].clone();",
+                        "{binding} {}: {} = {stored};",
                         rust_ident(name),
                         self.ty_name(*ty)
                     ));
@@ -314,16 +317,22 @@ impl Emitter<'_> {
                 let inner = self.fresh_label();
                 self.line("{");
                 self.indent += 1;
-                if let CheckedExpr::Load { name, .. } = source {
-                    self.line(&format!("let grf_src = &{};", rust_ident(name)));
+                let src = if let CheckedExpr::Load { name, ty } = source {
+                    if ty.is_array() {
+                        rust_ident(name)
+                    } else {
+                        self.line(&format!("let grf_src = &{};", rust_ident(name)));
+                        "grf_src".to_string()
+                    }
                 } else {
                     let source = self.emit_expr(source);
                     self.line(&format!("let grf_owned = {source};"));
                     self.line("let grf_src = &grf_owned;");
-                }
+                    "grf_src".to_string()
+                };
                 self.line("let mut grf_i: u64 = 0;");
                 self.line(&format!(
-                    "'{outer}: while (grf_i as usize) < grf_src.len() {{"
+                    "'{outer}: while (grf_i as usize) < {src}.len() {{"
                 ));
                 self.indent += 1;
                 self.line(&format!("'{inner}: loop {{"));
@@ -341,14 +350,14 @@ impl Emitter<'_> {
                     if let Some((name, ty, mutable)) = bindings.get(1) {
                         let binding = if *mutable { "let mut" } else { "let" };
                         self.line(&format!(
-                            "{binding} {}: {} = grf_src[grf_i as usize].clone();",
+                            "{binding} {}: {} = {src}[grf_i as usize].clone();",
                             rust_ident(name),
                             self.ty_name(*ty)
                         ));
                     }
                 } else if *kind == LoopSourceKind::Entries {
                     let pair = self.fresh_tmp();
-                    self.line(&format!("let {pair} = grf_src[grf_i as usize].clone();"));
+                    self.line(&format!("let {pair} = {src}[grf_i as usize].clone();"));
                     if let Some((name, ty, mutable)) = bindings.first() {
                         let binding = if *mutable { "let mut" } else { "let" };
                         self.line(&format!(
@@ -368,7 +377,7 @@ impl Emitter<'_> {
                 } else if let Some((name, ty, mutable)) = bindings.first() {
                     let binding = if *mutable { "let mut" } else { "let" };
                     self.line(&format!(
-                        "{binding} {}: {} = grf_src[grf_i as usize].clone();",
+                        "{binding} {}: {} = {src}[grf_i as usize].clone();",
                         rust_ident(name),
                         self.ty_name(*ty)
                     ));
@@ -671,6 +680,7 @@ impl Emitter<'_> {
                 let inner = self.emit_expr(expr);
                 match op {
                     UnaryOperator::Not => format!("(!{inner})"),
+                    UnaryOperator::BitNot => format!("(!({inner}))"),
                     UnaryOperator::Negate if ty.is_float() => format!("(-({inner}))"),
                     UnaryOperator::Negate if ty.is_unsigned() => {
                         let zero = match ty {
@@ -700,6 +710,31 @@ impl Emitter<'_> {
                 if let Some(mode) = compare {
                     return self.emit_compare(*op, left, right, *mode);
                 }
+                if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+                    let left = self.emit_expr(left);
+                    let right = self.emit_expr(right);
+                    return if *op == BinaryOperator::And {
+                        format!("(if {left} {{ {right} }} else {{ false }})")
+                    } else {
+                        format!("(if {left} {{ true }} else {{ {right} }})")
+                    };
+                }
+                if matches!(
+                    op,
+                    BinaryOperator::BitAnd | BinaryOperator::BitOr | BinaryOperator::BitXor
+                ) {
+                    let symbol = match op {
+                        BinaryOperator::BitOr => "|",
+                        BinaryOperator::BitXor => "^",
+                        _ => "&",
+                    };
+                    let left = self.emit_expr(left);
+                    let right = self.emit_expr(right);
+                    return format!("({left} {symbol} {right})");
+                }
+                if matches!(op, BinaryOperator::Shl | BinaryOperator::Shr) {
+                    return self.emit_shift(*op, left, right, *span);
+                }
                 let float_operand = left.ty().is_float();
                 let left = self.emit_expr(left);
                 let right = self.emit_expr(right);
@@ -718,9 +753,14 @@ impl Emitter<'_> {
                         BinaryOperator::GreaterEqual => format!("({left} >= {right})"),
                         BinaryOperator::Equal => format!("({left} == {right})"),
                         BinaryOperator::NotEqual => format!("({left} != {right})"),
-                        BinaryOperator::Remainder | BinaryOperator::And | BinaryOperator::Or => {
-                            "false".to_string()
-                        }
+                        BinaryOperator::Remainder
+                        | BinaryOperator::And
+                        | BinaryOperator::Or
+                        | BinaryOperator::BitAnd
+                        | BinaryOperator::BitOr
+                        | BinaryOperator::BitXor
+                        | BinaryOperator::Shl
+                        | BinaryOperator::Shr => "false".to_string(),
                     };
                 }
                 match op {
@@ -737,7 +777,13 @@ impl Emitter<'_> {
                     BinaryOperator::GreaterEqual => format!("({left} >= {right})"),
                     BinaryOperator::Equal => format!("({left} == {right})"),
                     BinaryOperator::NotEqual => format!("({left} != {right})"),
-                    BinaryOperator::And | BinaryOperator::Or => "false".to_string(),
+                    BinaryOperator::And
+                    | BinaryOperator::Or
+                    | BinaryOperator::BitAnd
+                    | BinaryOperator::BitOr
+                    | BinaryOperator::BitXor
+                    | BinaryOperator::Shl
+                    | BinaryOperator::Shr => "false".to_string(),
                 }
             }
             CheckedExpr::Assign { name, value, ty } => {
@@ -881,41 +927,55 @@ impl Emitter<'_> {
             CheckedExpr::IndexGet {
                 object,
                 index,
+                text,
                 file,
                 line,
                 column,
                 end_column,
                 ..
             } => {
-                let object = self.emit_array_ref(object);
                 let site = self.locate(file, *line, *column, *end_column);
-                self.emit_read(&object, index, &site)
+                if *text {
+                    let object = self.emit_text_ref(object);
+                    self.emit_text_read(&object, index, &site)
+                } else {
+                    let object = self.emit_array_ref(object);
+                    self.emit_read(&object, index, &site)
+                }
             }
             CheckedExpr::SliceGet {
                 object,
                 start,
                 stop,
                 step,
+                text,
                 file,
                 line,
                 column,
                 end_column,
                 ..
             } => {
-                let object = self.emit_array_ref(object);
                 let site = self.locate(file, *line, *column, *end_column);
-                format!(
-                    "graphite_core::array::slice_copy({object}, {}, {}, {}, {site})?",
+                let bounds = format!(
+                    "{}, {}, {}",
                     self.emit_bound(start),
                     self.emit_bound(stop),
                     self.emit_bound(step)
-                )
+                );
+                if *text {
+                    let object = self.emit_text_ref(object);
+                    format!("graphite_core::text::slice({object}, {bounds}, {site})?")
+                } else {
+                    let object = self.emit_array_ref(object);
+                    format!("graphite_core::array::slice_copy({object}, {bounds}, {site})?")
+                }
             }
             CheckedExpr::IndexSet {
                 place,
                 object,
                 index,
                 value,
+                text,
                 file,
                 line,
                 column,
@@ -926,6 +986,7 @@ impl Emitter<'_> {
                 object,
                 index,
                 value,
+                *text,
                 file,
                 *line,
                 *column,
@@ -938,6 +999,7 @@ impl Emitter<'_> {
                 stop,
                 step,
                 value,
+                text,
                 limit,
                 file,
                 line,
@@ -951,6 +1013,7 @@ impl Emitter<'_> {
                 stop,
                 step,
                 value,
+                *text,
                 *limit,
                 file,
                 *line,
@@ -962,6 +1025,7 @@ impl Emitter<'_> {
                 object,
                 method,
                 args,
+                element,
                 limit,
                 file,
                 line,
@@ -973,7 +1037,28 @@ impl Emitter<'_> {
                 object,
                 *method,
                 args,
+                *element,
                 *limit,
+                file,
+                *line,
+                *column,
+                *end_column,
+            ),
+            CheckedExpr::TextCall {
+                place,
+                object,
+                method,
+                args,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => self.emit_text_call(
+                place,
+                object,
+                *method,
+                args,
                 file,
                 *line,
                 *column,
@@ -1046,46 +1131,7 @@ impl Emitter<'_> {
             } => {
                 let inner = self.emit_expr(expr);
                 let site = self.locate(file, *line, *column, *end_column);
-                match op {
-                    ConvOp::RecordToStr => self.record_to_str(*from, &inner),
-                    ConvOp::ArrayToStr => self.array_to_str(*from, &inner),
-                    ConvOp::MapToStr => self.map_to_str(*from, &inner),
-                    ConvOp::TypeToStr => type_to_str(&inner),
-                    ConvOp::OptionalToStr => {
-                        let inner_ty = from.optional_inner().unwrap_or(*from);
-                        let rendered = if inner_ty == CanonicalType::Str {
-                            "grf_inner.clone()".to_string()
-                        } else if inner_ty.is_record() {
-                            self.record_to_str(inner_ty, "grf_inner")
-                        } else if inner_ty.is_array() {
-                            self.array_to_str(inner_ty, "grf_inner")
-                        } else if inner_ty.is_map() {
-                            self.map_to_str(inner_ty, "grf_inner")
-                        } else if inner_ty == CanonicalType::Type {
-                            type_to_str("grf_inner")
-                        } else if inner_ty == CanonicalType::Chr {
-                            emit_conv(
-                                ConvOp::CharToStr,
-                                inner_ty,
-                                CanonicalType::Str,
-                                "grf_inner",
-                                &site,
-                            )
-                        } else {
-                            emit_conv(
-                                ConvOp::ToStr,
-                                inner_ty,
-                                CanonicalType::Str,
-                                "grf_inner",
-                                &site,
-                            )
-                        };
-                        format!(
-                            "{{ let grf_opt = {inner}; match grf_opt {{ None => String::from(\"null\"), Some(grf_inner) => {rendered} }} }}"
-                        )
-                    }
-                    other => emit_conv(*other, *from, *to, &inner, &site),
-                }
+                self.emit_conversion(*from, *to, *op, &inner, &site)
             }
             CheckedExpr::ClassNew {
                 class,
@@ -1454,6 +1500,31 @@ impl Emitter<'_> {
         }
     }
 
+    fn emit_shift(
+        &mut self,
+        op: BinaryOperator,
+        left: &CheckedExpr,
+        right: &CheckedExpr,
+        span: crate::span::Span,
+    ) -> String {
+        let bits = match left.ty() {
+            CanonicalType::Int16 | CanonicalType::UInt16 => 16,
+            CanonicalType::Int32 | CanonicalType::UInt32 => 32,
+            _ => 64,
+        };
+        let method = if op == BinaryOperator::Shl {
+            "checked_shl"
+        } else {
+            "checked_shr"
+        };
+        let value = self.emit_expr(left);
+        let amount = self.emit_i128(right);
+        let site = self.locate_span(span);
+        format!(
+            "{{ let grf_shift = {amount}; if grf_shift < 0 || grf_shift >= {bits} {{ return Err(graphite_core::diagnostic::integer_overflow({site})); }} match ({value}).{method}(grf_shift as u32) {{ Some(grf_shifted) => grf_shifted, None => return Err(graphite_core::diagnostic::integer_overflow({site})) }} }}"
+        )
+    }
+
     fn emit_i128(&mut self, index: &CheckedExpr) -> String {
         let inner = self.emit_expr(index);
         if index.ty().is_unsigned() {
@@ -1461,6 +1532,345 @@ impl Emitter<'_> {
         } else {
             format!("i128::from({inner})")
         }
+    }
+
+    fn emit_text_ref(&mut self, expr: &CheckedExpr) -> String {
+        if let CheckedExpr::Load { name, ty } = expr {
+            if *ty == CanonicalType::Str {
+                return format!("&{}", rust_ident(name));
+            }
+        }
+        format!("&({})", self.emit_expr(expr))
+    }
+
+    fn emit_text_read(&mut self, object: &str, index: &CheckedExpr, site: &str) -> String {
+        let inner = self.emit_expr(index);
+        if index.ty().is_unsigned() {
+            format!("graphite_core::text::read_unsigned({object}, u128::from({inner}), {site})?")
+        } else {
+            format!("graphite_core::text::read_signed({object}, i128::from({inner}), {site})?")
+        }
+    }
+
+    fn emit_conversion(
+        &mut self,
+        from: CanonicalType,
+        to: CanonicalType,
+        op: ConvOp,
+        inner: &str,
+        site: &str,
+    ) -> String {
+        let text = match op {
+            ConvOp::RecordToStr | ConvOp::RecordToChar => self.record_to_str(from, inner),
+            ConvOp::ArrayToStr | ConvOp::ArrayToChar => self.array_to_str(from, inner),
+            ConvOp::MapToStr | ConvOp::MapToChar => self.map_to_str(from, inner),
+            ConvOp::TypeToStr | ConvOp::TypeToChar => type_to_str(inner),
+            ConvOp::OptionalToStr | ConvOp::OptionalToChar => self.optional_text(from, inner, site),
+            _ => return emit_conv(op, from, to, inner, site),
+        };
+        if matches!(
+            op,
+            ConvOp::RecordToChar
+                | ConvOp::ArrayToChar
+                | ConvOp::MapToChar
+                | ConvOp::TypeToChar
+                | ConvOp::OptionalToChar
+        ) {
+            let from_name = rust_string(&from.spelling());
+            format!("graphite_core::convert::text_to_char(&({text}), {from_name}, {site})?")
+        } else {
+            text
+        }
+    }
+
+    fn optional_text(&mut self, from: CanonicalType, inner: &str, site: &str) -> String {
+        let inner_ty = from.optional_inner().unwrap_or(from);
+        let rendered = if inner_ty == CanonicalType::Str {
+            "grf_inner.clone()".to_string()
+        } else if inner_ty.is_record() {
+            self.record_to_str(inner_ty, "grf_inner")
+        } else if inner_ty.is_array() {
+            self.array_to_str(inner_ty, "grf_inner")
+        } else if inner_ty.is_map() {
+            self.map_to_str(inner_ty, "grf_inner")
+        } else if inner_ty == CanonicalType::Type {
+            type_to_str("grf_inner")
+        } else if inner_ty == CanonicalType::Chr {
+            emit_conv(
+                ConvOp::CharToStr,
+                inner_ty,
+                CanonicalType::Str,
+                "grf_inner",
+                site,
+            )
+        } else {
+            emit_conv(
+                ConvOp::ToStr,
+                inner_ty,
+                CanonicalType::Str,
+                "grf_inner",
+                site,
+            )
+        };
+        format!(
+            "{{ let grf_opt = {inner}; match grf_opt {{ None => String::from(\"null\"), Some(grf_inner) => {rendered} }} }}"
+        )
+    }
+
+    fn emit_coercion(
+        &mut self,
+        from: CanonicalType,
+        to: CanonicalType,
+        expr: &str,
+        site: &str,
+    ) -> String {
+        if from == to {
+            return expr.to_string();
+        }
+        if let Some(inner) = to.optional_inner() {
+            let converted = if from == inner {
+                expr.to_string()
+            } else if let Some(op) = conversion(from, inner) {
+                self.emit_conversion(from, inner, op, expr, site)
+            } else {
+                expr.to_string()
+            };
+            return format!("Some({converted})");
+        }
+        if let Some(op) = conversion(from, to) {
+            return self.emit_conversion(from, to, op, expr, site);
+        }
+        expr.to_string()
+    }
+
+    fn emit_text_call(
+        &mut self,
+        place: &Option<ArrayPlace>,
+        object: &Option<Box<CheckedExpr>>,
+        method: TextMethod,
+        args: &[CheckedExpr],
+        file: &str,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    ) -> String {
+        let site = self.locate(file, line, column, end_column);
+        let mutating = matches!(
+            method,
+            TextMethod::Set
+                | TextMethod::Push
+                | TextMethod::Append
+                | TextMethod::Extend
+                | TextMethod::Insert
+                | TextMethod::Remove
+                | TextMethod::Pop
+                | TextMethod::Clear
+                | TextMethod::Reverse
+        );
+        let (setup, container, commit, mutable) = if let Some(place) = place {
+            let (setup, container, commit) = self.emit_container(place);
+            let commit = if mutating { commit } else { String::new() };
+            (setup, container, commit, true)
+        } else {
+            let object = object
+                .as_ref()
+                .map(|object| self.emit_expr(object))
+                .unwrap_or_else(|| "String::new()".to_string());
+            (
+                format!("let grf_recv = {object};"),
+                "grf_recv".to_string(),
+                String::new(),
+                false,
+            )
+        };
+        let arg = |index: usize, this: &mut Self| {
+            args.get(index)
+                .map(|arg| this.emit_expr(arg))
+                .unwrap_or_else(|| "Default::default()".to_string())
+        };
+        let receiver = if mutating {
+            if mutable {
+                format!("&mut {container}")
+            } else {
+                format!("&mut {{ let mut grf_tmp = {container}.clone(); grf_tmp }}")
+            }
+        } else if let CheckedExpr::Load { name, .. } =
+            object.as_deref().unwrap_or(&CheckedExpr::Bool(false))
+        {
+            if place.is_some() {
+                format!("&{container}")
+            } else {
+                format!("&{}", rust_ident(name))
+            }
+        } else {
+            format!("&{container}")
+        };
+        let unsigned = args.first().is_some_and(|index| index.ty().is_unsigned());
+        let call = match method {
+            TextMethod::Length => format!("(({receiver}).chars().count() as u64)"),
+            TextMethod::Get => {
+                if unsigned {
+                    format!(
+                        "graphite_core::text::read_unsigned({receiver}, u128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                } else {
+                    format!(
+                        "graphite_core::text::read_signed({receiver}, i128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                }
+            }
+            TextMethod::Set => {
+                let index = arg(0, self);
+                let value = arg(1, self);
+                if unsigned {
+                    format!(
+                        "graphite_core::text::write_unsigned({receiver}, u128::from({index}), {value}, {site})?"
+                    )
+                } else {
+                    format!(
+                        "graphite_core::text::write_signed({receiver}, i128::from({index}), {value}, {site})?"
+                    )
+                }
+            }
+            TextMethod::Push | TextMethod::Append => {
+                format!(
+                    "graphite_core::text::push_char({receiver}, {})",
+                    arg(0, self)
+                )
+            }
+            TextMethod::Extend => {
+                format!(
+                    "{{ let grf_extra = {}; graphite_core::text::extend({receiver}, &grf_extra) }}",
+                    arg(0, self)
+                )
+            }
+            TextMethod::Insert => {
+                let index = arg(0, self);
+                let value = arg(1, self);
+                if unsigned {
+                    format!(
+                        "graphite_core::text::insert_unsigned({receiver}, u128::from({index}), {value}, {site})?"
+                    )
+                } else {
+                    format!(
+                        "graphite_core::text::insert_signed({receiver}, i128::from({index}), {value}, {site})?"
+                    )
+                }
+            }
+            TextMethod::Remove => {
+                if unsigned {
+                    format!(
+                        "graphite_core::text::remove_unsigned({receiver}, u128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                } else {
+                    format!(
+                        "graphite_core::text::remove_signed({receiver}, i128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                }
+            }
+            TextMethod::Pop => {
+                if args.is_empty() {
+                    format!("graphite_core::text::pop_last({receiver}, {site})?")
+                } else if unsigned {
+                    format!(
+                        "graphite_core::text::pop_unsigned({receiver}, u128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                } else {
+                    format!(
+                        "graphite_core::text::pop_signed({receiver}, i128::from({}), {site})?",
+                        arg(0, self)
+                    )
+                }
+            }
+            TextMethod::Clear => format!("graphite_core::text::clear({receiver})"),
+            TextMethod::Reverse => format!("graphite_core::text::reverse({receiver})"),
+            TextMethod::Copy => format!("{container}.clone()"),
+            TextMethod::Lower => format!("graphite_core::text::lower({receiver})"),
+            TextMethod::Upper => format!("graphite_core::text::upper({receiver})"),
+            TextMethod::Strip => self.emit_trim("strip", &receiver, args),
+            TextMethod::LStrip => self.emit_trim("lstrip", &receiver, args),
+            TextMethod::RStrip => self.emit_trim("rstrip", &receiver, args),
+            TextMethod::Replace => format!(
+                "{{ let grf_old = {}; let grf_new = {}; graphite_core::text::replace({receiver}, &grf_old, &grf_new) }}",
+                arg(0, self),
+                arg(1, self)
+            ),
+            TextMethod::Find => format!(
+                "{{ let grf_needle = {}; graphite_core::text::find({receiver}, &grf_needle) }}",
+                arg(0, self)
+            ),
+            TextMethod::Index => format!(
+                "{{ let grf_needle = {}; graphite_core::text::index_of({receiver}, &grf_needle, {site})? }}",
+                arg(0, self)
+            ),
+            TextMethod::Count => format!(
+                "{{ let grf_needle = {}; graphite_core::text::count({receiver}, &grf_needle) }}",
+                arg(0, self)
+            ),
+            TextMethod::StartsWith => format!(
+                "{{ let grf_prefix = {}; graphite_core::text::starts_with({receiver}, &grf_prefix) }}",
+                arg(0, self)
+            ),
+            TextMethod::EndsWith => format!(
+                "{{ let grf_suffix = {}; graphite_core::text::ends_with({receiver}, &grf_suffix) }}",
+                arg(0, self)
+            ),
+            TextMethod::Join => format!(
+                "{{ let grf_parts = {}; graphite_core::text::join({receiver}, &grf_parts) }}",
+                arg(0, self)
+            ),
+            TextMethod::Split => self.emit_split("split", &receiver, args, &site),
+            TextMethod::RSplit => self.emit_split("rsplit", &receiver, args, &site),
+        };
+        if commit.is_empty() {
+            if setup.is_empty() {
+                call
+            } else {
+                format!("{{ {setup} {call} }}")
+            }
+        } else {
+            format!("{{ {setup} let grf_result = {{ {call} }}; {commit} grf_result }}")
+        }
+    }
+
+    fn emit_trim(&mut self, name: &str, receiver: &str, args: &[CheckedExpr]) -> String {
+        if let Some(chars) = args.first() {
+            let chars = self.emit_expr(chars);
+            format!(
+                "{{ let grf_chars = {chars}; graphite_core::text::{name}({receiver}, Some(&grf_chars)) }}"
+            )
+        } else {
+            format!("graphite_core::text::{name}({receiver}, None)")
+        }
+    }
+
+    fn emit_split(
+        &mut self,
+        name: &str,
+        receiver: &str,
+        args: &[CheckedExpr],
+        site: &str,
+    ) -> String {
+        let (setup, sep) = if let Some(sep) = args.first() {
+            let sep = self.emit_expr(sep);
+            (
+                format!("let grf_sep = {sep};"),
+                "Some(&grf_sep)".to_string(),
+            )
+        } else {
+            (String::new(), "None".to_string())
+        };
+        let maxsplit = if let Some(maxsplit) = args.get(1) {
+            format!("Some({})", self.emit_i128(maxsplit))
+        } else {
+            "None".to_string()
+        };
+        format!("{{ {setup} graphite_core::text::{name}({receiver}, {sep}, {maxsplit}, {site})? }}")
     }
 
     fn emit_read(&mut self, object: &str, index: &CheckedExpr, site: &str) -> String {
@@ -1478,6 +1888,7 @@ impl Emitter<'_> {
         object: &Option<Box<CheckedExpr>>,
         index: &CheckedExpr,
         value: &CheckedExpr,
+        text: bool,
         file: &str,
         line: u32,
         column: u32,
@@ -1500,7 +1911,17 @@ impl Emitter<'_> {
                 String::new(),
             )
         };
-        let write = if unsigned {
+        let write = if text {
+            if unsigned {
+                format!(
+                    "graphite_core::text::write_unsigned(&mut {container}, u128::from({index_expr}), grf_stored, {site})?;"
+                )
+            } else {
+                format!(
+                    "graphite_core::text::write_signed(&mut {container}, i128::from({index_expr}), grf_stored, {site})?;"
+                )
+            }
+        } else if unsigned {
             format!(
                 "graphite_core::array::write_unsigned(&mut {container}, u128::from({index_expr}), grf_stored.clone(), {site})?;"
             )
@@ -1520,6 +1941,7 @@ impl Emitter<'_> {
         stop: &Option<Box<CheckedExpr>>,
         step: &Option<Box<CheckedExpr>>,
         value: &CheckedExpr,
+        text: bool,
         limit: Option<u64>,
         file: &str,
         line: u32,
@@ -1542,12 +1964,22 @@ impl Emitter<'_> {
             )
         };
         let limit = limit_expr(limit);
-        format!(
-            "{{ let grf_repl = {value_expr}; {setup} graphite_core::array::assign_slice(&mut {container}, {}, {}, {}, &grf_repl, {limit}, {site})?; {commit} grf_repl }}",
-            self.emit_bound(start),
-            self.emit_bound(stop),
-            self.emit_bound(step)
-        )
+        let assign = if text {
+            format!(
+                "graphite_core::text::assign_slice(&mut {container}, {}, {}, {}, &grf_repl, {site})?",
+                self.emit_bound(start),
+                self.emit_bound(stop),
+                self.emit_bound(step)
+            )
+        } else {
+            format!(
+                "graphite_core::array::assign_slice(&mut {container}, {}, {}, {}, &grf_repl, {limit}, {site})?",
+                self.emit_bound(start),
+                self.emit_bound(stop),
+                self.emit_bound(step)
+            )
+        };
+        format!("{{ let grf_repl = {value_expr}; {setup} {assign}; {commit} grf_repl }}")
     }
 
     fn emit_container(&mut self, place: &ArrayPlace) -> (String, String, String) {
@@ -1643,6 +2075,7 @@ impl Emitter<'_> {
         object: &Option<Box<CheckedExpr>>,
         method: ArrayMethod,
         args: &[CheckedExpr],
+        element: CanonicalType,
         limit: Option<u64>,
         file: &str,
         line: u32,
@@ -1655,7 +2088,16 @@ impl Emitter<'_> {
             let (setup, container, commit) = self.emit_container(place);
             let commit = if matches!(
                 method,
-                ArrayMethod::Push | ArrayMethod::Set | ArrayMethod::Insert | ArrayMethod::Remove
+                ArrayMethod::Push
+                    | ArrayMethod::Append
+                    | ArrayMethod::Extend
+                    | ArrayMethod::Set
+                    | ArrayMethod::Insert
+                    | ArrayMethod::Remove
+                    | ArrayMethod::Pop
+                    | ArrayMethod::Clear
+                    | ArrayMethod::Reverse
+                    | ArrayMethod::Sort
             ) {
                 commit
             } else {
@@ -1695,7 +2137,7 @@ impl Emitter<'_> {
                     )
                 }
             }
-            ArrayMethod::Push => {
+            ArrayMethod::Push | ArrayMethod::Append => {
                 let value = arg(0, self);
                 let value_tmp = self.fresh_tmp();
                 if mutable {
@@ -1768,6 +2210,76 @@ impl Emitter<'_> {
                     )
                 };
                 format!("let {index_tmp} = {index}; {call}")
+            }
+            ArrayMethod::Extend => {
+                let extra = arg(0, self);
+                let receiver = if mutable {
+                    format!("&mut {container}")
+                } else {
+                    format!("&mut {{ let mut grf_tmp = {container}.clone(); grf_tmp }}")
+                };
+                format!(
+                    "{{ let grf_extra = {extra}; graphite_core::array::extend({receiver}, &grf_extra, {limit}, {site})? }}"
+                )
+            }
+            ArrayMethod::Pop => {
+                let receiver = if mutable {
+                    format!("&mut {container}")
+                } else {
+                    format!("&mut {{ let mut grf_tmp = {container}.clone(); grf_tmp }}")
+                };
+                if args.is_empty() {
+                    format!("graphite_core::array::pop_last({receiver}, {site})?")
+                } else if args.first().is_some_and(|index| index.ty().is_unsigned()) {
+                    let index = arg(0, self);
+                    format!(
+                        "graphite_core::array::pop_unsigned({receiver}, u128::from({index}), {site})?"
+                    )
+                } else {
+                    let index = arg(0, self);
+                    format!(
+                        "graphite_core::array::pop_signed({receiver}, i128::from({index}), {site})?"
+                    )
+                }
+            }
+            ArrayMethod::Clear => {
+                if mutable {
+                    format!("{container}.clear()")
+                } else {
+                    format!("{{ let mut grf_tmp = {container}.clone(); grf_tmp.clear(); }}")
+                }
+            }
+            ArrayMethod::Reverse => {
+                if mutable {
+                    format!("{container}.reverse()")
+                } else {
+                    format!("{{ let mut grf_tmp = {container}.clone(); grf_tmp.reverse(); }}")
+                }
+            }
+            ArrayMethod::Sort => {
+                let sort = if matches!(element, CanonicalType::Flt32 | CanonicalType::Flt64) {
+                    "sort_by(|grf_a, grf_b| grf_a.total_cmp(grf_b))"
+                } else {
+                    "sort()"
+                };
+                if mutable {
+                    format!("{container}.{sort}")
+                } else {
+                    format!("{{ let mut grf_tmp = {container}.clone(); grf_tmp.{sort}; }}")
+                }
+            }
+            ArrayMethod::Copy => format!("{container}.clone()"),
+            ArrayMethod::IndexOf => {
+                let value = arg(0, self);
+                format!(
+                    "{{ let grf_item = {value}; graphite_core::array::position(&{container}, &grf_item, {site})? }}"
+                )
+            }
+            ArrayMethod::Count => {
+                let value = arg(0, self);
+                format!(
+                    "{{ let grf_item = {value}; graphite_core::array::count_eq(&{container}, &grf_item) }}"
+                )
             }
         };
         if setup.is_empty() || method == ArrayMethod::Length || method == ArrayMethod::Get {
@@ -2851,7 +3363,12 @@ fn emit_conv(
         | ConvOp::RecordToStr
         | ConvOp::MapToStr
         | ConvOp::TypeToStr
-        | ConvOp::OptionalToStr => String::new(),
+        | ConvOp::OptionalToStr
+        | ConvOp::ArrayToChar
+        | ConvOp::RecordToChar
+        | ConvOp::MapToChar
+        | ConvOp::TypeToChar
+        | ConvOp::OptionalToChar => String::new(),
         ConvOp::StrToSigned => format!(
             "(graphite_core::convert::str_to_signed(&({inner}), {signed_min}, {signed_max}, {to_name}, {site})? as {rust})"
         ),
@@ -2930,28 +3447,28 @@ fn emit_conv(
         ConvOp::BoolToF32 => format!("(if {inner} {{ 1.0f32 }} else {{ 0.0f32 }})"),
         ConvOp::SignedToChar => {
             format!(
-                "graphite_core::convert::code_to_char_signed(i128::from({inner}), {from_name}, {site})?"
+                "graphite_core::convert::signed_to_char(i128::from({inner}), {from_name}, {site})?"
             )
         }
         ConvOp::UnsignedToChar => format!(
-            "graphite_core::convert::code_to_char_unsigned(u128::from({inner}), {from_name}, {site})?"
+            "graphite_core::convert::unsigned_to_char(u128::from({inner}), {from_name}, {site})?"
         ),
         ConvOp::F64ToChar => {
-            format!("graphite_core::convert::code_to_char_f64({inner}, {from_name}, {site})?")
+            format!("graphite_core::convert::f64_to_char({inner}, {from_name}, {site})?")
         }
         ConvOp::F32ToChar => {
-            format!(
-                "graphite_core::convert::code_to_char_f64(f64::from({inner}), {from_name}, {site})?"
-            )
+            format!("graphite_core::convert::f32_to_char({inner}, {from_name}, {site})?")
         }
+        ConvOp::BoolToChar => format!("graphite_core::convert::bool_to_char({inner}, {site})?"),
         ConvOp::CharToSigned => format!(
-            "(graphite_core::convert::char_to_signed({inner}, {signed_max}, {to_name}, {site})? as {rust})"
+            "(graphite_core::convert::char_to_signed({inner}, {signed_min}, {signed_max}, {to_name}, {site})? as {rust})"
         ),
         ConvOp::CharToUnsigned => format!(
             "(graphite_core::convert::char_to_unsigned({inner}, {unsigned_max}, {to_name}, {site})? as {rust})"
         ),
-        ConvOp::CharToF64 => format!("graphite_core::convert::char_to_f64({inner})"),
+        ConvOp::CharToF64 => format!("graphite_core::convert::char_to_f64({inner}, {site})?"),
         ConvOp::CharToF32 => format!("graphite_core::convert::char_to_f32({inner}, {site})?"),
+        ConvOp::CharToBool => format!("graphite_core::convert::char_to_bool({inner}, {site})?"),
     }
 }
 

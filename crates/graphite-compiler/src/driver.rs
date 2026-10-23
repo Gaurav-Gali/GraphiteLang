@@ -458,6 +458,102 @@ mod tests {
     }
 
     #[test]
+    fn logical_and_bitwise_operators_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-bits-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+bln boom() {
+    int x = 1 / 0;
+    return true;
+}
+
+void main() {
+    io.println(false && boom());
+    io.println(true || boom());
+    io.println(true and false);
+    io.println(false or true);
+    io.println(6 & 3);
+    io.println(6 | 1);
+    io.println(6 ^ 3);
+    io.println(1 << 3);
+    io.println(8 >> 1);
+    io.println(~0);
+    io.println(1 << 2 + 3);
+    io.println(1 & 2 == 2);
+    int n = 6;
+    n &= 3;
+    n |= 1;
+    n ^= 1;
+    n <<= 1;
+    n >>= 1;
+    io.println(n);
+    uint u = 1;
+    u <<= 2;
+    io.println(u);
+    int16 s = -8;
+    s >>= 1;
+    io.println(s);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "false\ntrue\nfalse\ntrue\n2\n7\n5\n8\n4\n-1\n32\nfalse\n2\n4\n-4\n"
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    io.println(1 << 64);\n}\n",
+        )
+        .unwrap();
+        let overflow = run_captured(&path);
+        assert_ne!(overflow.status, 0);
+        assert!(
+            overflow.stderr.contains("GRF-RUN-004"),
+            "{}",
+            overflow.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_statement_bodies_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-stmt-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+int add(int a, int b) return a + b;
+
+void main() {
+    if (1 == 2) io.println("hi");
+    if (1 == 1) io.println("yes");
+    else io.println("no");
+    io.println(add(2, 3));
+    int n = 3;
+    loop (n-- > 0) io.println(n);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "yes\n5\n2\n1\n0\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sample_program_runs() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.grf");
@@ -531,6 +627,43 @@ void main() {
             output.stdout,
             "10\n50\n10\n7\n10\n20\n30\n50\n3\n3\n40\n1\n9\n30\n4\n5\n0\n8\n60\n"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn array_iteration_allows_modification() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-iter-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+void main() {
+    int[] arr = [1, 2, 3];
+    int i = 0;
+    loop (int a = arr.iter()) {
+        arr[i] = i * i;
+        i++;
+    }
+    io.println(arr);
+
+    int[] extra = [1];
+    loop (int value = extra.iter()) {
+        if (extra.length() < 3) {
+            extra.push(value + 1);
+        }
+    }
+    io.println(extra);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "[0, 1, 4]\n[1, 2, 3]\n");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1454,7 +1587,12 @@ void main() {
     io.println(flt32("1.5"));
     io.println(bln("TRUE"));
     io.println(str(chr("é")));
-    io.println(int(chr("A")));
+    io.println(int(chr("1")));
+    auto int digit = chr("2");
+    io.println(digit);
+    io.println(flt(chr("3")));
+    io.println(uint(chr("4")));
+    io.println(chr(1));
     io.println(str(flt32(1)));
     io.println(int64("9"));
     io.println(uint("8"));
@@ -1471,8 +1609,42 @@ void main() {
         assert_eq!(output.status, 0, "{}", output.stderr);
         assert_eq!(
             output.stdout,
-            "123\n-42\n123\n123\n40000\n-2147483648\n2147483647\n-32768\n65535\n4294967295\n12.5\n0.01\n1.5\n1.5\ntrue\né\n65\n1\n9\n8\n8\n2.5\n1.5\n1.5\n456\n"
+            "123\n-42\n123\n123\n40000\n-2147483648\n2147483647\n-32768\n65535\n4294967295\n12.5\n0.01\n1.5\n1.5\ntrue\né\n1\n2\n3\n4\n1\n1\n9\n8\n8\n2.5\n1.5\n1.5\n456\n"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn values_convert_to_chr_through_their_text() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-chr-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+void main() {
+    io.println(chr(7));
+    int? number = 6;
+    io.println(chr(number));
+    int[] values = [1];
+    io.println(chr(values));
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "{}", output.stdout);
+        assert!(
+            output
+                .stderr
+                .contains("cannot convert int64[] to chr: invalid character string"),
+            "{}",
+            output.stderr
+        );
+        assert!(output.stdout.contains("7\n6\n"), "{}", output.stdout);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2782,6 +2954,89 @@ void main() {
             output.stderr.contains("error[GRF-RUN-015]: null value"),
             "{}",
             output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nullable_auto_text_and_sequence_methods_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-text-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+void main() {
+    auto int? number = 10.5;
+    io.println(number);
+    auto int? missing = null;
+    io.println(missing);
+    io.println(int?(4.2));
+
+    flt[] values = [10.5, 20.9];
+    auto int first, auto int? second = values;
+    io.println(first);
+    io.println(second);
+
+    str name = "abcd";
+    io.println(name[::-1]);
+    io.println(name[1:3]);
+    str word = "abcd";
+    word[1:3] = "XY";
+    io.println(word);
+    name[0] = chr("z");
+    name.append(chr("e"));
+    name.extend("!");
+    io.println(name);
+    io.println(name.length());
+    io.println(name.pop());
+
+    str line = "a,b,c";
+    str[] parts = line.split(",");
+    io.println(parts[0]);
+    io.println(parts[2]);
+    io.println(line.upper());
+    io.println("  hi  ".strip());
+    io.println(",".join(parts));
+
+    int[] scores = [3, 1, 2];
+    scores.append(0);
+    scores.sort();
+    io.println(scores);
+    io.println(scores.pop());
+    io.println(scores.index(1));
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+10
+null
+4
+10
+20
+dcba
+bc
+aXYd
+zbcde!
+6
+!
+a
+c
+A,B,C
+hi
+a,b,c
+[0, 1, 2, 3]
+3
+1
+"
         );
         let _ = fs::remove_dir_all(&dir);
     }

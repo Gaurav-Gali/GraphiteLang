@@ -354,6 +354,7 @@ pub struct UnaryExpr {
 pub enum UnaryOperator {
     Negate,
     Not,
+    BitNot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,6 +382,11 @@ pub enum BinaryOperator {
     GreaterEqual,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

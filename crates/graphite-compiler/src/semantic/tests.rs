@@ -72,14 +72,51 @@ fn integer_and_float_auto_str_are_accepted() {
         "{rust}"
     );
 
-    let rejected = messages("void main() {\n    auto chr value = true;\n}\n");
-    assert!(rejected.contains("not supported"), "{rejected}");
+    let accepted_chr = analyze_source("void main() {\n    auto chr value = true;\n}\n");
+    assert!(
+        accepted_chr.diagnostics.is_empty(),
+        "{:?}",
+        accepted_chr.diagnostics
+    );
 }
 
 #[test]
-fn short_circuit_is_not_emitted_as_valid() {
-    let text = messages("void main() {\n    bln value = true && false;\n}\n");
-    assert!(text.contains("short-circuit"), "{text}");
+fn logical_and_bitwise_operators_typecheck() {
+    let accepted = analyze_source(
+        "\
+void main() {
+    bln value = true && false || true;
+    bln word = false and true or true;
+    bln compared = 1 & 2 == 2;
+    int bits = 6 & 3 | 1 ^ ~0;
+    int shifted = 1 << 2 + 3;
+    int n = 6;
+    n &= 1;
+    n |= 2;
+    n ^= 3;
+    n <<= 1;
+    n >>= 1;
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let rust = generate(accepted.program.as_ref().unwrap());
+    assert!(rust.contains("if "), "{rust}");
+    assert!(
+        !rust.contains("let grf_right"),
+        "the right operand must stay inside the branch\n{rust}"
+    );
+
+    let logical = messages("void main() {\n    bln value = 1 && 2;\n}\n");
+    assert!(logical.contains("logical operand"), "{logical}");
+    let bitwise = messages("void main() {\n    flt x = 2.0;\n    int value = 1 & x;\n}\n");
+    assert!(bitwise.contains("integer operands"), "{bitwise}");
+    let tilde = messages("void main() {\n    int value = ~true;\n}\n");
+    assert!(tilde.contains("integer operand"), "{tilde}");
 }
 
 #[test]
@@ -449,7 +486,7 @@ void main() {
     assert!(literal.contains("type mismatch"), "{literal}");
     assert!(!literal.contains("cannot convert"), "{literal}");
 
-    let unsupported = messages(
+    let characters = messages(
         "\
 void main() {
     chr mark = chr(\"A\");
@@ -458,14 +495,7 @@ void main() {
 }
 ",
     );
-    assert!(
-        unsupported.contains("cannot convert 'chr' to 'bln'"),
-        "{unsupported}"
-    );
-    assert!(
-        unsupported.contains("cannot convert 'bln' to 'chr'"),
-        "{unsupported}"
-    );
+    assert!(characters.is_empty(), "{characters}");
 
     assert!(messages("void main() {\n    int value = int();\n}\n").contains("expects 1 argument"));
     assert!(
@@ -537,6 +567,24 @@ void main() {
         unsupported.contains("cannot convert 'int64[]' to 'int64'"),
         "{unsupported}"
     );
+    let to_chr = messages(
+        "\
+type Mark { tag: chr }
+
+void main() {
+    int[] values = [1];
+    chr fromArray = chr(values);
+    map<str, int> pairs = {};
+    chr fromMap = chr(pairs);
+    Mark mark = { tag: chr(\"Z\") };
+    chr fromRecord = chr(mark);
+    int? number = 6;
+    chr fromOptional = chr(number);
+    chr digit = chr(7);
+}
+",
+    );
+    assert!(to_chr.is_empty(), "{to_chr}");
 }
 
 #[test]
@@ -640,9 +688,9 @@ void main() {
     );
     assert!(constant.contains("cannot assign to constant"), "{constant}");
     let during = messages(
-        "void main() {\n    int[] values = [1];\n    loop (int value = values.iter()) {\n        values.push(value);\n    }\n}\n",
+        "void main() {\n    int[] values = [1, 2];\n    int i = 0;\n    loop (int value = values.iter()) {\n        values[i] = value + 1;\n        values.push(0);\n        i++;\n    }\n}\n",
     );
-    assert!(during.contains("while it is being iterated"), "{during}");
+    assert!(during.is_empty(), "{during}");
     let duplicate = messages("void main() {\n    int a, int a = [1, 2];\n}\n");
     assert!(duplicate.contains("duplicate binding"), "{duplicate}");
     let too_long = messages("void main() {\n    int[3] values = [1, 2, 3, 4];\n}\n");

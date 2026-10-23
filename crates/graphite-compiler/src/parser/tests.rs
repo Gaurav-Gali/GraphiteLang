@@ -270,6 +270,53 @@ bln flag(int value) {
 }
 
 #[test]
+fn single_statement_bodies_do_not_need_braces() {
+    let program = parse_clean(
+        "\
+int add(int a, int b) return a + b;
+
+class Box {
+    int n;
+    Box(int n) this.n = n;
+    int value() return this.n;
+}
+
+void main() {
+    if (1 == 2) io.println(\"hi\");
+    else io.println(\"no\");
+    int n = 2;
+    loop (n-- > 0) io.println(n);
+}
+",
+    );
+    let add = function(&program, "add");
+    assert_eq!(add.body.statements.len(), 1);
+    assert!(matches!(add.body.statements[0], Stmt::Return(_)));
+
+    let main = function(&program, "main");
+    let Stmt::If(if_statement) = &main.body.statements[0] else {
+        panic!("expected if");
+    };
+    assert_eq!(if_statement.then_branch.statements.len(), 1);
+    let Some(Stmt::Block(else_branch)) = if_statement.else_branch.as_deref() else {
+        panic!("expected else");
+    };
+    assert_eq!(else_branch.statements.len(), 1);
+    let Stmt::Loop(loop_statement) = &main.body.statements[2] else {
+        panic!("expected loop");
+    };
+    assert_eq!(loop_statement.body.statements.len(), 1);
+
+    let class = program
+        .classes
+        .iter()
+        .find(|class| class.name.name == "Box")
+        .expect("class");
+    assert_eq!(class.init.as_ref().unwrap().body.statements.len(), 1);
+    assert_eq!(class.methods[0].body.statements.len(), 1);
+}
+
+#[test]
 fn conditions_loops_and_updates() {
     let program = parse_clean(
         "\
@@ -619,9 +666,22 @@ import grf.io;
         "void main() {\n    int a, int b, = [1, 2];\n}\n",
         "trailing comma",
     );
-    assert_rejected(
-        "void main() {\n    int a, auto int b = [1, 2];\n}\n",
-        "auto is not allowed",
+    let auto_bindings = parse_clean(
+        "\
+void main() {
+    auto int a, auto int b = [1, 2];
+}
+",
+    );
+    let Stmt::Destructure(declaration) = &function(&auto_bindings, "main").body.statements[0]
+    else {
+        panic!("expected destructuring");
+    };
+    assert!(
+        declaration
+            .bindings
+            .iter()
+            .all(|binding| binding.conversion == ConversionMode::Auto)
     );
     let class_only = parse_clean(
         "\
@@ -961,7 +1021,8 @@ fn reserved_keywords_cannot_be_declaration_names() {
         "import", "auto", "const", "void", "int", "uint", "flt", "int16", "int32", "int64",
         "uint16", "uint32", "uint64", "flt32", "flt64", "bln", "chr", "str", "if", "else", "loop",
         "break", "continue", "return", "type", "map", "true", "false", "try", "catch", "finally",
-        "throw", "class", "public", "private", "this", "init", "new", "static", "null",
+        "throw", "class", "public", "private", "this", "init", "new", "static", "null", "and",
+        "or",
     ];
     for keyword in keywords {
         let message = format!("'{keyword}' is a reserved keyword");

@@ -326,6 +326,37 @@ pub fn f64_to_bool(value: f64, from: &str, site: Site<'_>) -> Result<bool, Runti
     }
 }
 
+pub fn signed_to_char(value: i128, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    text_to_char(&signed_text(value), from, site)
+}
+
+pub fn unsigned_to_char(value: u128, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    text_to_char(&unsigned_text(value), from, site)
+}
+
+pub fn f64_to_char(value: f64, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    text_to_char(&f64_text(value), from, site)
+}
+
+pub fn f32_to_char(value: f32, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    text_to_char(&f32_text(value), from, site)
+}
+
+pub fn bool_to_char(value: bool, site: Site<'_>) -> Result<char, RuntimeError> {
+    text_to_char(&bln_text(value), "bln", site)
+}
+
+pub fn text_to_char(text: &str, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
+    str_to_char(text, site).map_err(|mut error| {
+        error.label = error.label.replacen(
+            "cannot convert str to",
+            &format!("cannot convert {from} to"),
+            1,
+        );
+        error
+    })
+}
+
 pub fn code_to_char_signed(value: i128, from: &str, site: Site<'_>) -> Result<char, RuntimeError> {
     if value < 0 || value > i128::from(0x10FFFF) {
         return Err(fail(site, from, "chr", "invalid Unicode scalar value"));
@@ -366,11 +397,12 @@ pub fn char_to_code(value: char) -> u32 {
 
 pub fn char_to_signed(
     value: char,
+    min: i128,
     max: i128,
     to: &str,
     site: Site<'_>,
 ) -> Result<i128, RuntimeError> {
-    unsigned_to_signed(u128::from(char_to_code(value)), max, "chr", to, site)
+    parse_char_text(value, |text| str_to_signed(text, min, max, to, site))
 }
 
 pub fn char_to_unsigned(
@@ -379,15 +411,31 @@ pub fn char_to_unsigned(
     to: &str,
     site: Site<'_>,
 ) -> Result<u128, RuntimeError> {
-    fit_unsigned(u128::from(char_to_code(value)), max, "chr", to, site)
+    parse_char_text(value, |text| str_to_unsigned(text, max, to, site))
 }
 
-pub fn char_to_f64(value: char) -> f64 {
-    f64::from(char_to_code(value))
+pub fn char_to_f64(value: char, site: Site<'_>) -> Result<f64, RuntimeError> {
+    parse_char_text(value, |text| str_to_f64(text, site))
 }
 
 pub fn char_to_f32(value: char, site: Site<'_>) -> Result<f32, RuntimeError> {
-    f64_to_f32(char_to_f64(value), "chr", "flt32", site)
+    parse_char_text(value, |text| str_to_f32(text, site))
+}
+
+pub fn char_to_bool(value: char, site: Site<'_>) -> Result<bool, RuntimeError> {
+    parse_char_text(value, |text| str_to_bool(text, site))
+}
+
+fn parse_char_text<T>(
+    value: char,
+    parse: impl FnOnce(&str) -> Result<T, RuntimeError>,
+) -> Result<T, RuntimeError> {
+    parse(&value.to_string()).map_err(|mut error| {
+        error.label = error
+            .label
+            .replacen("cannot convert str to", "cannot convert chr to", 1);
+        error
+    })
 }
 
 fn parse_float<T: PartialEq + Copy>(
@@ -811,6 +859,25 @@ mod tests {
     }
 
     #[test]
+    fn character_conversions_use_the_string_parsers() {
+        let here = site();
+        assert_eq!(
+            char_to_signed('1', i64::MIN as i128, i64::MAX as i128, "int64", here).unwrap(),
+            1
+        );
+        assert_eq!(char_to_unsigned('4', u64::MAX as u128, "uint64", here).unwrap(), 4);
+        assert_eq!(char_to_f64('3', here).unwrap(), 3.0);
+        let failed = char_to_signed('A', i64::MIN as i128, i64::MAX as i128, "int64", here);
+        assert!(failed.is_err());
+        assert!(
+            failed
+                .unwrap_err()
+                .label
+                .contains("cannot convert chr to int64: invalid decimal integer")
+        );
+    }
+
+    #[test]
     fn character_text_counts_unicode_scalars() {
         assert_eq!(str_to_char("A", site()).unwrap(), 'A');
         assert_eq!(str_to_char("é", site()).unwrap(), 'é');
@@ -881,6 +948,9 @@ mod tests {
         assert_eq!(signed_to_bool(0, "int64", here).unwrap(), false);
         assert!(signed_to_bool(1, "int64", here).unwrap());
         assert_eq!(code_to_char_signed(0x41, "int64", here).unwrap(), 'A');
+        assert_eq!(signed_to_char(1, "int64", here).unwrap(), '1');
+        assert_eq!(unsigned_to_char(0, "uint64", here).unwrap(), '0');
+        assert!(signed_to_char(10, "int64", here).is_err());
         assert_eq!(char_to_code('é'), 'é' as u32);
     }
 }

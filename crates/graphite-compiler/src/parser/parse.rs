@@ -376,7 +376,7 @@ impl<'a> Parser<'a> {
             }
             let parameters = self.parse_parameter_list();
             let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
-            let body = self.parse_block();
+            let body = self.parse_body();
             methods.push(ClassMethod {
                 public: visible,
                 is_static,
@@ -407,7 +407,7 @@ impl<'a> Parser<'a> {
         }
         let parameters = self.parse_parameter_list();
         let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
-        let body = self.parse_block();
+        let body = self.parse_body();
         let constructor = ClassInit {
             public,
             parameters,
@@ -532,7 +532,7 @@ impl<'a> Parser<'a> {
         }
         let parameters = self.parse_parameter_list();
         let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
-        let body = self.parse_block();
+        let body = self.parse_body();
         let span = Span {
             start: return_type.span.start,
             end: body.span.end,
@@ -599,6 +599,19 @@ impl<'a> Parser<'a> {
             conversion,
             span,
         })
+    }
+
+    fn parse_body(&mut self) -> BlockStmt {
+        if self.check(TokenKind::LeftBrace) {
+            return self.parse_block();
+        }
+        let fallback = self.current().span;
+        let statement = self.parse_statement();
+        let span = statement.as_ref().map(statement_span).unwrap_or(fallback);
+        BlockStmt {
+            statements: statement.into_iter().collect(),
+            span,
+        }
     }
 
     fn parse_block(&mut self) -> BlockStmt {
@@ -907,21 +920,7 @@ impl<'a> Parser<'a> {
             let Some(binding) = self.parse_binding_head() else {
                 break;
             };
-            if binding.conversion == ConversionMode::Auto {
-                self.error(
-                    ParserDiagnosticKind::InvalidDeclaration,
-                    binding.span,
-                    "auto is not allowed in a destructuring declaration",
-                );
-            }
             bindings.push(binding);
-        }
-        if bindings[0].conversion == ConversionMode::Auto {
-            self.error(
-                ParserDiagnosticKind::InvalidDeclaration,
-                bindings[0].span,
-                "auto is not allowed in a destructuring declaration",
-            );
         }
         if !self.consume(
             TokenKind::Equal,
@@ -972,13 +971,13 @@ impl<'a> Parser<'a> {
         let _ = self.consume(TokenKind::LeftParen, "expected '(' after if");
         let condition = self.parse_expression();
         let _ = self.consume(TokenKind::RightParen, "expected ')' after if condition");
-        let then_branch = self.parse_block();
+        let then_branch = self.parse_body();
         let else_branch = if self.check(TokenKind::KwElse) {
             self.bump();
             if self.check(TokenKind::KwIf) {
                 Some(Box::new(self.parse_if()))
             } else {
-                Some(Box::new(Stmt::Block(self.parse_block())))
+                Some(Box::new(Stmt::Block(self.parse_body())))
             }
         } else {
             None
@@ -1070,7 +1069,7 @@ impl<'a> Parser<'a> {
             }
         };
         let _ = self.consume(TokenKind::RightParen, "expected ')' after loop header");
-        let body = self.parse_block();
+        let body = self.parse_body();
         let end = body.span.end;
         Stmt::Loop(LoopStmt {
             kind,
@@ -1201,17 +1200,26 @@ impl<'a> Parser<'a> {
             TokenKind::PercentEqual => Some(BinaryOperator::Remainder),
             TokenKind::SlashSlashEqual => Some(BinaryOperator::FloorDiv),
             TokenKind::StarStarEqual => Some(BinaryOperator::Power),
+            TokenKind::AmpEqual => Some(BinaryOperator::BitAnd),
+            TokenKind::PipeEqual => Some(BinaryOperator::BitOr),
+            TokenKind::CaretEqual => Some(BinaryOperator::BitXor),
+            TokenKind::LessLessEqual => Some(BinaryOperator::Shl),
+            TokenKind::GreaterGreaterEqual => Some(BinaryOperator::Shr),
             _ => return None,
         })
     }
 
     fn parse_or(&mut self) -> Expr {
-        self.parse_binary(&[TokenKind::OrOr], Self::parse_and, BinaryOperator::Or)
+        self.parse_binary(
+            &[TokenKind::OrOr, TokenKind::KwOr],
+            Self::parse_and,
+            BinaryOperator::Or,
+        )
     }
 
     fn parse_and(&mut self) -> Expr {
         self.parse_binary(
-            &[TokenKind::AndAnd],
+            &[TokenKind::AndAnd, TokenKind::KwAnd],
             Self::parse_equality,
             BinaryOperator::And,
         )
@@ -1236,7 +1244,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expr {
-        let mut left = self.parse_additive();
+        let mut left = self.parse_bitwise_or();
         while matches!(
             self.current().kind,
             TokenKind::Less | TokenKind::LessEqual | TokenKind::Greater | TokenKind::GreaterEqual
@@ -1249,6 +1257,46 @@ impl<'a> Parser<'a> {
                 _ => unreachable!("comparison operator was checked"),
             };
             self.bump();
+            let right = self.parse_bitwise_or();
+            left = binary(left, operator, right);
+        }
+        left
+    }
+
+    fn parse_bitwise_or(&mut self) -> Expr {
+        self.parse_binary(
+            &[TokenKind::Pipe],
+            Self::parse_bitwise_xor,
+            BinaryOperator::BitOr,
+        )
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Expr {
+        self.parse_binary(
+            &[TokenKind::Caret],
+            Self::parse_bitwise_and,
+            BinaryOperator::BitXor,
+        )
+    }
+
+    fn parse_bitwise_and(&mut self) -> Expr {
+        self.parse_binary(&[TokenKind::Amp], Self::parse_shift, BinaryOperator::BitAnd)
+    }
+
+    fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_additive();
+        while self.check(TokenKind::LessLess)
+            || (self.check(TokenKind::Greater) && self.peek_kind() == TokenKind::Greater)
+        {
+            let operator = if self.check(TokenKind::LessLess) {
+                BinaryOperator::Shl
+            } else {
+                BinaryOperator::Shr
+            };
+            self.bump();
+            if operator == BinaryOperator::Shr {
+                self.bump();
+            }
             let right = self.parse_additive();
             left = binary(left, operator, right);
         }
@@ -1316,9 +1364,14 @@ impl<'a> Parser<'a> {
             self.bump();
             return self.parse_unary();
         }
-        if self.check(TokenKind::Bang) || self.check(TokenKind::Minus) {
+        if self.check(TokenKind::Bang)
+            || self.check(TokenKind::Minus)
+            || self.check(TokenKind::Tilde)
+        {
             let operator = if self.check(TokenKind::Bang) {
                 UnaryOperator::Not
+            } else if self.check(TokenKind::Tilde) {
+                UnaryOperator::BitNot
             } else {
                 UnaryOperator::Negate
             };
@@ -2090,9 +2143,12 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_conversion_at(&self, kind: TokenKind) -> bool {
-        type_kind(kind).is_some()
-            && kind != TokenKind::KwMap
-            && self.peek_kind() == TokenKind::LeftParen
+        if type_kind(kind).is_none() || kind == TokenKind::KwMap {
+            return false;
+        }
+        self.peek_kind() == TokenKind::LeftParen
+            || (self.peek_kind() == TokenKind::Question
+                && self.kind_at(self.index + 2) == TokenKind::LeftParen)
     }
 
     fn can_start_expression(&self) -> bool {
@@ -2113,6 +2169,7 @@ impl<'a> Parser<'a> {
                     | TokenKind::LeftBracket
                     | TokenKind::LeftBrace
                     | TokenKind::Bang
+                    | TokenKind::Tilde
                     | TokenKind::Minus
                     | TokenKind::Plus
                     | TokenKind::PlusPlus
@@ -2122,13 +2179,23 @@ impl<'a> Parser<'a> {
 
     fn parse_explicit_conversion(&mut self) -> Expr {
         let token = self.bump();
+        let mut end = token.span.end;
+        let optional = if self.check(TokenKind::Question) {
+            end = self.bump().span.end;
+            true
+        } else {
+            false
+        };
         let target = TypeSyntax {
             kind: type_kind(token.kind).expect("conversion target was checked"),
             name: String::new(),
             bounds: Vec::new(),
             arguments: Vec::new(),
-            optional: false,
-            span: token.span,
+            optional,
+            span: Span {
+                start: token.span.start,
+                end,
+            },
         };
         self.bump();
         let mut arguments = Vec::new();

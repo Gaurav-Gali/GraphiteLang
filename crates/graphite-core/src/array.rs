@@ -57,6 +57,48 @@ pub fn write_unsigned<T: Clone>(
     Ok(())
 }
 
+pub fn extend<T: Clone>(
+    items: &mut Vec<T>,
+    extra: &[T],
+    limit: Option<u64>,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
+    let new_len = (items.len() as u64).saturating_add(extra.len() as u64);
+    ensure_limit(new_len, limit, site)?;
+    items.extend(extra.iter().cloned());
+    Ok(())
+}
+
+pub fn pop_last<T>(items: &mut Vec<T>, site: Site<'_>) -> Result<T, RuntimeError> {
+    items.pop().ok_or_else(|| diagnostic::empty_pop(site))
+}
+
+pub fn pop_signed<T>(items: &mut Vec<T>, index: i128, site: Site<'_>) -> Result<T, RuntimeError> {
+    let Some(at) = resolve_index_signed(items.len() as u64, index) else {
+        return Err(diagnostic::array_bounds(site, index, items.len()));
+    };
+    Ok(items.remove(at as usize))
+}
+
+pub fn pop_unsigned<T>(items: &mut Vec<T>, index: u128, site: Site<'_>) -> Result<T, RuntimeError> {
+    let Some(at) = resolve_index_unsigned(items.len() as u64, index) else {
+        return Err(diagnostic::array_bounds(site, index, items.len()));
+    };
+    Ok(items.remove(at as usize))
+}
+
+pub fn position<T: PartialEq>(items: &[T], value: &T, site: Site<'_>) -> Result<i64, RuntimeError> {
+    items
+        .iter()
+        .position(|item| item == value)
+        .map(|index| index as i64)
+        .ok_or_else(|| diagnostic::value_not_found(site))
+}
+
+pub fn count_eq<T: PartialEq>(items: &[T], value: &T) -> i64 {
+    items.iter().filter(|item| *item == value).count() as i64
+}
+
 pub fn push<T>(
     items: &mut Vec<T>,
     value: T,

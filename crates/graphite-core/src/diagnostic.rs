@@ -337,6 +337,36 @@ pub fn external_library(detail: impl Into<String>) -> RuntimeError {
     }
 }
 
+pub fn empty_pop(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "ValueError",
+        "GRF-RUN-016",
+        "pop from empty sequence",
+        "empty sequence",
+    )
+}
+
+pub fn value_not_found(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "ValueError",
+        "GRF-RUN-016",
+        "value was not found",
+        "value was not found",
+    )
+}
+
+pub fn empty_separator(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "ValueError",
+        "GRF-RUN-016",
+        "empty separator",
+        "empty separator",
+    )
+}
+
 pub fn null_access(site: Site<'_>) -> RuntimeError {
     RuntimeError::at(
         site,

@@ -160,14 +160,24 @@ impl<'a> Scanner<'a> {
                 }
             }
             '<' => {
-                if self.consume('=') {
+                if self.consume('<') {
+                    if self.consume('=') {
+                        self.emit(TokenKind::LessLessEqual, start, None);
+                    } else {
+                        self.emit(TokenKind::LessLess, start, None);
+                    }
+                } else if self.consume('=') {
                     self.emit(TokenKind::LessEqual, start, None);
                 } else {
                     self.emit(TokenKind::Less, start, None);
                 }
             }
             '>' => {
-                if self.consume('=') {
+                if self.peek() == Some('>') && self.peek_second() == Some('=') {
+                    self.consume('>');
+                    self.consume('=');
+                    self.emit(TokenKind::GreaterGreaterEqual, start, None);
+                } else if self.consume('=') {
                     self.emit(TokenKind::GreaterEqual, start, None);
                 } else {
                     self.emit(TokenKind::Greater, start, None);
@@ -176,27 +186,29 @@ impl<'a> Scanner<'a> {
             '&' => {
                 if self.consume('&') {
                     self.emit(TokenKind::AndAnd, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::AmpEqual, start, None);
                 } else {
-                    self.error(
-                        DiagnosticKind::UnexpectedCharacter,
-                        start,
-                        "unexpected character '&'",
-                        Some("'&&' is the logical operator".to_string()),
-                    );
+                    self.emit(TokenKind::Amp, start, None);
                 }
             }
             '|' => {
                 if self.consume('|') {
                     self.emit(TokenKind::OrOr, start, None);
+                } else if self.consume('=') {
+                    self.emit(TokenKind::PipeEqual, start, None);
                 } else {
-                    self.error(
-                        DiagnosticKind::UnexpectedCharacter,
-                        start,
-                        "unexpected character '|'",
-                        Some("'||' is the logical operator".to_string()),
-                    );
+                    self.emit(TokenKind::Pipe, start, None);
                 }
             }
+            '^' => {
+                if self.consume('=') {
+                    self.emit(TokenKind::CaretEqual, start, None);
+                } else {
+                    self.emit(TokenKind::Caret, start, None);
+                }
+            }
+            '~' => self.emit(TokenKind::Tilde, start, None),
             ':' => self.emit(TokenKind::Colon, start, None),
             '?' => self.emit(TokenKind::Question, start, None),
             ch if is_ident_start(ch) => self.finish_identifier(start),

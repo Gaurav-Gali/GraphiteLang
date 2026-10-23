@@ -282,6 +282,7 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             let symbol = match unary.operator {
                 UnaryOperator::Negate => "-",
                 UnaryOperator::Not => "!",
+                UnaryOperator::BitNot => "~",
             };
             write_line(out, prefix, last, &format!("Unary {symbol}"));
             write_expression(out, &child_prefix(prefix, last), true, &unary.operand);
@@ -541,6 +542,11 @@ fn binary_symbol(operator: BinaryOperator) -> &'static str {
         BinaryOperator::GreaterEqual => ">=",
         BinaryOperator::And => "&&",
         BinaryOperator::Or => "||",
+        BinaryOperator::BitAnd => "&",
+        BinaryOperator::BitOr => "|",
+        BinaryOperator::BitXor => "^",
+        BinaryOperator::Shl => "<<",
+        BinaryOperator::Shr => ">>",
     }
 }
 

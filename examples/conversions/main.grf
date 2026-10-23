@@ -27,7 +27,13 @@ void main() {
 
     io.println("characters");
     io.println(str(chr("A")));
-    io.println(int(chr("A")));
+    io.println(int(chr("1")));
+    io.println(chr(1));
+    int? number = 6;
+    io.println(chr(number));
+    auto int digit = chr("2");
+    io.println(digit);
+    io.println(flt(chr("3")));
     io.println(str(chr("é")));
 
     io.println("text");

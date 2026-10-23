@@ -14,8 +14,9 @@
 //! when the value fits exactly. Other expressions do not convert across
 //! canonical numeric types.
 //!
-//! `&&` and `||` are parsed, then rejected here because short-circuit behavior
-//! is not frozen. Integer overflow is not wrapped: code generation uses checked
+//! `&&`/`and` and `||`/`or` are short-circuit boolean operators. Bitwise
+//! `&`, `|`, `^`, `~`, `<<`, and `>>` apply to integers. Integer overflow is
+//! not wrapped: code generation uses checked
 //! arithmetic and aborts if an operation overflows. That abort is a guard, not
 //! the frozen overflow policy. Floating-point arithmetic uses Rust's IEEE-754
 //! operators.
@@ -734,9 +735,48 @@ pub enum ArrayMethod {
     Get,
     Set,
     Push,
+    Append,
+    Extend,
     Insert,
     Remove,
+    Pop,
+    Clear,
+    IndexOf,
+    Count,
+    Reverse,
+    Sort,
+    Copy,
     Length,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMethod {
+    Length,
+    Get,
+    Set,
+    Push,
+    Append,
+    Extend,
+    Insert,
+    Remove,
+    Pop,
+    Clear,
+    Reverse,
+    Copy,
+    Split,
+    RSplit,
+    Strip,
+    LStrip,
+    RStrip,
+    Lower,
+    Upper,
+    Replace,
+    Find,
+    Index,
+    Count,
+    StartsWith,
+    EndsWith,
+    Join,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -872,6 +912,7 @@ pub enum CheckedExpr {
         object: Box<CheckedExpr>,
         index: Box<CheckedExpr>,
         ty: CanonicalType,
+        text: bool,
         file: String,
         line: u32,
         column: u32,
@@ -883,6 +924,7 @@ pub enum CheckedExpr {
         stop: Option<Box<CheckedExpr>>,
         step: Option<Box<CheckedExpr>>,
         ty: CanonicalType,
+        text: bool,
         file: String,
         line: u32,
         column: u32,
@@ -894,6 +936,7 @@ pub enum CheckedExpr {
         index: Box<CheckedExpr>,
         value: Box<CheckedExpr>,
         ty: CanonicalType,
+        text: bool,
         file: String,
         line: u32,
         column: u32,
@@ -907,6 +950,7 @@ pub enum CheckedExpr {
         step: Option<Box<CheckedExpr>>,
         value: Box<CheckedExpr>,
         ty: CanonicalType,
+        text: bool,
         limit: Option<u64>,
         file: String,
         line: u32,
@@ -919,7 +963,19 @@ pub enum CheckedExpr {
         method: ArrayMethod,
         args: Vec<CheckedExpr>,
         ty: CanonicalType,
+        element: CanonicalType,
         limit: Option<u64>,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    TextCall {
+        place: Option<ArrayPlace>,
+        object: Option<Box<CheckedExpr>>,
+        method: TextMethod,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
         file: String,
         line: u32,
         column: u32,
@@ -1045,6 +1101,7 @@ impl CheckedExpr {
             | CheckedExpr::IndexSet { ty, .. }
             | CheckedExpr::SliceSet { ty, .. }
             | CheckedExpr::ArrayCall { ty, .. }
+            | CheckedExpr::TextCall { ty, .. }
             | CheckedExpr::MapLiteral { ty, .. }
             | CheckedExpr::MapGet { ty, .. }
             | CheckedExpr::MapInsert { ty, .. }
@@ -2310,6 +2367,7 @@ impl<'a> Checker<'a> {
         let operand_expected = match expr.operator {
             UnaryOperator::Not => Some(CanonicalType::Bln),
             UnaryOperator::Negate => expected.filter(|ty| ty.is_numeric()),
+            UnaryOperator::BitNot => expected.filter(|ty| ty.is_integer()),
         };
         let operand = self.check_expr(&expr.operand, operand_expected, false);
         match expr.operator {
@@ -2335,6 +2393,17 @@ impl<'a> Checker<'a> {
                     span: expr.span,
                 }
             }
+            UnaryOperator::BitNot => {
+                if !operand.ty().is_integer() {
+                    self.error(expr.span, "operator '~' requires an integer operand");
+                }
+                CheckedExpr::Unary {
+                    op: UnaryOperator::BitNot,
+                    ty: operand.ty(),
+                    expr: Box::new(operand),
+                    span: expr.span,
+                }
+            }
         }
     }
 
@@ -2342,10 +2411,9 @@ impl<'a> Checker<'a> {
         if matches!(expr.operator, BinaryOperator::And | BinaryOperator::Or) {
             let left = self.check_expr(&expr.left, Some(CanonicalType::Bln), false);
             let right = self.check_expr(&expr.right, Some(CanonicalType::Bln), false);
-            self.error(
-                expr.span,
-                "the short-circuit behavior of '&&' and '||' is not specified yet",
-            );
+            if left.ty() != CanonicalType::Bln || right.ty() != CanonicalType::Bln {
+                self.error(expr.span, "a logical operand must have type bln");
+            }
             return CheckedExpr::Binary {
                 op: expr.operator,
                 ty: CanonicalType::Bln,
@@ -2353,6 +2421,21 @@ impl<'a> Checker<'a> {
                 right: Box::new(right),
                 compare: None,
                 span: expr.span,
+            };
+        }
+        if matches!(
+            expr.operator,
+            BinaryOperator::BitAnd
+                | BinaryOperator::BitOr
+                | BinaryOperator::BitXor
+                | BinaryOperator::Shl
+                | BinaryOperator::Shr
+        ) {
+            let (left, right) = self.check_numeric_operands(&expr.left, &expr.right, expected);
+            return if matches!(expr.operator, BinaryOperator::Shl | BinaryOperator::Shr) {
+                self.finish_shift(expr, left, right)
+            } else {
+                self.finish_bitwise(expr, left, right)
             };
         }
         if matches!(
@@ -2571,6 +2654,92 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn finish_bitwise(
+        &mut self,
+        expr: &BinaryExpr,
+        left: CheckedExpr,
+        right: CheckedExpr,
+    ) -> CheckedExpr {
+        self.finish_integer_op(expr.operator, left, right, expr.span, false)
+    }
+
+    fn finish_shift(
+        &mut self,
+        expr: &BinaryExpr,
+        left: CheckedExpr,
+        right: CheckedExpr,
+    ) -> CheckedExpr {
+        self.finish_integer_op(expr.operator, left, right, expr.span, true)
+    }
+
+    fn finish_integer_op(
+        &mut self,
+        op: BinaryOperator,
+        left: CheckedExpr,
+        right: CheckedExpr,
+        span: Span,
+        shift: bool,
+    ) -> CheckedExpr {
+        if !left.ty().is_integer() || !right.ty().is_integer() {
+            self.error(
+                span,
+                format!(
+                    "operator '{}' requires integer operands",
+                    operator_token(op)
+                ),
+            );
+            return CheckedExpr::Binary {
+                op,
+                ty: left.ty(),
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span,
+            };
+        }
+        if shift {
+            return CheckedExpr::Binary {
+                op,
+                ty: left.ty(),
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span,
+            };
+        }
+        match numeric::arithmetic(left.ty(), right.ty(), false) {
+            Ok(ty) => {
+                let left = self.promote(left, ty, span);
+                let right = self.promote(right, ty, span);
+                CheckedExpr::Binary {
+                    op,
+                    ty,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                    span,
+                }
+            }
+            Err(_) => {
+                self.error(
+                    span,
+                    format!(
+                        "operator '{}' requires integer operands",
+                        operator_token(op)
+                    ),
+                );
+                CheckedExpr::Binary {
+                    op,
+                    ty: left.ty(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    compare: None,
+                    span,
+                }
+            }
+        }
+    }
+
     fn finish_arithmetic(
         &mut self,
         expr: &BinaryExpr,
@@ -2703,7 +2872,24 @@ impl<'a> Checker<'a> {
         } else {
             self.check_expr(value, None, false)
         };
-        let combined = self.finish_op(op, current, rhs, span);
+        let combined = if matches!(
+            op,
+            BinaryOperator::BitAnd
+                | BinaryOperator::BitOr
+                | BinaryOperator::BitXor
+                | BinaryOperator::Shl
+                | BinaryOperator::Shr
+        ) {
+            self.finish_integer_op(
+                op,
+                current,
+                rhs,
+                span,
+                matches!(op, BinaryOperator::Shl | BinaryOperator::Shr),
+            )
+        } else {
+            self.finish_op(op, current, rhs, span)
+        };
         self.apply_conversion(combined, ty, auto, span)
     }
 
@@ -3087,6 +3273,25 @@ impl<'a> Checker<'a> {
                     ty: target,
                 };
             }
+            if allow {
+                if let Some(op) = conversion(from, inner) {
+                    let (file, line, column, end_column) = self.located(span);
+                    let converted = CheckedExpr::Convert {
+                        from,
+                        to: inner,
+                        op,
+                        expr: Box::new(expr),
+                        file,
+                        line,
+                        column,
+                        end_column,
+                    };
+                    return CheckedExpr::Wrap {
+                        expr: Box::new(converted),
+                        ty: target,
+                    };
+                }
+            }
         }
         if matches!(expr, CheckedExpr::Null { .. }) {
             self.error(span, "null requires a nullable type");
@@ -3095,6 +3300,25 @@ impl<'a> Checker<'a> {
         if from.is_optional() && from.optional_inner() == Some(target) {
             self.error(span, "a nullable value must be checked before it is used");
             return expr;
+        }
+        if target == CanonicalType::Chr && allow && from.is_optional() {
+            let inner = from.optional_inner().unwrap_or(from);
+            if inner == CanonicalType::Str
+                || conversion(inner, CanonicalType::Str).is_some()
+                || conversion(inner, CanonicalType::Chr).is_some()
+            {
+                let (file, line, column, end_column) = self.located(span);
+                return CheckedExpr::Convert {
+                    from,
+                    to: target,
+                    op: ConvOp::OptionalToChar,
+                    expr: Box::new(expr),
+                    file,
+                    line,
+                    column,
+                    end_column,
+                };
+            }
         }
         if target == CanonicalType::Str && allow && from.is_optional() {
             let inner = from.optional_inner().unwrap_or(from);
@@ -3470,12 +3694,15 @@ impl<'a> Checker<'a> {
             return self.check_map_read(object, expr);
         }
         let index = self.check_index_operand(&expr.index);
+        let text = object.ty() == CanonicalType::Str;
         let ty = if object.ty().is_array() {
             object.ty().element().unwrap_or(CanonicalType::Int64)
+        } else if text {
+            CanonicalType::Chr
         } else {
             self.error(
                 expr.object.span(),
-                format!("'{}' is not an array", self.spell(object.ty())),
+                format!("'{}' is not an array or a str", self.spell(object.ty())),
             );
             CanonicalType::Int64
         };
@@ -3484,6 +3711,7 @@ impl<'a> Checker<'a> {
             object: Box::new(object),
             index: Box::new(index),
             ty,
+            text,
             file,
             line,
             column,
@@ -3493,12 +3721,13 @@ impl<'a> Checker<'a> {
 
     fn check_slice(&mut self, expr: &SliceExpr) -> CheckedExpr {
         let object = self.check_expr(&expr.object, None, false);
+        let text = object.ty() == CanonicalType::Str;
         if object.ty().is_map() {
             self.error(expr.span, "maps do not support slicing");
-        } else if !object.ty().is_array() {
+        } else if !object.ty().is_array() && !text {
             self.error(
                 expr.object.span(),
-                format!("'{}' is not an array", self.spell(object.ty())),
+                format!("'{}' is not an array or a str", self.spell(object.ty())),
             );
         }
         let start = expr
@@ -3521,6 +3750,7 @@ impl<'a> Checker<'a> {
             stop,
             step,
             ty,
+            text,
             file,
             line,
             column,
@@ -3548,19 +3778,25 @@ impl<'a> Checker<'a> {
             let checked_index = self.check_index_operand(&index.index);
             let (file, line, column, end_column) = self.located(index.span);
             let array_ty = object_ty;
-            if !array_ty.is_array() {
+            let text = array_ty == CanonicalType::Str;
+            if !array_ty.is_array() && !text {
                 self.error(
                     index.object.span(),
-                    format!("'{}' is not an array", self.spell(array_ty)),
+                    format!("'{}' is not an array or a str", self.spell(array_ty)),
                 );
                 let _ = self.check_expr(value, None, false);
                 return self.dummy(None);
             }
-            let element = array_ty.element().unwrap_or(CanonicalType::Int64);
+            let element = if text {
+                CanonicalType::Chr
+            } else {
+                array_ty.element().unwrap_or(CanonicalType::Int64)
+            };
             let current = CheckedExpr::IndexGet {
                 object: Box::new(self.place_load(&place)),
                 index: Box::new(checked_index.clone()),
                 ty: element,
+                text,
                 file: file.clone(),
                 line,
                 column,
@@ -3573,6 +3809,7 @@ impl<'a> Checker<'a> {
                 index: Box::new(checked_index),
                 value: Box::new(value),
                 ty: element,
+                text,
                 file,
                 line,
                 column,
@@ -3589,12 +3826,15 @@ impl<'a> Checker<'a> {
         }
         let checked_index = self.check_index_operand(&index.index);
         let (file, line, column, end_column) = self.located(index.span);
+        let text = object.ty() == CanonicalType::Str;
         let element = if object.ty().is_array() {
             object.ty().element().unwrap_or(CanonicalType::Int64)
+        } else if text {
+            CanonicalType::Chr
         } else {
             self.error(
                 index.object.span(),
-                format!("'{}' is not an array", self.spell(object.ty())),
+                format!("'{}' is not an array or a str", self.spell(object.ty())),
             );
             CanonicalType::Int64
         };
@@ -3602,6 +3842,7 @@ impl<'a> Checker<'a> {
             object: Box::new(object.clone()),
             index: Box::new(checked_index.clone()),
             ty: element,
+            text,
             file: file.clone(),
             line,
             column,
@@ -3614,6 +3855,7 @@ impl<'a> Checker<'a> {
             index: Box::new(checked_index),
             value: Box::new(value),
             ty: element,
+            text,
             file,
             line,
             column,
@@ -3655,10 +3897,10 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(value, None, false);
                 return self.dummy(None);
             }
-            if !array_ty.is_array() {
+            if !array_ty.is_array() && array_ty != CanonicalType::Str {
                 self.error(
                     slice.object.span(),
-                    format!("'{}' is not an array", self.spell(array_ty)),
+                    format!("'{}' is not an array or a str", self.spell(array_ty)),
                 );
                 let _ = self.check_expr(value, None, false);
                 return self.dummy(None);
@@ -3671,17 +3913,19 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(value, None, false);
                 return self.dummy(None);
             }
-            if !object.ty().is_array() {
+            if !object.ty().is_array() && object.ty() != CanonicalType::Str {
                 self.error(
                     slice.object.span(),
-                    format!("'{}' is not an array", self.spell(object.ty())),
+                    format!("'{}' is not an array or a str", self.spell(object.ty())),
                 );
             }
             let array_ty = object.ty();
             (None, Some(Box::new(object)), array_ty)
         };
-        let checked = self.check_expr(value, Some(array_ty), false);
-        let value = self.apply_conversion(checked, array_ty, false, value.span());
+        let text = array_ty == CanonicalType::Str;
+        let replacement = if text { CanonicalType::Str } else { array_ty };
+        let checked = self.check_expr(value, Some(replacement), false);
+        let value = self.apply_conversion(checked, replacement, false, value.span());
         CheckedExpr::SliceSet {
             place,
             object,
@@ -3690,6 +3934,7 @@ impl<'a> Checker<'a> {
             step,
             value: Box::new(value),
             ty: array_ty,
+            text,
             limit: array_ty.limit(),
             file,
             line,
@@ -3738,6 +3983,7 @@ impl<'a> Checker<'a> {
                     object: Box::new(object_expr),
                     index: index.clone(),
                     ty: element,
+                    text: false,
                     file: file.clone(),
                     line: *line,
                     column: *column,
@@ -3949,7 +4195,19 @@ impl<'a> Checker<'a> {
             let _ = self.check_expr(&member.object, None, false);
             return self.dummy(None);
         }
-        let mutating = matches!(name, "set" | "remove" | "push" | "insert");
+        let mutating = matches!(
+            name,
+            "set"
+                | "remove"
+                | "push"
+                | "append"
+                | "extend"
+                | "insert"
+                | "pop"
+                | "clear"
+                | "reverse"
+                | "sort"
+        );
         if self.peek_type(&member.object).is_some_and(|ty| {
             ty.is_class() || ty.optional_inner().is_some_and(|inner| inner.is_class())
         }) {
@@ -3976,6 +4234,9 @@ impl<'a> Checker<'a> {
             if ty.is_record() {
                 return self.reject_record_call(member, arguments, ty);
             }
+            if ty == CanonicalType::Str {
+                return self.finish_text_call(name, Some(place), None, arguments, span, member);
+            }
             return self.finish_array_call(name, Some(place), None, ty, arguments, span, member);
         }
         let object = self.check_expr(&member.object, None, false);
@@ -3998,7 +4259,202 @@ impl<'a> Checker<'a> {
         if let CanonicalType::Class(id) = ty {
             return self.finish_class_call(object, id, member, arguments, span);
         }
+        if ty == CanonicalType::Str {
+            return self.finish_text_call(name, None, Some(object), arguments, span, member);
+        }
         self.finish_array_call(name, None, Some(object), ty, arguments, span, member)
+    }
+
+    fn finish_text_call(
+        &mut self,
+        name: &str,
+        place: Option<ArrayPlace>,
+        object: Option<CheckedExpr>,
+        arguments: &[Expr],
+        span: Span,
+        member: &MemberExpr,
+    ) -> CheckedExpr {
+        let method = match name {
+            "length" => TextMethod::Length,
+            "get" => TextMethod::Get,
+            "set" => TextMethod::Set,
+            "push" => TextMethod::Push,
+            "append" => TextMethod::Append,
+            "extend" => TextMethod::Extend,
+            "insert" => TextMethod::Insert,
+            "remove" => TextMethod::Remove,
+            "pop" => TextMethod::Pop,
+            "clear" => TextMethod::Clear,
+            "reverse" => TextMethod::Reverse,
+            "copy" => TextMethod::Copy,
+            "split" => TextMethod::Split,
+            "rsplit" => TextMethod::RSplit,
+            "strip" => TextMethod::Strip,
+            "lstrip" => TextMethod::LStrip,
+            "rstrip" => TextMethod::RStrip,
+            "lower" => TextMethod::Lower,
+            "upper" => TextMethod::Upper,
+            "replace" => TextMethod::Replace,
+            "find" => TextMethod::Find,
+            "index" => TextMethod::Index,
+            "count" => TextMethod::Count,
+            "startswith" => TextMethod::StartsWith,
+            "endswith" => TextMethod::EndsWith,
+            "join" => TextMethod::Join,
+            _ => {
+                self.error(member.member.span, format!("str has no method '{name}'"));
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            }
+        };
+        let flexible = matches!(
+            method,
+            TextMethod::Pop
+                | TextMethod::Split
+                | TextMethod::RSplit
+                | TextMethod::Strip
+                | TextMethod::LStrip
+                | TextMethod::RStrip
+        );
+        let expected = match method {
+            TextMethod::Length
+            | TextMethod::Clear
+            | TextMethod::Reverse
+            | TextMethod::Copy
+            | TextMethod::Lower
+            | TextMethod::Upper => 0,
+            TextMethod::Get
+            | TextMethod::Push
+            | TextMethod::Append
+            | TextMethod::Remove
+            | TextMethod::Extend
+            | TextMethod::Find
+            | TextMethod::Index
+            | TextMethod::Count
+            | TextMethod::StartsWith
+            | TextMethod::EndsWith
+            | TextMethod::Join => 1,
+            TextMethod::Set | TextMethod::Insert | TextMethod::Replace => 2,
+            TextMethod::Pop => arguments.len().min(1),
+            TextMethod::Split | TextMethod::RSplit => arguments.len().min(2),
+            TextMethod::Strip | TextMethod::LStrip | TextMethod::RStrip => arguments.len().min(1),
+        };
+        if flexible {
+            let ok = match method {
+                TextMethod::Pop => arguments.len() <= 1,
+                TextMethod::Strip | TextMethod::LStrip | TextMethod::RStrip => arguments.len() <= 1,
+                TextMethod::Split | TextMethod::RSplit => arguments.len() <= 2,
+                _ => true,
+            };
+            if !ok {
+                self.error(
+                    span,
+                    format!(
+                        "method '{name}' expects fewer arguments, found {}",
+                        arguments.len()
+                    ),
+                );
+            }
+        } else if arguments.len() != expected {
+            self.error(
+                span,
+                format!(
+                    "method '{name}' expects {expected} argument{}, found {}",
+                    if expected == 1 { "" } else { "s" },
+                    arguments.len()
+                ),
+            );
+        }
+        let mut args = Vec::new();
+        for (index, argument) in arguments.iter().enumerate() {
+            let wanted = match (method, index) {
+                (TextMethod::Get | TextMethod::Remove | TextMethod::Pop, 0) => None,
+                (TextMethod::Set | TextMethod::Insert, 0) => None,
+                (TextMethod::Push | TextMethod::Append, 0)
+                | (TextMethod::Set | TextMethod::Insert, 1) => Some(CanonicalType::Chr),
+                (
+                    TextMethod::Extend
+                    | TextMethod::Find
+                    | TextMethod::Index
+                    | TextMethod::Count
+                    | TextMethod::StartsWith
+                    | TextMethod::EndsWith
+                    | TextMethod::Replace,
+                    _,
+                ) => Some(CanonicalType::Str),
+                (TextMethod::Split | TextMethod::RSplit, 0)
+                | (TextMethod::Strip | TextMethod::LStrip | TextMethod::RStrip, 0) => {
+                    Some(CanonicalType::Str)
+                }
+                (TextMethod::Split | TextMethod::RSplit, 1) => None,
+                (TextMethod::Join, 0) => Some(CanonicalType::Str.nest()),
+                _ => None,
+            };
+            let value = self.check_expr(argument, wanted, false);
+            let index_argument = wanted.is_none()
+                && index == 0
+                && matches!(
+                    method,
+                    TextMethod::Get
+                        | TextMethod::Set
+                        | TextMethod::Insert
+                        | TextMethod::Remove
+                        | TextMethod::Pop
+                );
+            let maxsplit = matches!(method, TextMethod::Split | TextMethod::RSplit) && index == 1;
+            if (index_argument || maxsplit) && !value.ty().is_integer() {
+                self.error(
+                    argument.span(),
+                    format!(
+                        "an index must be an integer, found '{}'",
+                        self.spell(value.ty())
+                    ),
+                );
+            }
+            let value = if let Some(wanted) = wanted {
+                self.apply_conversion(value, wanted, false, argument.span())
+            } else {
+                value
+            };
+            args.push(value);
+        }
+        let ty = match method {
+            TextMethod::Length => CanonicalType::UInt64,
+            TextMethod::Get | TextMethod::Pop => CanonicalType::Chr,
+            TextMethod::Find | TextMethod::Index | TextMethod::Count => CanonicalType::Int64,
+            TextMethod::StartsWith | TextMethod::EndsWith => CanonicalType::Bln,
+            TextMethod::Split | TextMethod::RSplit => CanonicalType::Str.nest(),
+            TextMethod::Join
+            | TextMethod::Strip
+            | TextMethod::LStrip
+            | TextMethod::RStrip
+            | TextMethod::Lower
+            | TextMethod::Upper
+            | TextMethod::Replace
+            | TextMethod::Copy => CanonicalType::Str,
+            TextMethod::Set
+            | TextMethod::Push
+            | TextMethod::Append
+            | TextMethod::Extend
+            | TextMethod::Insert
+            | TextMethod::Remove
+            | TextMethod::Clear
+            | TextMethod::Reverse => CanonicalType::Void,
+        };
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::TextCall {
+            place,
+            object: object.map(Box::new),
+            method,
+            args,
+            ty,
+            file,
+            line,
+            column,
+            end_column,
+        }
     }
 
     fn finish_handle_call(
@@ -4083,8 +4539,17 @@ impl<'a> Checker<'a> {
             "get" => ArrayMethod::Get,
             "set" => ArrayMethod::Set,
             "push" => ArrayMethod::Push,
+            "append" => ArrayMethod::Append,
+            "extend" => ArrayMethod::Extend,
             "insert" => ArrayMethod::Insert,
             "remove" => ArrayMethod::Remove,
+            "pop" => ArrayMethod::Pop,
+            "clear" => ArrayMethod::Clear,
+            "index" => ArrayMethod::IndexOf,
+            "count" => ArrayMethod::Count,
+            "reverse" => ArrayMethod::Reverse,
+            "sort" => ArrayMethod::Sort,
+            "copy" => ArrayMethod::Copy,
             "length" => ArrayMethod::Length,
             _ => {
                 self.error(member.member.span, format!("array has no method '{name}'"));
@@ -4100,12 +4565,45 @@ impl<'a> Checker<'a> {
                 format!("'{}' is not an array", self.spell(array_ty)),
             );
         }
+        let element = array_ty.element().unwrap_or(CanonicalType::Int64);
+        if method == ArrayMethod::Sort && !self.can_order(element) {
+            self.error(
+                span,
+                format!("cannot compare '{}' values", self.spell(element)),
+            );
+        }
+        if matches!(method, ArrayMethod::IndexOf | ArrayMethod::Count) && !self.can_equate(element)
+        {
+            self.error(
+                span,
+                format!("cannot compare '{}' values", self.spell(element)),
+            );
+        }
         let expected_args = match method {
-            ArrayMethod::Length => 0,
-            ArrayMethod::Get | ArrayMethod::Push | ArrayMethod::Remove => 1,
+            ArrayMethod::Length
+            | ArrayMethod::Clear
+            | ArrayMethod::Reverse
+            | ArrayMethod::Sort
+            | ArrayMethod::Copy => 0,
+            ArrayMethod::Get
+            | ArrayMethod::Push
+            | ArrayMethod::Append
+            | ArrayMethod::Extend
+            | ArrayMethod::Remove
+            | ArrayMethod::IndexOf
+            | ArrayMethod::Count => 1,
             ArrayMethod::Set | ArrayMethod::Insert => 2,
+            ArrayMethod::Pop => arguments.len().min(1),
         };
-        if arguments.len() != expected_args {
+        if method == ArrayMethod::Pop && arguments.len() > 1 {
+            self.error(
+                span,
+                format!(
+                    "method 'pop' expects 0 or 1 argument, found {}",
+                    arguments.len()
+                ),
+            );
+        } else if arguments.len() != expected_args {
             self.error(
                 span,
                 format!(
@@ -4123,6 +4621,7 @@ impl<'a> Checker<'a> {
             method,
             args,
             ty: self.array_method_type(method, array_ty),
+            element,
             limit: array_ty.limit(),
             file,
             line,
@@ -4287,12 +4786,33 @@ impl<'a> Checker<'a> {
 
     fn array_method_type(&self, method: ArrayMethod, array_ty: CanonicalType) -> CanonicalType {
         match method {
-            ArrayMethod::Get => array_ty.element().unwrap_or(CanonicalType::Int64),
-            ArrayMethod::Length => CanonicalType::UInt64,
-            ArrayMethod::Set | ArrayMethod::Push | ArrayMethod::Insert | ArrayMethod::Remove => {
-                CanonicalType::Void
+            ArrayMethod::Get | ArrayMethod::Pop => {
+                array_ty.element().unwrap_or(CanonicalType::Int64)
             }
+            ArrayMethod::Length => CanonicalType::UInt64,
+            ArrayMethod::IndexOf | ArrayMethod::Count => CanonicalType::Int64,
+            ArrayMethod::Copy => array_ty,
+            ArrayMethod::Set
+            | ArrayMethod::Push
+            | ArrayMethod::Append
+            | ArrayMethod::Extend
+            | ArrayMethod::Insert
+            | ArrayMethod::Remove
+            | ArrayMethod::Clear
+            | ArrayMethod::Reverse
+            | ArrayMethod::Sort => CanonicalType::Void,
         }
+    }
+
+    fn can_equate(&self, ty: CanonicalType) -> bool {
+        self.can_order(ty) || ty.is_class()
+    }
+
+    fn can_order(&self, ty: CanonicalType) -> bool {
+        ty.is_numeric()
+            || ty == CanonicalType::Bln
+            || ty == CanonicalType::Chr
+            || ty == CanonicalType::Str
     }
 
     fn array_method_args(
@@ -4305,14 +4825,24 @@ impl<'a> Checker<'a> {
         let mut checked = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             let expected = match (method, index) {
-                (ArrayMethod::Get | ArrayMethod::Remove, 0) => None,
-                (ArrayMethod::Push, 0) => Some(element),
+                (ArrayMethod::Get | ArrayMethod::Remove | ArrayMethod::Pop, 0) => None,
+                (ArrayMethod::Push | ArrayMethod::Append, 0) => Some(element),
+                (ArrayMethod::Extend, 0) => Some(array_ty),
+                (ArrayMethod::IndexOf | ArrayMethod::Count, 0) => Some(element),
                 (ArrayMethod::Set, 0) | (ArrayMethod::Insert, 0) => None,
                 (ArrayMethod::Set, 1) | (ArrayMethod::Insert, 1) => Some(element),
                 _ => None,
             };
             let value = self.check_expr(argument, expected, false);
-            if expected.is_none() && matches!(index, 0) && method != ArrayMethod::Push {
+            let index_argument = matches!(
+                method,
+                ArrayMethod::Get
+                    | ArrayMethod::Remove
+                    | ArrayMethod::Pop
+                    | ArrayMethod::Set
+                    | ArrayMethod::Insert
+            ) && index == 0;
+            if index_argument {
                 if !value.ty().is_integer() && arguments.len() > index {
                     self.error(
                         argument.span(),
@@ -4363,25 +4893,31 @@ impl<'a> Checker<'a> {
         let mut names = Vec::new();
         let mut bindings = Vec::new();
         for binding in &decl.bindings {
-            if binding.conversion == ConversionMode::Auto {
-                self.error(
-                    binding.span,
-                    "auto is not allowed in a destructuring declaration",
-                );
-            }
+            let auto = binding.conversion == ConversionMode::Auto;
             let ty = self.resolve_type(&binding.ty);
             if ty == CanonicalType::Void || ty.is_void_array() {
                 self.error(binding.ty.span, "void is not a valid array element type");
             }
-            if ty != element {
-                self.error(
-                    binding.ty.span,
-                    format!(
-                        "type mismatch: expected '{}', found '{}'",
-                        self.spell(element),
-                        self.spell(ty)
-                    ),
-                );
+            if ty != element && !(auto && self.auto_converts(element, ty)) {
+                if auto {
+                    self.error(
+                        binding.ty.span,
+                        format!(
+                            "cannot convert '{}' to '{}'",
+                            self.spell(element),
+                            self.spell(ty)
+                        ),
+                    );
+                } else {
+                    self.error(
+                        binding.ty.span,
+                        format!(
+                            "type mismatch: expected '{}', found '{}'",
+                            self.spell(element),
+                            self.spell(ty)
+                        ),
+                    );
+                }
             }
             if names.contains(&binding.name.name) {
                 self.error(
@@ -4401,28 +4937,43 @@ impl<'a> Checker<'a> {
                     format!("'{}' is already declared in this scope", binding.name.name),
                 );
             }
-            bindings.push((binding.name.name.clone(), ty, binding.mutable));
+            bindings.push((binding.name.name.clone(), ty, binding.mutable, auto));
         }
-        for (name, ty, mutable) in &bindings {
+        for (name, ty, mutable, auto) in &bindings {
             self.scopes.last_mut().unwrap().insert(
                 name.clone(),
                 Binding {
                     ty: *ty,
                     mutable: *mutable,
-                    auto: false,
+                    auto: *auto,
                     ready: true,
                 },
             );
         }
         let (file, line, column, end_column) = self.located(decl.span);
         Some(CheckedStmt::Destructure {
-            bindings,
+            bindings: bindings
+                .into_iter()
+                .map(|(name, ty, mutable, _)| (name, ty, mutable))
+                .collect(),
             value,
             file,
             line,
             column,
             end_column,
         })
+    }
+
+    fn auto_converts(&self, from: CanonicalType, to: CanonicalType) -> bool {
+        if from == to {
+            return true;
+        }
+        if let Some(inner) = to.optional_inner() {
+            if from == inner || conversion(from, inner).is_some() {
+                return true;
+            }
+        }
+        conversion(from, to).is_some()
     }
 
     fn check_iteration(
@@ -4528,11 +5079,15 @@ impl<'a> Checker<'a> {
             let ty = self.resolve_type(&binding.ty);
             checked_bindings.push((binding.name.name.clone(), ty, binding.mutable));
         }
-        let lock = if let CheckedExpr::Load { name, .. } = &source {
-            self.binding_at(name).map(|(scope, _)| IterLock {
-                name: name.clone(),
-                scope,
-            })
+        let lock = if let CheckedExpr::Load { name, ty } = &source {
+            if ty.is_array() {
+                None
+            } else {
+                self.binding_at(name).map(|(scope, _)| IterLock {
+                    name: name.clone(),
+                    scope,
+                })
+            }
         } else {
             None
         };
@@ -6020,6 +6575,11 @@ fn operator_token(op: BinaryOperator) -> &'static str {
         BinaryOperator::NotEqual => "!=",
         BinaryOperator::And => "&&",
         BinaryOperator::Or => "||",
+        BinaryOperator::BitAnd => "&",
+        BinaryOperator::BitOr => "|",
+        BinaryOperator::BitXor => "^",
+        BinaryOperator::Shl => "<<",
+        BinaryOperator::Shr => ">>",
     }
 }
 

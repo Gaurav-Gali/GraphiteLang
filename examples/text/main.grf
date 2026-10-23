@@ -1,0 +1,54 @@
+import grf.io;
+
+// Nullable auto conversions, auto destructuring, string slices, and the
+// sequence methods shared by arrays and strings.
+// Run: grf run examples/text/main.grf
+
+void main() {
+    io.println("auto");
+    auto int? number = 10.5;
+    io.println(number);
+    auto int? missing = null;
+    io.println(missing);
+    io.println(int?(4.2));
+
+    io.println("destructure");
+    flt[] values = [10.5, 20.9];
+    auto int first, auto int? second = values;
+    io.println(first);
+    io.println(second);
+
+    io.println("slice");
+    str name = "abcd";
+    io.println(name[::-1]);
+    io.println(name[1:3]);
+    name[1:3] = "XY";
+    io.println(name);
+
+    io.println("string");
+    name = "zbcd";
+    name[0] = chr("z");
+    name.append(chr("e"));
+    name.extend("!");
+    io.println(name);
+    io.println(name.length());
+    io.println(name.pop());
+    str line = "a,b,c";
+    str[] parts = line.split(",");
+    io.println(parts[0]);
+    io.println(parts[2]);
+    io.println(line.upper());
+    io.println("  hi  ".strip());
+    io.println(line.find("b"));
+    io.println(",".join(parts));
+
+    io.println("array");
+    int[] scores = [3, 1, 2];
+    scores.append(0);
+    scores.sort();
+    io.println(scores);
+    io.println(scores.pop());
+    io.println(scores.index(1));
+    scores.reverse();
+    io.println(scores);
+}

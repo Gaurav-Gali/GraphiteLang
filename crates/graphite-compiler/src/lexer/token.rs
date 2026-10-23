@@ -100,6 +100,18 @@ pub enum TokenKind {
     GreaterEqual,
     AndAnd,
     OrOr,
+    Amp,
+    AmpEqual,
+    Pipe,
+    PipeEqual,
+    Caret,
+    CaretEqual,
+    Tilde,
+    LessLess,
+    LessLessEqual,
+    GreaterGreaterEqual,
+    KwAnd,
+    KwOr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +190,8 @@ fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
         TokenKind::KwNew => "new",
         TokenKind::KwStatic => "static",
         TokenKind::KwNull => "null",
+        TokenKind::KwAnd => "and",
+        TokenKind::KwOr => "or",
         _ => return None,
     })
 }
@@ -224,6 +238,8 @@ pub fn keyword(ident: &str) -> Option<TokenKind> {
         "new" => TokenKind::KwNew,
         "static" => TokenKind::KwStatic,
         "null" => TokenKind::KwNull,
+        "and" => TokenKind::KwAnd,
+        "or" => TokenKind::KwOr,
         _ => return None,
     })
 }

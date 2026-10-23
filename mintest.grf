@@ -3,19 +3,7 @@ import grf.io;
 void main() {
   int[] arr = [1,2,3,4];
 
-  arrayOps ops = new arrayOps(arr);
+  int n = 10;
 
-  io.println(ops.get());
-}
-
-class arrayOps {
-  private int[] arr;
-
-  arrayOps(int[] arr) {
-    this.arr = arr;
-  }
-
-  int[] get() {
-    return this.arr;
-  }
+  loop(n --> 0) io.print(f"{n+1}\n");
 }

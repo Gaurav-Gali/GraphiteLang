@@ -41,16 +41,23 @@ pub enum ConvOp {
     UnsignedToChar,
     F64ToChar,
     F32ToChar,
+    BoolToChar,
     CharToSigned,
     CharToUnsigned,
     CharToF64,
     CharToF32,
+    CharToBool,
     CharToStr,
     ArrayToStr,
     RecordToStr,
     MapToStr,
     TypeToStr,
     OptionalToStr,
+    ArrayToChar,
+    RecordToChar,
+    MapToChar,
+    TypeToChar,
+    OptionalToChar,
 }
 
 pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
@@ -85,6 +92,7 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
             UInt16 | UInt32 | UInt64 => Some(ConvOp::BoolToUnsigned),
             Flt64 => Some(ConvOp::BoolToF64),
             Flt32 => Some(ConvOp::BoolToF32),
+            Chr => Some(ConvOp::BoolToChar),
             _ => None,
         };
     }
@@ -94,6 +102,7 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
             UInt16 | UInt32 | UInt64 => Some(ConvOp::UnsignedToBool),
             Flt64 => Some(ConvOp::F64ToBool),
             Flt32 => Some(ConvOp::F32ToBool),
+            Chr => Some(ConvOp::CharToBool),
             _ => None,
         };
     }
@@ -103,6 +112,10 @@ pub fn conversion(from: CanonicalType, to: CanonicalType) -> Option<ConvOp> {
             UInt16 | UInt32 | UInt64 => Some(ConvOp::UnsignedToChar),
             Flt64 => Some(ConvOp::F64ToChar),
             Flt32 => Some(ConvOp::F32ToChar),
+            Array { .. } => Some(ConvOp::ArrayToChar),
+            Record(_) => Some(ConvOp::RecordToChar),
+            Map(_) => Some(ConvOp::MapToChar),
+            Type => Some(ConvOp::TypeToChar),
             _ => None,
         };
     }
