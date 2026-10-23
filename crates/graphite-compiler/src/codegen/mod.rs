@@ -699,6 +699,17 @@ impl Emitter<'_> {
                     }
                 }
             }
+            CheckedExpr::Ternary {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let condition = self.emit_expr(condition);
+                let then_branch = self.emit_expr(then_branch);
+                let else_branch = self.emit_expr(else_branch);
+                format!("(if {condition} {{ {then_branch} }} else {{ {else_branch} }})")
+            }
             CheckedExpr::Binary {
                 op,
                 left,

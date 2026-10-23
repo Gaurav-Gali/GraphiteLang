@@ -3,7 +3,9 @@ import grf.io;
 void main() {
   int[] arr = [1,2,3,4];
 
-  int n = 10;
+  int n = 9;
 
-  loop(n --> 0) io.print(f"{n+1}\n");
+  int m = n >= 10 ? 20 : 10;
+
+  io.println(f"{n} - {m}");
 }

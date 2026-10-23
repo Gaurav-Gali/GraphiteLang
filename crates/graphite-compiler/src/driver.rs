@@ -554,6 +554,62 @@ void main() {
     }
 
     #[test]
+    fn ternary_operators_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-ternary-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+class Counter {
+    int n;
+    Counter() this.n = 0;
+    int bump() {
+        this.n = this.n + 1;
+        return this.n;
+    }
+}
+
+int pick(bln ready) return ready ? 1 : 2;
+
+bln boom() {
+    int x = 1 / 0;
+    return true;
+}
+
+void main() {
+    Counter c = new Counter();
+    io.println(c.bump() == 1 ? 10 : 20);
+    io.println(c.n);
+    io.println(false ? boom() : false);
+    io.println(false ? 1 : true ? 2 : 3);
+    true ? io.println("yes");
+    false ? io.println("no");
+    auto int digit = true ? 10.5 : 2;
+    io.println(digit);
+    int? value = false ? null : 7;
+    io.println(value);
+    io.println(pick(true));
+    io.println(pick(false));
+    int count = 2;
+    loop (count > 0) {
+        count = count - 1;
+        count == 0 ? break;
+        io.println(count);
+    }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "10\n1\nfalse\n2\nyes\n10\n7\n1\n2\n1\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sample_program_runs() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.grf");

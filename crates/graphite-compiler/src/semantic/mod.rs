@@ -828,6 +828,12 @@ pub enum CheckedExpr {
         compare: Option<CompareMode>,
         span: Span,
     },
+    Ternary {
+        condition: Box<CheckedExpr>,
+        then_branch: Box<CheckedExpr>,
+        else_branch: Box<CheckedExpr>,
+        ty: CanonicalType,
+    },
     NumCast {
         from: CanonicalType,
         to: CanonicalType,
@@ -1087,6 +1093,7 @@ impl CheckedExpr {
             | CheckedExpr::Load { ty, .. }
             | CheckedExpr::Unary { ty, .. }
             | CheckedExpr::Binary { ty, .. }
+            | CheckedExpr::Ternary { ty, .. }
             | CheckedExpr::Assign { ty, .. }
             | CheckedExpr::Update { ty, .. }
             | CheckedExpr::Call { ty, .. }
@@ -1179,6 +1186,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         in_init: false,
         iterating: Vec::new(),
         narrowed: Vec::new(),
+        allow_convert: false,
     };
     checker.collect_imports(program);
     checker.collect_classes(program);
@@ -1314,6 +1322,7 @@ struct Checker<'a> {
     in_init: bool,
     iterating: Vec<IterLock>,
     narrowed: Vec<HashMap<String, CanonicalType>>,
+    allow_convert: bool,
 }
 
 #[derive(Clone)]
@@ -1982,6 +1991,24 @@ impl<'a> Checker<'a> {
                 Some(CheckedStmt::Continue)
             }
             Stmt::Try(stmt) => Some(self.check_try(stmt)),
+            Stmt::Conditional(stmt) => {
+                let condition = self.check_expr(&stmt.condition, Some(CanonicalType::Bln), false);
+                if condition.ty() != CanonicalType::Bln {
+                    self.error(
+                        stmt.condition.span(),
+                        "a ternary condition must have type bln",
+                    );
+                }
+                let (then_narrow, _) = self.null_split(&stmt.condition);
+                self.push_narrow(&then_narrow);
+                let action = self.check_stmt(&stmt.action);
+                self.pop_narrow();
+                Some(CheckedStmt::If {
+                    condition,
+                    then_body: action.into_iter().collect(),
+                    else_body: None,
+                })
+            }
             Stmt::Expression(stmt) => {
                 let expr = self.check_expr(&stmt.expression, None, true);
                 if expr.ty() == CanonicalType::ErrorHandle {
@@ -2250,7 +2277,10 @@ impl<'a> Checker<'a> {
             return None;
         }
         let (value, ready) = if let Some(initializer) = &decl.initializer {
+            let saved = self.allow_convert;
+            self.allow_convert = decl.conversion == ConversionMode::Auto;
             let value = self.check_expr(initializer, Some(ty), false);
+            self.allow_convert = saved;
             (
                 self.apply_conversion(
                     value,
@@ -2308,10 +2338,15 @@ impl<'a> Checker<'a> {
         expected: Option<CanonicalType>,
         allow_void: bool,
     ) -> CheckedExpr {
+        let saved_convert = self.allow_convert;
+        if !matches!(expr, Expr::Ternary(_) | Expr::Parenthesized { .. }) {
+            self.allow_convert = false;
+        }
         let checked = match expr {
             Expr::Parenthesized { expression, .. } => {
-                return self.check_expr(expression, expected, allow_void);
+                self.check_expr(expression, expected, allow_void)
             }
+            Expr::Ternary(ternary) => self.check_ternary(ternary, expected, allow_void),
             Expr::Literal(LiteralExpr::Integer { lexeme, span }) => {
                 self.integer_literal(lexeme, expected, *span)
             }
@@ -2336,10 +2371,65 @@ impl<'a> Checker<'a> {
             Expr::Member(expr) => self.check_member(expr),
             Expr::InterpolatedString(expr) => self.check_interpolation(expr),
         };
+        self.allow_convert = saved_convert;
         if !allow_void && checked.ty() == CanonicalType::Void {
             self.error(expr.span(), "a void value cannot be used here");
         }
         checked
+    }
+
+    fn check_ternary(
+        &mut self,
+        expr: &TernaryExpr,
+        expected: Option<CanonicalType>,
+        allow_void: bool,
+    ) -> CheckedExpr {
+        let allow = self.allow_convert;
+        self.allow_convert = false;
+        let condition = self.check_expr(&expr.condition, Some(CanonicalType::Bln), false);
+        if condition.ty() != CanonicalType::Bln {
+            self.error(
+                expr.condition.span(),
+                "a ternary condition must have type bln",
+            );
+        }
+        let (then_narrow, else_narrow) = self.null_split(&expr.condition);
+        self.push_narrow(&then_narrow);
+        self.allow_convert = allow;
+        let then_branch = self.check_expr(&expr.then_branch, expected, allow_void);
+        self.pop_narrow();
+        self.push_narrow(&else_narrow);
+        self.allow_convert = allow;
+        let else_branch = self.check_expr(&expr.else_branch, expected, allow_void);
+        self.pop_narrow();
+        self.allow_convert = allow;
+        let (then_branch, else_branch, ty) = if let Some(target) = expected {
+            let then_branch =
+                self.apply_conversion(then_branch, target, allow, expr.then_branch.span());
+            let else_branch =
+                self.apply_conversion(else_branch, target, allow, expr.else_branch.span());
+            (then_branch, else_branch, target)
+        } else if then_branch.ty() == else_branch.ty() {
+            let ty = then_branch.ty();
+            (then_branch, else_branch, ty)
+        } else {
+            self.error(
+                expr.span,
+                format!(
+                    "type mismatch: ternary branches have types '{}' and '{}'",
+                    self.spell(then_branch.ty()),
+                    self.spell(else_branch.ty())
+                ),
+            );
+            let ty = then_branch.ty();
+            (then_branch, else_branch, ty)
+        };
+        CheckedExpr::Ternary {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+            ty,
+        }
     }
 
     fn check_interpolation(&mut self, expr: &InterpolatedStringExpr) -> CheckedExpr {
@@ -2864,7 +2954,10 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> CheckedExpr {
         let Some(op) = op else {
+            let saved = self.allow_convert;
+            self.allow_convert = auto;
             let checked = self.check_expr(value, Some(ty), false);
+            self.allow_convert = saved;
             return self.apply_conversion(checked, ty, auto, span);
         };
         let rhs = if is_numeric_literal(value) {
@@ -3207,12 +3300,15 @@ impl<'a> Checker<'a> {
         for (index, argument) in arguments.iter().enumerate() {
             if let Some((ty, auto)) = params.get(index) {
                 let record_shape = self.accepts_brace(*ty);
-                let expected = if *auto && !record_shape {
+                let expected = if *auto && !record_shape && !is_ternary_expr(argument) {
                     None
                 } else {
                     Some(*ty)
                 };
+                let saved = self.allow_convert;
+                self.allow_convert = *auto;
                 let value = self.check_expr(argument, expected, false);
+                self.allow_convert = saved;
                 checked.push(self.apply_conversion(value, *ty, *auto, argument.span()));
             } else {
                 let _ = self.check_expr(argument, None, false);
@@ -3489,7 +3585,10 @@ impl<'a> Checker<'a> {
             };
             let field_ty = declared[position].1;
             let auto = declared[position].2;
+            let saved = self.allow_convert;
+            self.allow_convert = auto;
             let checked = self.check_expr(value, Some(field_ty), false);
+            self.allow_convert = saved;
             let checked = self.apply_conversion(checked, field_ty, auto, value.span());
             initializers.push((position, checked));
         }
@@ -5685,7 +5784,10 @@ impl<'a> Checker<'a> {
             let name = self.classes[id.0 as usize].fields[index].name.clone();
             let const_field = self.classes[id.0 as usize].fields[index].const_field;
             let initializer = if let Some(expr) = &field.initializer {
+                let saved = self.allow_convert;
+                self.allow_convert = auto;
                 let value = self.check_expr(expr, Some(ty), false);
+                self.allow_convert = saved;
                 Some(self.apply_conversion(value, ty, auto, expr.span()))
             } else if !const_field {
                 self.default_value(ty, &mut Vec::new())
@@ -6535,6 +6637,10 @@ fn is_numeric_literal(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_ternary_expr(expr: &Expr) -> bool {
+    matches!(unwrap_parens(expr), Expr::Ternary(_))
 }
 
 fn unwrap_parens(expr: &Expr) -> &Expr {

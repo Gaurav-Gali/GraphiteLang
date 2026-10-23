@@ -155,6 +155,7 @@ pub enum Stmt {
     Continue(Span),
     Try(TryStmt),
     Expression(ExpressionStmt),
+    Conditional(ConditionalStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,8 +208,23 @@ pub struct ReturnStmt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TernaryExpr {
+    pub condition: Box<Expr>,
+    pub then_branch: Box<Expr>,
+    pub else_branch: Box<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionStmt {
     pub expression: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalStmt {
+    pub condition: Expr,
+    pub action: Box<Stmt>,
     pub span: Span,
 }
 
@@ -262,6 +278,7 @@ pub enum Expr {
     Record(RecordExpr),
     Index(IndexExpr),
     Slice(SliceExpr),
+    Ternary(TernaryExpr),
     Parenthesized { expression: Box<Expr>, span: Span },
 }
 
@@ -283,6 +300,7 @@ impl Expr {
             Expr::Record(record) => record.span,
             Expr::Index(index) => index.span,
             Expr::Slice(slice) => slice.span,
+            Expr::Ternary(ternary) => ternary.span,
             Expr::Parenthesized { span, .. } => *span,
         }
     }

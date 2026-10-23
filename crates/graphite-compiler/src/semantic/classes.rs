@@ -200,6 +200,12 @@ fn scan_stmt(stmt: &Stmt, tainted: &mut HashSet<String>, scan: &mut Scan) {
         Stmt::Expression(stmt) => {
             let _ = scan_expr(&stmt.expression, tainted, scan);
         }
+        Stmt::Conditional(stmt) => {
+            let _ = scan_expr(&stmt.condition, tainted, scan);
+            let mut then_taint = tainted.clone();
+            scan_stmt(&stmt.action, &mut then_taint, scan);
+            tainted.extend(then_taint);
+        }
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
@@ -293,6 +299,12 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
         Expr::Binary(binary) => {
             let _ = scan_expr(&binary.left, tainted, scan);
             let _ = scan_expr(&binary.right, tainted, scan);
+            false
+        }
+        Expr::Ternary(ternary) => {
+            let _ = scan_expr(&ternary.condition, tainted, scan);
+            let _ = scan_expr(&ternary.then_branch, tainted, scan);
+            let _ = scan_expr(&ternary.else_branch, tainted, scan);
             false
         }
         Expr::Index(index) => {
@@ -517,6 +529,20 @@ fn walk_stmt(
         Stmt::Expression(stmt) => {
             let _ = walk_expr(&stmt.expression, class, leaks, checking, flow, issues);
         }
+        Stmt::Conditional(stmt) => {
+            let _ = walk_expr(&stmt.condition, class, leaks, checking, flow, issues);
+            let mut then_flow = clone_flow(flow);
+            walk_stmt(&stmt.action, class, leaks, checking, &mut then_flow, issues);
+            flow.tainted_vars
+                .extend(then_flow.tainted_vars.iter().cloned());
+            if checking && !then_flow.diverges {
+                for index in 0..flow.assigned.len() {
+                    flow.assigned[index] = then_flow.assigned[index] && flow.assigned[index];
+                    flow.tainted_fields[index] =
+                        then_flow.tainted_fields[index] || flow.tainted_fields[index];
+                }
+            }
+        }
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
@@ -683,6 +709,12 @@ fn walk_expr(
         Expr::Binary(binary) => {
             let _ = walk_expr(&binary.left, class, leaks, checking, flow, issues);
             let _ = walk_expr(&binary.right, class, leaks, checking, flow, issues);
+            false
+        }
+        Expr::Ternary(ternary) => {
+            let _ = walk_expr(&ternary.condition, class, leaks, checking, flow, issues);
+            let _ = walk_expr(&ternary.then_branch, class, leaks, checking, flow, issues);
+            let _ = walk_expr(&ternary.else_branch, class, leaks, checking, flow, issues);
             false
         }
         Expr::Index(index) => {

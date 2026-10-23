@@ -264,6 +264,19 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 &expression.expression,
             );
         }
+        Stmt::Conditional(conditional) => {
+            write_line(out, prefix, last, "Conditional");
+            let child = child_prefix(prefix, last);
+            write_line(out, &child, false, "Condition");
+            write_expression(
+                out,
+                &child_prefix(&child, false),
+                true,
+                &conditional.condition,
+            );
+            write_line(out, &child, true, "Action");
+            write_statement(out, &child_prefix(&child, true), true, &conditional.action);
+        }
     }
 }
 
@@ -428,6 +441,21 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             write_optional_expr(out, &child, false, "Stop", slice.stop.as_deref());
             write_optional_expr(out, &child, true, "Step", slice.step.as_deref());
             write_expression(out, &child, false, &slice.object);
+        }
+        Expr::Ternary(ternary) => {
+            write_line(out, prefix, last, "Ternary");
+            let child = child_prefix(prefix, last);
+            write_line(out, &child, false, "Condition");
+            write_expression(out, &child_prefix(&child, false), true, &ternary.condition);
+            write_line(out, &child, false, "Then");
+            write_expression(
+                out,
+                &child_prefix(&child, false),
+                true,
+                &ternary.then_branch,
+            );
+            write_line(out, &child, true, "Else");
+            write_expression(out, &child_prefix(&child, true), true, &ternary.else_branch);
         }
         Expr::Parenthesized { expression, .. } => {
             write_line(out, prefix, last, "Parenthesized");

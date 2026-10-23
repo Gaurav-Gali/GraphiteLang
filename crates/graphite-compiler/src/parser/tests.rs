@@ -317,6 +317,49 @@ void main() {
 }
 
 #[test]
+fn ternary_expressions_and_conditional_actions_parse() {
+    let program = parse_clean(
+        "\
+type point { x: int }
+
+void main() {
+    int n = a ? b : c ? d : e;
+    int? value = ready ? 1 : null;
+    point p = { x: ready ? 1 : 2 };
+    str text = name[1:2];
+    int chosen = items[ready ? 0 : 1];
+    ready ? io.println(\"a\");
+    ready ? return;
+    ready ? {
+        io.println(\"a\");
+    }
+    ready ? if (flag) io.println(\"a\");
+}
+",
+    );
+    let main = function(&program, "main");
+    let Stmt::VariableDecl(declaration) = &main.body.statements[0] else {
+        panic!("expected ternary declaration");
+    };
+    let Expr::Ternary(ternary) = declaration.initializer.as_ref().unwrap() else {
+        panic!("expected ternary");
+    };
+    let Expr::Identifier(then_name) = ternary.then_branch.as_ref() else {
+        panic!("expected identifier then-branch");
+    };
+    assert_eq!(then_name.name, "b");
+    assert!(matches!(ternary.else_branch.as_ref(), Expr::Ternary(_)));
+    assert!(matches!(main.body.statements[5], Stmt::Conditional(_)));
+    assert!(matches!(main.body.statements[6], Stmt::Conditional(_)));
+    assert!(matches!(main.body.statements[7], Stmt::Conditional(_)));
+    assert!(matches!(main.body.statements[8], Stmt::Conditional(_)));
+    assert_rejected(
+        "void main() {\n    int n = ready ? 1;\n}\n",
+        "does not produce a value",
+    );
+}
+
+#[test]
 fn conditions_loops_and_updates() {
     let program = parse_clean(
         "\

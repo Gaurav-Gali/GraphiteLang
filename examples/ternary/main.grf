@@ -1,0 +1,31 @@
+import grf.io;
+
+// condition ? value : other
+// condition ? action;
+
+int pick(bln ready) return ready ? 1 : 2;
+
+int category(int score) return
+    score >= 90 ? 1 :
+    score >= 75 ? 2 :
+    score >= 50 ? 3 : 4;
+
+void main() {
+    io.println(pick(true));
+    io.println(pick(false));
+    io.println(category(80));
+    io.println(true && false ? "yes" : "no");
+
+    int? value = false ? null : 7;
+    io.println(value);
+
+    auto int digit = true ? 10.5 : 2;
+    io.println(digit);
+
+    true ? io.println("shown");
+    false ? io.println("hidden");
+
+    int count = 3;
+    loop (count-- > 0) count == 1 ? break;
+    io.println(count);
+}

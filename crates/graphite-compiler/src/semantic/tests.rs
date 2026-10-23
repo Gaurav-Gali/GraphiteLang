@@ -120,6 +120,59 @@ void main() {
 }
 
 #[test]
+fn ternary_uses_expected_types_and_existing_narrowing() {
+    let accepted = analyze_source(
+        "\
+class Box {
+    str name;
+    Box(str name) this.name = name;
+}
+
+int pick(bln ready) return ready ? 1 : 2;
+
+void main() {
+    int n = true ? 1 : 2;
+    int? maybe = true ? 1 : null;
+    auto int digit = true ? 10.5 : 2;
+    bln flag = true && false ? false : true;
+    Box? box = null;
+    str label = box != null ? box.name : \"\";
+    str other = box == null ? \"\" : box.name;
+    true ? return;
+    loop () {
+        true ? break;
+    }
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+
+    let branches = messages("void main() {\n    true ? 1 : 2.5;\n}\n");
+    assert!(branches.contains("ternary branches"), "{branches}");
+    let ordinary = messages("void main() {\n    flt n = true ? 1 : 2.5;\n}\n");
+    assert!(ordinary.contains("type mismatch"), "{ordinary}");
+    let condition = messages("void main() {\n    int n = 1 ? 10 : 20;\n}\n");
+    assert!(condition.contains("bln"), "{condition}");
+    let escaped = messages(
+        "\
+class Box { str name; Box(str name) this.name = name; }
+void main() {
+    Box? box = null;
+    str label = box != null ? box.name : \"\";
+    Box later = box;
+}
+",
+    );
+    assert!(escaped.contains("nullable"), "{escaped}");
+    let control = messages("void main() {\n    true ? break;\n}\n");
+    assert!(control.contains("outside a loop"), "{control}");
+}
+
+#[test]
 fn sample_program_typechecks() {
     let source = include_str!("../../../../test.grf");
     let lexed = lex("test.grf", source);

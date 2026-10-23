@@ -710,17 +710,102 @@ impl<'a> Parser<'a> {
         if self.starts_declaration() {
             return self.parse_declaration_statement();
         }
+        if self.can_start_expression() {
+            return Some(self.parse_expression_statement());
+        }
         let expression = self.parse_expression();
+        Some(self.finish_expression_statement(expression))
+    }
+
+    fn parse_expression_statement(&mut self) -> Stmt {
+        let leading = self.parse_or();
+        if self.check(TokenKind::Question) && !self.colon_matches_question(self.index + 1) {
+            let start = leading.span().start;
+            self.bump();
+            let action = self.parse_statement().unwrap_or_else(|| {
+                let span = self.current().span;
+                Stmt::Block(BlockStmt {
+                    statements: Vec::new(),
+                    span,
+                })
+            });
+            let end = statement_span(&action).end;
+            return Stmt::Conditional(ConditionalStmt {
+                condition: leading,
+                action: Box::new(action),
+                span: Span { start, end },
+            });
+        }
+        let expression = self.continue_after_or(leading);
+        self.finish_expression_statement(expression)
+    }
+
+    fn finish_expression_statement(&mut self, expression: Expr) -> Stmt {
         let start = expression.span().start;
         let end = if self.consume(TokenKind::Semicolon, "expected ';' after expression") {
             self.previous_end().unwrap_or(expression.span().end)
         } else {
             expression.span().end
         };
-        Some(Stmt::Expression(ExpressionStmt {
+        Stmt::Expression(ExpressionStmt {
             expression,
             span: Span { start, end },
-        }))
+        })
+    }
+
+    fn colon_matches_question(&self, start: usize) -> bool {
+        let mut paren = 0i32;
+        let mut bracket = 0i32;
+        let mut brace = 0i32;
+        let mut nested = 0i32;
+        let mut index = start;
+        while index < self.tokens.len() {
+            let kind = self.tokens[index].kind;
+            if kind == TokenKind::Eof {
+                return false;
+            }
+            let depth = paren + bracket + brace;
+            match kind {
+                TokenKind::LeftParen => paren += 1,
+                TokenKind::RightParen => {
+                    if paren == 0 {
+                        return false;
+                    }
+                    paren -= 1;
+                }
+                TokenKind::LeftBracket => bracket += 1,
+                TokenKind::RightBracket => {
+                    if bracket == 0 {
+                        return false;
+                    }
+                    bracket -= 1;
+                }
+                TokenKind::LeftBrace => brace += 1,
+                TokenKind::RightBrace => {
+                    if brace == 0 {
+                        return false;
+                    }
+                    brace -= 1;
+                }
+                TokenKind::Question if depth == 0 && !self.question_is_type_suffix(index) => {
+                    nested += 1;
+                }
+                TokenKind::Colon if depth == 0 => {
+                    if nested == 0 {
+                        return true;
+                    }
+                    nested -= 1;
+                }
+                TokenKind::Semicolon if depth == 0 => return false,
+                _ => {}
+            }
+            index += 1;
+        }
+        false
+    }
+
+    fn question_is_type_suffix(&self, index: usize) -> bool {
+        index > 0 && type_kind(self.tokens[index - 1].kind).is_some()
     }
 
     fn parse_try(&mut self) -> Stmt {
@@ -1175,7 +1260,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assignment(&mut self) -> Expr {
-        let left = self.parse_or();
+        let left = self.parse_conditional();
         let Some(op) = self.assignment_operator() else {
             return left;
         };
@@ -1187,6 +1272,67 @@ impl<'a> Parser<'a> {
             value: Box::new(value),
             op,
             span,
+        })
+    }
+
+    fn parse_conditional(&mut self) -> Expr {
+        let condition = self.parse_or();
+        if self.check(TokenKind::Question) {
+            self.finish_value_ternary(condition)
+        } else {
+            condition
+        }
+    }
+
+    fn continue_after_or(&mut self, leading: Expr) -> Expr {
+        let expr = if self.check(TokenKind::Question) {
+            self.finish_value_ternary(leading)
+        } else {
+            leading
+        };
+        let Some(op) = self.assignment_operator() else {
+            return expr;
+        };
+        self.bump();
+        let value = self.parse_assignment();
+        let span = covering(expr.span(), value.span());
+        Expr::Assignment(AssignmentExpr {
+            target: Box::new(expr),
+            value: Box::new(value),
+            op,
+            span,
+        })
+    }
+
+    fn finish_value_ternary(&mut self, condition: Expr) -> Expr {
+        let start = condition.span().start;
+        self.bump();
+        let then_branch = self.parse_expression();
+        let else_branch = if self.check(TokenKind::Colon) {
+            self.bump();
+            self.parse_conditional()
+        } else {
+            let message = if self.check(TokenKind::Semicolon)
+                || self.check(TokenKind::RightBrace)
+                || self.is_at_end()
+            {
+                "a conditional action does not produce a value"
+            } else {
+                "expected ':' in a ternary expression"
+            };
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                message,
+            );
+            then_branch.clone()
+        };
+        let end = else_branch.span().end;
+        Expr::Ternary(TernaryExpr {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+            span: Span { start, end },
         })
     }
 
@@ -2105,7 +2251,15 @@ impl<'a> Parser<'a> {
     }
 
     fn looks_like_named_binding(&self) -> bool {
-        self.named_type_end().is_some()
+        self.named_type_end().is_some_and(|index| {
+            matches!(
+                self.kind_at(index),
+                TokenKind::Equal
+                    | TokenKind::Semicolon
+                    | TokenKind::Comma
+                    | TokenKind::RightParen
+            )
+        })
     }
 
     fn named_type_end(&self) -> Option<usize> {
@@ -2441,5 +2595,6 @@ fn statement_span(statement: &Stmt) -> Span {
         Stmt::Break(span) | Stmt::Continue(span) => *span,
         Stmt::Try(try_statement) => try_statement.span,
         Stmt::Expression(expression) => expression.span,
+        Stmt::Conditional(conditional) => conditional.span,
     }
 }

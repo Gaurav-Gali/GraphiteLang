@@ -392,3 +392,27 @@ functions as part of this task.
 **Deliverable:** a tested implementation of ternary conditional
 expressions and no-`else` conditional statements, with updated language
 documentation. Inline functions and lambdas remain out of scope.
+
+## 13. Locked decisions
+
+These choices override earlier illustrative wording where they differ.
+The condition type is Graphite `bln`. The examples above that say `bool`
+mean `bln`.
+
+| Area | Decision |
+|---|---|
+| Condition type | Must be `bln`. No truthiness for other types. |
+| Precedence | Lower than logical OR and higher than assignment. Bitwise precedence stays where it already is. |
+| Associativity | Right-associative. `a ? b : c ? d : e` means `a ? b : (c ? d : e)`. |
+| Branch typing | When the ternary has an expected type, check each branch against that type with the existing conversion rules. Otherwise the branches must already have the same type. Do not invent a common numeric type. |
+| Ordinary assignment | No new implicit conversions. `flt n = ready ? 1 : 2.5` is a type error. |
+| `auto` initialization | Apply the existing target-type conversion rules to both branches. `auto int n = ready ? 10.5 : 2` is valid. |
+| Nullable branches | Use existing nullable compatibility. `int? n = ready ? 1 : null` is valid because the expected type is `int?`. |
+| No-`else` action | A statement, including expression statements, `return`, `break`, `continue`, nested `if` and `loop`, declarations, and blocks. It wraps that statement; it does not add special semantics per statement kind. |
+| Control flow | `return`, `break`, and `continue` keep their existing context restrictions. |
+| Value context | `int n = ready ? 1` is rejected. A missing `:` in a value does not invent a default. |
+| Nullable narrowing | Reuse `if` narrowing. `x != null` narrows `x` in the true branch, and `x == null` narrows `x` in the false branch, for the same identifier-only conditions `if` already supports. Narrowing does not escape the branch. A call is not narrowed. |
+| Evaluation | Evaluate the condition once. Evaluate only the selected branch or action. |
+| Nullable `?` | `int?` and `int?(x)` stay nullable types. |
+| Colon | Slice colons and record-field colons stay as they are. |
+| Lambdas | Out of scope. |
