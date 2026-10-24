@@ -130,6 +130,23 @@ pub trait GcObject: Any + Send {
     fn trace(&self, visit: &mut dyn FnMut(Handle));
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn grf_type_id(&self) -> u32 {
+        0
+    }
+}
+
+/// Dynamic class tag stored on a generated object. Used for overriding and
+/// interface dispatch. Objects that are not generated classes report `0`.
+pub fn type_id(handle: Handle) -> Result<u32, RuntimeError> {
+    with_heap(|heap| {
+        let Some(slot) = heap.slot_mut(handle) else {
+            return Err(diagnostic::runtime_internal("invalid class handle"));
+        };
+        let Some(object) = slot.data.as_ref() else {
+            return Err(diagnostic::runtime_internal("invalid class handle"));
+        };
+        Ok(object.grf_type_id())
+    })?
 }
 
 struct Slot {

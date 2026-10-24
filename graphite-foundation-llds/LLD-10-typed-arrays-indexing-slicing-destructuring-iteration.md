@@ -307,8 +307,13 @@ type.
 
 ### 6.1 Index assignment
 
-`arr[index] = value` replaces one element. It never resizes the array.
-Negative indexes are resolved as for reads.
+`arr[index] = value` replaces one existing element. A nonnegative
+index equal to the current length appends that value, so an empty
+dynamic array accepts `arr[0] = value` and then `arr[1] = value`. An
+index past that position is still a bounds error; missing elements are
+not invented. A bounded array appends only while the new length stays
+within its maximum. Negative indexes are resolved as for reads and do
+not grow the array.
 
 ### 6.2 Unit-step slice assignment
 
@@ -932,12 +937,14 @@ These decisions resolve the open points in this specification.
     The empty array takes its element type from the target. A stepped
     assignment accepts an empty replacement only when the selected
     slice is empty.
-7.  `int[]` is a dynamic array with no maximum length. `int[3]` is a
-    distinct array type whose length must stay at most 3. The size is
-    a non-negative integer literal, and each dimension has its own
-    bound (`int[2][1]` is a maximum of one array, each holding at most
-    two ints). A shorter array, including `[]`, is valid. A literal
-    longer than its bound is a compile-time error. `push`, `insert`,
-    and a unit-step slice assignment that would pass the bound fail at
-    runtime and leave the array unchanged. `int[3]` and `int[]` are
-    not assignable to each other.
+7.  `int[]` and `int[3]` are the same array type: an array of `int`.
+    The `[3]` is that array's maximum length, not a separate type.
+    `int[]` has no maximum. `int[3]` must stay at most 3 elements.
+    The size is a non-negative integer literal, and each dimension has
+    its own bound (`int[2][1]` is a maximum of one array, each holding
+    at most two ints). A shorter array, including `[]`, is valid. A
+    literal longer than its bound is a compile-time error. Storing a
+    longer array into a bounded array, and `push`, `insert`, or a
+    unit-step slice assignment that would pass the bound, fail at
+    runtime and leave the array unchanged. `typeOf` reports both as
+    `int64[]`.

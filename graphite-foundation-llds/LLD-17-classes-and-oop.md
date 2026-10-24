@@ -1,6 +1,6 @@
 # LLD-17 --- Stage 13: Classes and Object-Oriented Programming
 
-**Status:** Implementation specification\
+**Status:** Implementation specification, updated for inheritance and interfaces\
 **Stage:** 13\
 **Depends on:** Stages 7--12, especially records, collections, universal
 `const`, `Type`/`typeOf()`, structured diagnostics, and exceptions.
@@ -21,8 +21,8 @@ from an invalid/incompletely typed AST is permitted.
 
 -   Class declarations, instance fields, constructors, and instance
     methods.
--   Receiver syntax and statically resolved member access/calls.
--   Visibility and encapsulation.
+-   Single inheritance, interfaces, overriding, and method overloading.
+-   Receiver syntax, visibility, and encapsulation.
 -   Explicit identity, assignment, parameter passing, returns, and
     aliasing.
 -   `const` rules that remain sound despite shared object references.
@@ -33,15 +33,15 @@ from an invalid/incompletely typed AST is permitted.
 
 ## 3. Deferred features
 
-This stage does **not** add user-defined generics, inheritance,
-interfaces, traits, mixins, virtual methods, overriding, method
-overloading, constructor overloading, static fields/methods, `super`,
-`new`, destructors/finalizers, properties, operator overloading,
-user-defined error classes, `throw`, or general runtime reflection.
+This stage does **not** add user-defined generics, traits, mixins,
+constructor overloading, destructors/finalizers, properties, operator
+overloading, user-defined error classes, `throw`, default interface
+methods, interface static methods, or general runtime reflection.
 
-Composition is supported: class fields may contain records, arrays,
-maps, or other class references. There is no implicit subclassing or
-dynamic dispatch.
+Single inheritance, interfaces, overriding, method overloading, static
+fields, `super`, and `new` are specified in §22. Composition remains
+supported: class fields may contain records, arrays, maps, or other
+class references. There is no implicit subclassing of unrelated classes.
 
 ## 4. Locked design decisions
 
@@ -52,31 +52,41 @@ dynamic dispatch.
 
   Receiver                            `this`
 
-  Construction                        `new ClassName(arguments)`
+  Construction                        `new ClassName(arguments)` and
+                                      `ClassName(arguments)`. A function
+                                      of the same name wins a bare call;
+                                      `new` still constructs
 
   Constructor                         At most one, named after the class.
-                                      If absent, only `new ClassName()`
-                                      is possible when all fields are
-                                      initialized. An omitted modifier
-                                      means `public`
+                                      If absent, `ClassName()` and
+                                      `new ClassName()` are possible when
+                                      every field is initialized. An
+                                      omitted modifier means `public`.
+                                      Constructor overloading is not
+                                      supported
 
-  Visibility                          `public` / `private`. Fields,
-                                      methods, and the constructor
-                                      default to `public`
+  Visibility                          `public`, `protected`, and
+                                      `private`. Omitted visibility means
+                                      `public`. Members do not default to
+                                      private
 
   Fields                              `Type name`, including `auto T`,
-                                      with `public` or `private` before
+                                      with a visibility modifier before
                                       the type. Same fixed-target
                                       conversions as record fields.
-                                      Static fields are not supported
+                                      `@static` fields are class state
 
-  Methods                             Instance methods and `static`
-                                      methods; one method per name per
-                                      class. Static methods have no
-                                      `this` and are called as
+  Methods                             Instance methods, `static` methods,
+                                      and `@static` methods. Overloads
+                                      share a name when their parameter
+                                      signatures differ. Static methods
+                                      have no `this` and are called as
                                       `ClassName.method(arguments)`
 
-  Inheritance/interfaces/traits       Unsupported and deferred
+  Inheritance                         Single inheritance with `extends`,
+                                      `super`, `@override`, and dynamic
+                                      dispatch. Multiple interfaces with
+                                      `implements`. No traits or mixins
 
   Assignment / arguments / returns    Copy the reference, preserving
                                       object identity
@@ -137,11 +147,11 @@ because declaration collection builds member tables before checking
 bodies. Fields and methods are declarations, not executable statements.
 
 Class names occupy the existing type namespace and must not collide with
-another class or record type. Ordinary value and function names stay in
-their own namespace, so a function may use the same spelling as a class.
-In an expression, `new Counter(arguments)` constructs the class.
-`Counter(arguments)` is an ordinary function call. Construction does
-not fall back to a function, and a function call does not construct.
+another class, interface, or record type. Ordinary value and function
+names stay in their own namespace, so a function may use the same
+spelling as a class. `new Counter(arguments)` always constructs.
+`Counter(arguments)` constructs when no function of that name exists;
+when both exist, the function wins and `new` is the way to construct.
 
 Class fields must have declared, statically known types. `auto T` is
 allowed and has the same meaning as on a record field: the field's type
@@ -201,14 +211,18 @@ public Person(str name, int age) {
     `private Person` is callable only from methods of that same class.
     Fields, methods, and the constructor default to `public`.
 -   Constructors have no explicit return type and cannot return a value.
--   Construct with `new ClassName(arguments)`.
+-   Construct with `new ClassName(arguments)` or `ClassName(arguments)`.
+    If a function of that name exists, the bare call is the function and
+    `new` still constructs.
 -   If a constructor is declared, calls must match its argument count and
     types.
--   Without a constructor, `new ClassName()` is allowed only when every
-    field is initialized by its field initializer and all const-field
-    rules are satisfied.
+-   Without a constructor, `ClassName()` and `new ClassName()` are
+    allowed only when every field is initialized by its field initializer
+    and all const-field rules are satisfied.
 -   Constructors cannot be invoked as ordinary instance methods.
 -   Constructor overloading is not supported.
+-   A child constructor calls its parent with `super(arguments)` as its
+    first statement. See §22.
 -   `return;` may be used only if it exits after all required fields are
     definitely initialized; no value may be returned.
 
@@ -223,10 +237,10 @@ public int totalWith(int amount) {
 Methods have an explicit return type, including `void`, and use ordinary
 Graphite parameter syntax. `this` is an implicit receiver, cannot be
 redeclared, and is valid only inside a constructor or instance method.
-A `static` method has no receiver. It is called as
+A `static` or `@static` method has no receiver. It is called as
 `ClassName.method(arguments)` and cannot use `this`. Calling a static
 method on an instance evaluates the receiver and then calls the method
-without passing it. Static fields are not supported.
+without passing it. `@static` fields are specified in §22.
 
 -   Use `this.field` and `this.method(args)` inside instance bodies.
 -   Use `object.field` and `object.method(args)` outside.
@@ -234,18 +248,21 @@ without passing it. Static fields are not supported.
 -   `this` cannot be reassigned.
 -   Methods/fields are not first-class values; taking a member reference
     is unsupported.
--   Member lookup is static from the receiver's declared class type. No
-    string-based runtime lookup or dynamic dispatch is permitted.
+-   Ordinary member lookup starts from the receiver's declared type.
+    Overridden instance methods use Graphite dynamic dispatch (§22).
+    There is no string-based runtime lookup.
 
 ## 6. Visibility and encapsulation
 
 -   `public`: accessible wherever the class itself is available under
     the existing import system.
+-   `protected`: accessible inside the declaring class and its subclasses.
 -   `private`: accessible only inside methods and the constructor
     declared by that same class.
 -   Omitted visibility on a field, method, or constructor means `public`.
--   No `protected`, package-private, friend, or new module-visibility
-    system is introduced.
+    Private-by-default was considered and not adopted.
+-   No package-private, friend, or new module-visibility system is
+    introduced.
 -   Public fields can be read/written subject to type and const rules.
     Private fields can only be accessed within the declaring class.
 -   Public methods can be called externally; private methods only from
@@ -443,8 +460,9 @@ type position. Passing a frozen object never makes it mutable again.
 -   Every class declaration introduces a distinct nominal type.
     Structurally identical classes are incompatible.
 -   Class types are not compatible with record types of similar layout.
--   No implicit upcast, downcast, subtype conversion, or runtime cast
-    exists.
+-   A class value may be assigned to an ancestor class or to an interface
+    that the class, or an ancestor, implements. That assignment copies
+    the reference. Downcasts and runtime casts are not supported.
 -   Forward references to class types are allowed after declaration
     collection. Class-typed fields may mutually refer to each other
     because they store references, not inline object storage.
@@ -452,13 +470,17 @@ type position. Passing a frozen object never makes it mutable again.
     parameter types, and return type. Parameter names do not affect
     signature identity.
 -   The receiver is implicit and has the declaring class type.
--   A class may declare only one method with a given name. A field and
-    method may not share a name.
+-   A class may overload a method name when the parameter signatures
+    differ. Return type alone does not distinguish overloads. A field
+    and a method may not share a name. Duplicate exact signatures are
+    rejected.
 -   Calls are checked statically for member existence, visibility,
     argument count, argument types, and return type.
 -   `void` methods may be called as statements but not where a value is
     required.
--   No override rules exist because inheritance is deferred.
+-   Replacing an inherited instance method, or implementing an interface
+    method, requires `@override`. The parameter types and return type
+    must match. See §22.
 -   A method returning a class type can be chained if each receiver's
     static type is known.
 
@@ -597,10 +619,10 @@ runtime allocation counter that is not a Graphite language feature.
 
 ### 15.1 New syntax
 
-Add tokens/grammar for `class`, `public`, `private`, `this`, and `init`.
-Reuse existing `const`. Treat `init` consistently as a reserved
-constructor keyword according to the language's keyword policy. Do not
-add `extends`, `implements`, `trait`, `interface`, `super`, or `new`.
+Add tokens/grammar for `class`, `public`, `private`, `protected`,
+`this`, `init`, `new`, `extends`, `implements`, `interface`, `abstract`,
+`super`, and `@`. Reuse existing `const` and `static`. Treat `init`
+consistently as a reserved constructor keyword. Do not add `trait`.
 
 ### 15.2 Declaration collection
 
@@ -627,8 +649,10 @@ without permitting duplicates.
 12. Integrate `Type`/`typeOf()` without broad reflection.
 13. Enforce freeze across aliases when static proof is unavailable.
 14. Preserve Stage 12 exception propagation and stable mappings.
-15. Reject accidental conversion between classes, records, and
-    structurally similar types.
+15. Reject accidental conversion between unrelated classes, records, and
+    structurally similar types. Allow the upcasts in §10.
+16. Check `extends`, `implements`, `@override`, abstract methods, `super`,
+    `@final`, and overload resolution as specified in §22.
 
 ### 15.4 Typed AST gate
 
@@ -653,7 +677,8 @@ Required compile-time diagnostics cover:
 -   Field read before initialization or constructor completion with
     uninitialized field.
 -   Const-field reassignment.
--   Unsupported inheritance/interface/trait/overload syntax.
+-   Invalid inheritance, interface, override, abstract, `super`, final,
+    and overload use (§22). Trait syntax remains unsupported.
 -   Class instance used as map key.
 -   Class/record mismatch and invalid class comparisons.
 
@@ -716,7 +741,8 @@ parsing human-readable diagnostic messages.
     object, array, or map; returned; or passed outside the class.
 -   C-style field declaration (`int value`) is rejected.
 -   `private init` called from outside the declaring class.
--   Inheritance/interface/trait/overload/override syntax.
+-   Invalid `extends`, `implements`, `@override`, abstract construction,
+    `super`, `@final`, and ambiguous overloads. Trait syntax.
 -   Class as map key; incompatible class equality; ordering class
     instances.
 -   `str`, interpolation, or `lengthOf` on a class instance.
@@ -774,10 +800,12 @@ Stage 13 is complete only when:
     be map keys.
 -   `Type` exposes only approved class type identity/name/display.
 -   Constructor and method exceptions compose with Stage 12.
--   Rust panics, borrow failures, memory addresses, and dynamic dispatch
-    do not leak into Graphite semantics.
--   No inheritance, interfaces, traits, generics, overloading, or
-    overriding is accidentally introduced.
+-   Rust panics, borrow failures, memory addresses, and Rust trait objects
+    do not leak into Graphite semantics. Graphite dynamic dispatch is
+    intentional and stays inside the generated runtime.
+-   Inheritance, interfaces, overriding, and method overloading follow
+    §22. Traits, mixins, generics, and constructor overloading are not
+    introduced.
 -   Existing record/collection behavior passes regression tests.
 -   Code generation accepts only a valid typed AST and artifacts remain
     in the prescribed build directory.
@@ -792,11 +820,13 @@ Stage 13 is complete only when:
     constructor. Methods keep return-type-before-name function syntax.
     The constructor is the class name, for example `Counter(int start)`.
 2.  `new Counter(arguments)` constructs a class. A bare `Counter(arguments)`
-    calls a function of that name and does not construct. Construction
-    does not fall back to a function.
+    also constructs, unless a function named `Counter` exists. In that
+    case the bare call is the function and `new` still constructs.
 3.  The constructor defaults to `public`. `private Counter` is visible
-    only inside its class. Fields and methods default to `public`.
-    `static` methods have no `this` and are called as `Counter.sign(1)`.
+    only inside its class. `protected` members are visible in the
+    declaring class and its subclasses. Fields and methods default to
+    `public`. `static` and `@static` methods have no `this` and are
+    called as `Counter.sign(1)`.
 4.  `this.method()` is allowed in the constructor after definite
     initialization. `this` cannot be stored elsewhere, returned, or
     passed outside the class before the constructor completes.
@@ -806,3 +836,227 @@ Stage 13 is complete only when:
     a fixed `int64` field.
 7.  Class storage is a traced heap. Unreachable cycles are reclaimed.
     Reference counting alone is not the Stage 13 memory strategy.
+    Class values use reference semantics. Assignment copies the handle
+    and preserves identity. Move semantics are not part of the class
+    model.
+
+## 22. Locked OOP decisions
+
+These decisions update the class model. They supersede any earlier
+sentence in this document that says inheritance, interfaces, overriding,
+method overloading, static fields, or `super` are unsupported.
+
+### 22.1 Ownership
+
+Class values are `Rooted` handles on the traced heap. Assignment,
+arguments, and returns copy the reference. `==` and `!=` compare
+identity for related class and interface types. An upcast from a class
+to an ancestor, or from a class to an interface it implements, is the
+same handle. There is no move of the object and no copy of its fields.
+
+### 22.2 Construction
+
+Both forms construct an instance:
+
+``` grf
+User user = new User("Gaurav", 21);
+User other = User("Gaurav", 21);
+```
+
+If a function and a class share a name, the function wins the bare call.
+`new` still constructs. Abstract classes cannot be constructed with
+either form. A child constructor may still run an abstract parent's
+constructor through `super`.
+
+### 22.3 Annotations
+
+Recognized annotations are compiler-checked. They are not Python runtime
+decorators. Multiple annotations may apply to one declaration. An
+unknown `@name` is a parse error. `@static` and the `static` keyword
+both declare a static method. `@static` and `@override` together are
+rejected.
+
+| Annotation | Meaning |
+| --- | --- |
+| `@static` | Method or field belongs to the class. No `this` |
+| `@override` | Required when replacing an inherited instance method or implementing an interface method |
+| `@abstract` | Method has a signature and no body. Also marks a class when written before `class` |
+| `@final` | Method cannot be overridden. Class cannot be extended |
+| `@deprecated` | Non-fatal warning `GRF-SEM-035` when the member is used |
+
+`@deprecated` on a class declaration itself is ignored. A class that is
+both abstract and final is accepted and cannot be constructed or
+extended. The `abstract` keyword and `@abstract` both mark a class.
+
+### 22.4 Inheritance
+
+``` grf
+class Dog extends Animal {
+    Dog(str name) {
+        super(name);
+    }
+
+    @override
+    void speak() {
+        super.speak();
+    }
+}
+```
+
+-   Single inheritance. `extends` names one parent class.
+-   A class cannot extend itself, extend a `@final` class, or form an
+    inheritance cycle.
+-   `super(arguments);` is allowed only as the first statement of a
+    child constructor. It is not an ordinary call. There is no
+    colon-initializer syntax.
+-   If the parent has no accessible zero-argument constructor, the child
+    must call `super` explicitly. Otherwise the compiler inserts the
+    parent constructor.
+-   `super.method(arguments)` calls that parent implementation directly.
+    It is not a virtual call.
+-   `@override` is required. The name, parameter types, and return type
+    must match an overridable parent method or an interface method.
+    Overriding a `@final` method is an error. Overriding without
+    `@override`, or using `@override` with no matching method, is an
+    error.
+-   Inherited fields keep their declaring class. A child cannot declare
+    a field with the same name as an ancestor field.
+
+Construction order is the parent constructor, then the child's field
+initializers, then the child's constructor body. A `return;` inside the
+parent constructor finishes the parent constructor and does not skip
+the child.
+
+### 22.5 Polymorphism
+
+A variable of a parent type may hold a child instance. A call to an
+overridden instance method selects the implementation of the object's
+class. The static type is what the compiler checks. The dynamic class
+selects the method.
+
+Classes in one inheritance hierarchy share one generated object layout:
+the root struct, a `grf_type` tag, and the union of instance fields.
+Dispatch matches that tag. It does not expose a Rust trait object, a
+panic, or an address. `typeOf` still describes the static nominal type
+known to the compiler.
+
+### 22.6 Abstract classes
+
+``` grf
+abstract class Shape {
+    @abstract
+    flt area();
+
+    void describe() {
+    }
+}
+```
+
+-   An abstract class cannot be instantiated.
+-   An `@abstract` method ends with `;` and has no body.
+-   A concrete subclass must implement every inherited abstract method.
+-   An abstract method is `public` or `protected`, and it is not static
+    or final.
+-   Calling `super` on an abstract method is rejected.
+-   An abstract class may contain fields and ordinary methods.
+
+### 22.7 Interfaces
+
+``` grf
+interface Printable {
+    void print();
+}
+
+class Report implements Printable {
+    @override
+    void print() {
+    }
+}
+```
+
+-   An interface declares public method contracts and no fields.
+-   Methods have signatures and no bodies. There are no default methods
+    and no interface static methods in this version.
+-   A class may implement several interfaces.
+-   The class, or an ancestor, must provide a public instance method of
+    the same signature for every interface method, marked `@override`.
+-   An interface is a real type. A class value may be passed where one
+    of its interfaces is expected. Dispatch uses the same class tag as
+    inheritance.
+
+### 22.8 Overloading
+
+``` grf
+class Formatter {
+    str format(int value) {
+        return "Integer";
+    }
+
+    str format(str value) {
+        return value;
+    }
+}
+```
+
+-   Overloads are resolved at compile time from the argument types.
+-   One matching method uses the existing conversion rules.
+-   Several methods require each argument to be an exact match, an
+    allowed upcast, an optional wrap, or an `auto` conversion. Ambiguous
+    calls and calls that match nothing are errors.
+-   Return type alone cannot distinguish overloads.
+-   Constructor overloading is not supported.
+-   Effect analysis treats every overload of a name as mutating when any
+    overload mutates. That is conservative.
+
+### 22.9 Static fields
+
+``` grf
+class Counter {
+    @static
+    int count = 0;
+}
+```
+
+A static field belongs to the class. Read and write it as
+`Counter.count`. An instance access evaluates the receiver and then uses
+the class slot. The slot is thread-local, initialized on first read, and
+matches the thread-local heap. It is not one process-wide mutable static.
+A write before the first read replaces the slot and can skip the
+initializer's side effects. A const static field cannot be assigned. A
+class-typed static field needs an initializer. A static field cannot
+reuse an ancestor's field name.
+
+### 22.10 Diagnostics
+
+| Situation | Code |
+| --- | --- |
+| Bad override | `GRF-SEM-028` |
+| Abstract class or missing implementation | `GRF-SEM-029` |
+| Final class, final method, or illegal inheritance | `GRF-SEM-030` |
+| Illegal `super` | `GRF-SEM-031` |
+| Ambiguous call or no matching overload | `GRF-SEM-032` |
+| Interface error | `GRF-SEM-033` |
+| Use of a `@deprecated` member | `GRF-SEM-035`, warning, build continues |
+
+### 22.11 Example
+
+`examples/oop/main.grf` covers abstract classes, `extends`, `super`,
+`@override`, a static method that takes the parent type, an interface,
+overloads, `new`, bare construction, and a static field. The program
+prints:
+
+``` text
+My name is Buddy
+Buddy says woof!
+My name is Luna
+Luna says meow!
+Annual Report
+Integer
+Hello
+2
+2
+2
+```
+
+String concatenation with `+` is not part of this design. Text is built
+with interpolation, `f"...{expr}..."`.

@@ -1,0 +1,110 @@
+import grf.io;
+
+// Classes, inheritance, interfaces, overloading, and static state.
+// Run: grf run examples/oop/main.grf
+
+abstract class Animal {
+    str name;
+
+    Animal(str name) {
+        this.name = name;
+    }
+
+    @abstract
+    void speak();
+
+    void introduce() {
+        io.println(f"My name is {this.name}");
+    }
+}
+
+class Dog extends Animal {
+    Dog(str name) {
+        super(name);
+    }
+
+    @override
+    void speak() {
+        io.println(f"{this.name} says woof!");
+    }
+}
+
+class Cat extends Animal {
+    Cat(str name) {
+        super(name);
+    }
+
+    @override
+    void speak() {
+        io.println(f"{this.name} says meow!");
+    }
+}
+
+class AnimalFactory {
+    @static
+    void describe(Animal animal) {
+        animal.introduce();
+        animal.speak();
+    }
+}
+
+interface Printable {
+    void print();
+}
+
+class Report implements Printable {
+    str title;
+
+    Report(str title) {
+        this.title = title;
+    }
+
+    @override
+    void print() {
+        io.println(this.title);
+    }
+}
+
+class Formatter {
+    str format(int value) {
+        return "Integer";
+    }
+
+    str format(str value) {
+        return value;
+    }
+}
+
+class Counter {
+    @static
+    int count = 0;
+
+    Counter() {
+        Counter.count = Counter.count + 1;
+    }
+
+    @static
+    int get_count() {
+        return Counter.count;
+    }
+}
+
+void show(Printable item) {
+    item.print();
+}
+
+void main() {
+    Dog dog = Dog("Buddy");
+    Cat cat = Cat("Luna");
+    AnimalFactory.describe(dog);
+    AnimalFactory.describe(cat);
+    show(Report("Annual Report"));
+    Formatter formatter = Formatter();
+    io.println(formatter.format(10));
+    io.println(formatter.format("Hello"));
+    Counter first = Counter();
+    Counter second = new Counter();
+    io.println(Counter.get_count());
+    io.println(first.get_count());
+    io.println(second.get_count());
+}

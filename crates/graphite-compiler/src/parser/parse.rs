@@ -138,6 +138,7 @@ impl<'a> Parser<'a> {
 
         let mut types = Vec::new();
         let mut classes = Vec::new();
+        let mut interfaces = Vec::new();
         let mut functions = Vec::new();
         while !self.is_at_end() {
             let before = self.index;
@@ -145,9 +146,42 @@ impl<'a> Parser<'a> {
                 if let Some(declaration) = self.parse_type_decl() {
                     types.push(declaration);
                 }
-            } else if self.check(TokenKind::KwClass) {
-                if let Some(declaration) = self.parse_class() {
-                    classes.push(declaration);
+            } else if self.check(TokenKind::At)
+                || self.check(TokenKind::KwAbstract)
+                || self.check(TokenKind::KwClass)
+                || self.check(TokenKind::KwInterface)
+            {
+                let mods = self.parse_decl_mods();
+                if self.check(TokenKind::KwInterface) {
+                    if mods.is_static || mods.is_override || mods.final_class {
+                        self.error(
+                            ParserDiagnosticKind::InvalidDeclaration,
+                            self.current().span,
+                            "an interface cannot be static, final, or an override",
+                        );
+                    }
+                    if let Some(declaration) = self.parse_interface() {
+                        interfaces.push(declaration);
+                    }
+                } else if self.check(TokenKind::KwClass) {
+                    if mods.is_static || mods.is_override {
+                        self.error(
+                            ParserDiagnosticKind::InvalidDeclaration,
+                            self.current().span,
+                            "a class cannot be static or an override",
+                        );
+                    }
+                    if let Some(declaration) = self.parse_class(mods.abstract_class, mods.final_class)
+                    {
+                        classes.push(declaration);
+                    }
+                } else {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        self.current().span,
+                        "expected a class or interface declaration",
+                    );
+                    self.bump_unless_eof();
                 }
             } else if self.check(TokenKind::KwConst) {
                 let token = self.bump();
@@ -190,25 +224,128 @@ impl<'a> Parser<'a> {
             imports,
             types,
             classes,
+            interfaces,
             functions,
             span: Span { start, end },
         }
     }
 
-    fn parse_class(&mut self) -> Option<ClassDecl> {
-        let start = self.bump().span.start;
-        let name = self.expect_identifier("expected a class name")?;
-        if self.check(TokenKind::Identifier)
-            && matches!(self.current().lexeme.as_str(), "extends" | "implements")
-        {
+    fn parse_decl_mods(&mut self) -> DeclMods {
+        let mut mods = DeclMods::default();
+        loop {
+            if self.check(TokenKind::At) {
+                let name = self.parse_annotation();
+                match name.as_deref() {
+                    Some("abstract") => mods.abstract_class = true,
+                    Some("final") => mods.final_class = true,
+                    Some("static") => mods.is_static = true,
+                    Some("override") => mods.is_override = true,
+                    Some("deprecated") => {}
+                    Some(other) => self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        self.previous_span(),
+                        format!("unknown annotation '{other}'"),
+                    ),
+                    None => {}
+                }
+            } else if self.check(TokenKind::KwAbstract) {
+                mods.abstract_class = true;
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        mods
+    }
+
+    fn parse_annotation(&mut self) -> Option<String> {
+        self.bump();
+        if self.check(TokenKind::Identifier) || self.current().kind.is_keyword() {
+            let token = self.bump();
+            Some(token.lexeme.clone())
+        } else {
             self.error(
                 ParserDiagnosticKind::InvalidDeclaration,
                 self.current().span,
-                "inheritance is not supported",
+                "expected an annotation name",
             );
-            self.bump();
-            if self.check(TokenKind::Identifier) {
+            None
+        }
+    }
+
+    fn parse_member_mods(&mut self) -> MemberMods {
+        let mut mods = MemberMods::default();
+        loop {
+            if self.check(TokenKind::At) {
+                let name = self.parse_annotation();
+                match name.as_deref() {
+                    Some("static") => mods.is_static = true,
+                    Some("override") => mods.is_override = true,
+                    Some("abstract") => mods.is_abstract = true,
+                    Some("final") => mods.is_final = true,
+                    Some("deprecated") => mods.deprecated = true,
+                    Some(other) => self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        self.previous_span(),
+                        format!("unknown annotation '{other}'"),
+                    ),
+                    None => {}
+                }
+            } else if self.check(TokenKind::KwPublic)
+                || self.check(TokenKind::KwPrivate)
+                || self.check(TokenKind::KwProtected)
+            {
+                if mods.saw_visibility {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        self.current().span,
+                        "a member can have only one visibility",
+                    );
+                }
+                mods.public = self.check(TokenKind::KwPublic);
+                mods.protected = self.check(TokenKind::KwProtected);
+                mods.saw_visibility = true;
                 self.bump();
+            } else if self.check(TokenKind::KwStatic) {
+                mods.is_static = true;
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        mods
+    }
+
+    fn previous_span(&self) -> Span {
+        self.tokens
+            .get(self.index.saturating_sub(1))
+            .map(|token| token.span)
+            .unwrap_or_else(|| self.current().span)
+    }
+
+    fn parse_class(&mut self, abstract_class: bool, final_class: bool) -> Option<ClassDecl> {
+        let start = self.bump().span.start;
+        let name = self.expect_identifier("expected a class name")?;
+        let mut parent = None;
+        let mut interfaces = Vec::new();
+        if self.check(TokenKind::KwExtends) {
+            self.bump();
+            parent = self.expect_identifier("expected a parent class name");
+        }
+        if self.check(TokenKind::KwImplements) {
+            self.bump();
+            loop {
+                let Some(interface) = self.expect_identifier("expected an interface name") else {
+                    break;
+                };
+                interfaces.push(interface);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.bump();
+                if !self.check(TokenKind::Identifier) && !self.current().kind.is_keyword() {
+                    break;
+                }
             }
         }
         if !self.consume(TokenKind::LeftBrace, "expected '{' after class name") {
@@ -237,9 +374,94 @@ impl<'a> Parser<'a> {
         };
         Some(ClassDecl {
             name,
+            parent,
+            interfaces,
+            abstract_class,
+            final_class,
             fields,
             init,
             methods,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_interface(&mut self) -> Option<InterfaceDecl> {
+        let start = self.bump().span.start;
+        let name = self.expect_identifier("expected an interface name")?;
+        if !self.consume(TokenKind::LeftBrace, "expected '{' after interface name") {
+            self.synchronize_top_level();
+            return None;
+        }
+        let mut methods = Vec::new();
+        while !self.check(TokenKind::RightBrace) && !self.is_at_end() {
+            let before = self.index;
+            if let Some(method) = self.parse_interface_method() {
+                methods.push(method);
+            }
+            if self.index == before && !self.is_at_end() && !self.check(TokenKind::RightBrace) {
+                self.bump_unless_eof();
+            }
+        }
+        let end = if self.check(TokenKind::RightBrace) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected '}' after interface members",
+            );
+            self.current().span.end
+        };
+        Some(InterfaceDecl {
+            name,
+            methods,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_interface_method(&mut self) -> Option<InterfaceMethod> {
+        let mods = self.parse_member_mods();
+        if mods.is_static || mods.is_override || mods.is_abstract || mods.is_final || mods.saw_visibility
+        {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "an interface method is a public contract",
+            );
+        }
+        let start = self.current().span.start;
+        if !self.starts_type() {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "expected an interface method",
+            );
+            self.bump_unless_eof();
+            return None;
+        }
+        let return_type = self.parse_type()?;
+        let name = self.expect_identifier("expected a method name")?;
+        if !self.consume(TokenKind::LeftParen, "expected '(' after method name") {
+            return None;
+        }
+        let parameters = self.parse_parameter_list();
+        let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
+        if self.check(TokenKind::LeftBrace) {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "an interface method cannot have a body",
+            );
+            let _ = self.parse_block();
+        } else {
+            let _ = self.consume(TokenKind::Semicolon, "expected ';' after interface method");
+        }
+        let end = self.previous_end().unwrap_or(name.span.end);
+        Some(InterfaceMethod {
+            return_type,
+            name,
+            parameters,
+            deprecated: mods.deprecated,
             span: Span { start, end },
         })
     }
@@ -251,21 +473,9 @@ impl<'a> Parser<'a> {
         methods: &mut Vec<ClassMethod>,
         init: &mut Option<ClassInit>,
     ) {
-        let mut public = false;
-        let mut saw_visibility = false;
         let member_start = self.current().span.start;
-        if self.check(TokenKind::KwPublic) || self.check(TokenKind::KwPrivate) {
-            public = self.check(TokenKind::KwPublic);
-            saw_visibility = true;
-            self.bump();
-        }
-        let is_static = if self.check(TokenKind::KwStatic) {
-            self.bump();
-            true
-        } else {
-            false
-        };
-        let visible = !saw_visibility || public;
+        let mods = self.parse_member_mods();
+        let visible = !mods.saw_visibility || mods.public;
         if self.check(TokenKind::KwInit) {
             self.error(
                 ParserDiagnosticKind::InvalidDeclaration,
@@ -287,14 +497,14 @@ impl<'a> Parser<'a> {
             && self.current().lexeme == class_name
             && self.peek_kind() == TokenKind::LeftParen
         {
-            if is_static {
+            if mods.is_static || mods.is_override || mods.is_abstract || mods.is_final {
                 self.error(
                     ParserDiagnosticKind::InvalidDeclaration,
                     self.current().span,
-                    "the constructor cannot be static",
+                    "the constructor cannot be static, abstract, final, or an override",
                 );
             }
-            self.finish_constructor(visible, init);
+            self.finish_constructor(visible, mods.protected, mods.deprecated, init);
             return;
         }
         let const_field = if self.check(TokenKind::KwConst) {
@@ -338,13 +548,12 @@ impl<'a> Parser<'a> {
                 } else {
                     name.span.end
                 };
-                if is_static {
+                if mods.is_override || mods.is_abstract || mods.is_final {
                     self.error(
                         ParserDiagnosticKind::InvalidDeclaration,
                         name.span,
-                        "static fields are not supported",
+                        "a field cannot be abstract, final, or an override",
                     );
-                    return;
                 }
                 fields.push(ClassField {
                     span: Span {
@@ -355,7 +564,10 @@ impl<'a> Parser<'a> {
                     ty,
                     conversion,
                     const_field,
-                    public: !saw_visibility || public,
+                    public: visible,
+                    protected: mods.protected,
+                    is_static: mods.is_static,
+                    deprecated: mods.deprecated,
                     initializer,
                 });
                 return;
@@ -379,10 +591,37 @@ impl<'a> Parser<'a> {
             }
             let parameters = self.parse_parameter_list();
             let _ = self.consume(TokenKind::RightParen, "expected ')' after parameters");
-            let body = self.parse_body();
+            let body = if self.check(TokenKind::Semicolon) {
+                let end = self.bump().span.end;
+                if !mods.is_abstract {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        name.span,
+                        "expected a method body",
+                    );
+                }
+                BlockStmt {
+                    statements: Vec::new(),
+                    span: Span { start: end, end },
+                }
+            } else {
+                if mods.is_abstract && self.check(TokenKind::LeftBrace) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidDeclaration,
+                        self.current().span,
+                        "an abstract method cannot have a body",
+                    );
+                }
+                self.parse_body()
+            };
             methods.push(ClassMethod {
                 public: visible,
-                is_static,
+                protected: mods.protected,
+                is_static: mods.is_static,
+                is_override: mods.is_override,
+                is_abstract: mods.is_abstract,
+                is_final: mods.is_final,
+                deprecated: mods.deprecated,
                 span: Span {
                     start: member_start,
                     end: body.span.end,
@@ -402,7 +641,13 @@ impl<'a> Parser<'a> {
         self.bump_unless_eof();
     }
 
-    fn finish_constructor(&mut self, public: bool, init: &mut Option<ClassInit>) {
+    fn finish_constructor(
+        &mut self,
+        public: bool,
+        protected: bool,
+        deprecated: bool,
+        init: &mut Option<ClassInit>,
+    ) {
         let start = self.current().span.start;
         self.bump();
         if !self.consume(TokenKind::LeftParen, "expected '(' after the constructor") {
@@ -413,6 +658,8 @@ impl<'a> Parser<'a> {
         let body = self.parse_body();
         let constructor = ClassInit {
             public,
+            protected,
+            deprecated,
             parameters,
             span: Span {
                 start,
@@ -683,6 +930,9 @@ impl<'a> Parser<'a> {
         }
         if self.check(TokenKind::LeftBrace) {
             return Some(Stmt::Block(self.parse_block()));
+        }
+        if self.check(TokenKind::KwSuper) && self.peek_kind() != TokenKind::Dot {
+            return Some(self.parse_super());
         }
         if self.check(TokenKind::KwReturn) {
             return Some(self.parse_return());
@@ -1054,6 +1304,42 @@ impl<'a> Parser<'a> {
         Some(DestructureDecl {
             bindings,
             initializer,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_super(&mut self) -> Stmt {
+        let start = self.bump().span.start;
+        let mut arguments = Vec::new();
+        if self.consume(TokenKind::LeftParen, "expected '(' after super")
+            && !self.check(TokenKind::RightParen)
+            && !self.is_at_end()
+        {
+            loop {
+                if self.check(TokenKind::RightParen) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidExpression,
+                        self.current().span,
+                        "a trailing comma is not allowed in an argument list",
+                    );
+                    break;
+                }
+                arguments.push(self.parse_expression());
+                if self.check(TokenKind::Comma) {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        let end = if self.check(TokenKind::RightParen) {
+            self.bump().span.end
+        } else {
+            self.current().span.end
+        };
+        let end = self.finish_statement_end(end, "expected ';' after super");
+        Stmt::Super(SuperStmt {
+            arguments,
             span: Span { start, end },
         })
     }
@@ -1910,6 +2196,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Identifier
                 | TokenKind::KwThis
                 | TokenKind::KwNew
+                | TokenKind::KwSuper
                 | TokenKind::KwTrue
                 | TokenKind::KwFalse
                 | TokenKind::KwNull
@@ -1978,6 +2265,10 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Expr {
         match self.current().kind {
             TokenKind::KwNew => self.parse_new(),
+            TokenKind::KwSuper => {
+                let token = self.bump();
+                Expr::Super { span: token.span }
+            }
             TokenKind::KwThis => {
                 let token = self.bump();
                 Expr::Identifier(Identifier {
@@ -2475,6 +2766,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Identifier
                     | TokenKind::KwThis
                     | TokenKind::KwNew
+                    | TokenKind::KwSuper
                     | TokenKind::IntegerLiteral
                     | TokenKind::FloatLiteral
                     | TokenKind::StringLiteral
@@ -2759,5 +3051,26 @@ fn statement_span(statement: &Stmt) -> Span {
         Stmt::Try(try_statement) => try_statement.span,
         Stmt::Expression(expression) => expression.span,
         Stmt::Conditional(conditional) => conditional.span,
+        Stmt::Super(statement) => statement.span,
     }
+}
+
+#[derive(Default)]
+struct DeclMods {
+    abstract_class: bool,
+    final_class: bool,
+    is_static: bool,
+    is_override: bool,
+}
+
+#[derive(Default)]
+struct MemberMods {
+    public: bool,
+    protected: bool,
+    saw_visibility: bool,
+    is_static: bool,
+    is_override: bool,
+    is_abstract: bool,
+    is_final: bool,
+    deprecated: bool,
 }

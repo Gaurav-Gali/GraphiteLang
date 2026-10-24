@@ -756,12 +756,23 @@ void main() {
         nested_limit.contains("exceeds the maximum of 2"),
         "{nested_limit}"
     );
-    let different =
-        messages("void main() {\n    int[] dynamic = [1];\n    int[3] bounded = dynamic;\n}\n");
-    assert!(different.contains("type mismatch"), "{different}");
-    let widening =
-        messages("void main() {\n    int[3] bounded = [1];\n    int[] dynamic = bounded;\n}\n");
-    assert!(widening.contains("type mismatch"), "{widening}");
+    let same_type = messages(
+        "\
+int[] echo(int[] items) {
+    return items;
+}
+
+void main() {
+    int[] dynamic = [1];
+    int[3] bounded = dynamic;
+    int[] again = bounded;
+    int[5] slot = [];
+    slot = echo(slot);
+    again = echo(bounded);
+}
+",
+    );
+    assert!(same_type.is_empty(), "{same_type}");
     let literal_count = messages("void main() {\n    int a, int b = [1];\n}\n");
     assert!(
         literal_count.contains("expects 2 elements, found 1"),
@@ -1353,7 +1364,6 @@ void main() {
     let rust = generate(program.program.as_ref().unwrap());
     for name in [
         "int64[]",
-        "int64[3]",
         "map<str, int64>",
         "User[]",
         "map<str, User>",
@@ -1474,7 +1484,7 @@ void main() {
 
 #[test]
 fn reserved_identifiers_cannot_be_declaration_names() {
-    for name in ["self", "super", "crate", "Self"] {
+    for name in ["self", "crate", "Self"] {
         let message = format!("'{name}' is a reserved name");
         let rejected = [
             format!("void {name}() {{\n}}\n\nvoid main() {{\n}}\n"),
@@ -2315,4 +2325,70 @@ void main() {
         rejected.contains("expected 'int64', found '(int64) -> int64'"),
         "{rejected}"
     );
+}
+
+#[test]
+fn inheritance_requires_matching_overrides() {
+    let accepted = messages(
+        "\
+abstract class Animal {
+    str name;
+    Animal(str name) { this.name = name; }
+    @abstract void speak();
+}
+class Dog extends Animal {
+    Dog(str name) { super(name); }
+    @override void speak() {}
+}
+interface Printable { void print(); }
+class Report implements Printable {
+    @override void print() {}
+}
+class Formatter {
+    str format(int value) { return \"int\"; }
+    str format(str value) { return value; }
+}
+void main() {
+    Dog dog = Dog(\"Buddy\");
+    Animal animal = dog;
+    animal.speak();
+    Formatter formatter = Formatter();
+    formatter.format(1);
+    formatter.format(\"ok\");
+}
+",
+    );
+    assert!(accepted.is_empty(), "{accepted}");
+
+    let rejected = messages(
+        "\
+abstract class Animal { @abstract void speak(); }
+class Dog extends Animal { void speak() {} }
+class Cat extends Animal {}
+abstract class Shape {}
+class Bad extends Shape { @override void missing() {} }
+@final class Closed {}
+class Open extends Closed {}
+class Utility {
+    @static @override void run() {}
+}
+class Parent { @final void lock() {} }
+class Child extends Parent { @override void lock() {} }
+interface Named { str label(); }
+class Item implements Named {}
+void main() {
+    Animal animal = new Animal();
+    Shape shape = Shape();
+}
+",
+    );
+    assert!(rejected.contains("needs @override"), "{rejected}");
+    assert!(rejected.contains("must implement 'speak'"), "{rejected}");
+    assert!(rejected.contains("does not override"), "{rejected}");
+    assert!(rejected.contains("final class"), "{rejected}");
+    assert!(rejected.contains("@static and @override cannot be combined"), "{rejected}");
+    assert!(rejected.contains("final method"), "{rejected}");
+    assert!(rejected.contains("must implement 'Named.label'"), "{rejected}");
+    assert!(rejected.contains("cannot construct abstract class 'Animal'"), "{rejected}");
+    assert!(rejected.contains("cannot construct abstract class 'Shape'"), "{rejected}");
 }

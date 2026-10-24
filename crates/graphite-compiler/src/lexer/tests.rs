@@ -157,7 +157,7 @@ flt32 flt64 bln chr str if else loop break continue return type map import true 
     assert_eq!(result.last(), Some(&TokenKind::Eof));
     assert_eq!(result.len(), 29);
 
-    let ordinary = "constructor library extends implements";
+    let ordinary = "constructor library";
     assert!(
         kinds(ordinary)
             .iter()
@@ -178,6 +178,19 @@ flt32 flt64 bln chr str if else loop break continue return type map import true 
             TokenKind::Eof,
         ]
     );
+    assert_eq!(
+        kinds("extends implements interface abstract protected super"),
+        vec![
+            TokenKind::KwExtends,
+            TokenKind::KwImplements,
+            TokenKind::KwInterface,
+            TokenKind::KwAbstract,
+            TokenKind::KwProtected,
+            TokenKind::KwSuper,
+            TokenKind::Eof,
+        ]
+    );
+    assert_eq!(kinds("@static"), vec![TokenKind::At, TokenKind::KwStatic, TokenKind::Eof]);
 }
 
 #[test]

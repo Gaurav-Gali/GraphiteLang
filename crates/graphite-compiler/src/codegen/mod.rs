@@ -16,7 +16,8 @@ use crate::semantic::convert::{ConvOp, conversion};
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
     ArrayMethod, ArrayPlace, CallableSignature, CanonicalType, CheckedClass, CheckedExpr, CheckedFn,
-    CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId, Leaf, LoopSourceKind,
+    CheckedInterface, CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId, InterfaceId,
+    Leaf, LoopSourceKind,
     MapEntry, MapMethod, MapShape, RecordId, TextMethod,
 };
 
@@ -40,6 +41,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         loop_ids: 0,
         records: &program.records,
         classes: &program.classes,
+        interfaces: &program.interfaces,
         maps: &program.maps,
         callables: &program.callables,
         source_name,
@@ -57,6 +59,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
     for class in &program.classes {
         emitter.emit_class_behavior(class);
     }
+    emitter.emit_interface_dispatch();
     let mut others = Vec::new();
     let mut entry = Vec::new();
     for function in &program.functions {
@@ -99,6 +102,7 @@ struct Emitter<'a> {
     loop_ids: u32,
     records: &'a [CheckedRecord],
     classes: &'a [CheckedClass],
+    interfaces: &'a [CheckedInterface],
     maps: &'a [MapShape],
     callables: &'a [CallableSignature],
     source_name: &'a str,
@@ -137,6 +141,7 @@ impl Emitter<'_> {
             "{visibility}fn {rust_name}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
         ));
         self.indent += 1;
+        self.emit_param_limits(&function.params);
         for statement in &function.body {
             self.emit_stmt(statement);
         }
@@ -400,6 +405,7 @@ impl Emitter<'_> {
                 catches,
                 finally_body,
             } => self.emit_try(body, catches, finally_body),
+            CheckedStmt::Super { .. } => {}
         }
     }
 
@@ -989,6 +995,7 @@ impl Emitter<'_> {
                 index,
                 value,
                 text,
+                limit,
                 file,
                 line,
                 column,
@@ -1000,6 +1007,7 @@ impl Emitter<'_> {
                 index,
                 value,
                 *text,
+                *limit,
                 file,
                 *line,
                 *column,
@@ -1220,13 +1228,35 @@ impl Emitter<'_> {
                 method,
                 object,
                 args,
+                direct,
+                ty: _,
+                file,
+                line,
+                column,
+                end_column,
+            } => self.emit_class_call(
+                *class,
+                *method,
+                object,
+                args,
+                *direct,
+                file,
+                *line,
+                *column,
+                *end_column,
+            ),
+            CheckedExpr::IfaceCall {
+                interface,
+                method,
+                object,
+                args,
                 file,
                 line,
                 column,
                 end_column,
                 ..
-            } => self.emit_class_call(
-                *class,
+            } => self.emit_iface_call(
+                *interface,
                 *method,
                 object,
                 args,
@@ -1235,6 +1265,20 @@ impl Emitter<'_> {
                 *column,
                 *end_column,
             ),
+            CheckedExpr::Upcast { expr, .. } => self.emit_expr(expr),
+            CheckedExpr::EnsureLimit {
+                expr,
+                ty,
+                file,
+                line,
+                column,
+                end_column,
+            } => {
+                let site = self.locate(file, *line, *column, *end_column);
+                let value = self.emit_expr(expr);
+                let checks = limit_checks(*ty, "grf_limited", &site);
+                format!("{{ let grf_limited = {value}; {checks} grf_limited }}")
+            }
             CheckedExpr::Interpolated { parts } => {
                 let mut lines = vec![
                     "{".to_string(),
@@ -1936,6 +1980,7 @@ impl Emitter<'_> {
         index: &CheckedExpr,
         value: &CheckedExpr,
         text: bool,
+        limit: Option<u64>,
         file: &str,
         line: u32,
         column: u32,
@@ -1968,14 +2013,17 @@ impl Emitter<'_> {
                     "graphite_core::text::write_signed(&mut {container}, i128::from({index_expr}), grf_stored, {site})?;"
                 )
             }
-        } else if unsigned {
-            format!(
-                "graphite_core::array::write_unsigned(&mut {container}, u128::from({index_expr}), grf_stored.clone(), {site})?;"
-            )
         } else {
-            format!(
-                "graphite_core::array::write_signed(&mut {container}, i128::from({index_expr}), grf_stored.clone(), {site})?;"
-            )
+            let limit = limit_expr(limit);
+            if unsigned {
+                format!(
+                    "graphite_core::array::assign_unsigned(&mut {container}, u128::from({index_expr}), grf_stored.clone(), {limit}, {site})?;"
+                )
+            } else {
+                format!(
+                    "graphite_core::array::assign_signed(&mut {container}, i128::from({index_expr}), grf_stored.clone(), {limit}, {site})?;"
+                )
+            }
         };
         format!("{{ let grf_stored = {value_expr}; {setup} {write} {commit} grf_stored }}")
     }
@@ -2421,15 +2469,17 @@ impl Emitter<'_> {
     }
 
     fn emit_class_struct(&mut self, class: &CheckedClass) {
+        let id = self.class_id(&class.name);
+        if self.classes[id.0 as usize].parent.is_some() {
+            return;
+        }
         let struct_name = class_struct(&class.name);
+        let fields = self.layout_fields(id);
         self.line(&format!("struct {struct_name} {{"));
         self.indent += 1;
-        for field in &class.fields {
-            self.line(&format!(
-                "{}: {},",
-                rust_ident(&field.name),
-                self.heap_ty(field.ty)
-            ));
+        self.line("grf_type: u32,");
+        for (name, ty) in &fields {
+            self.line(&format!("{name}: {},", self.heap_ty(*ty)));
         }
         self.indent -= 1;
         self.line("}");
@@ -2439,19 +2489,26 @@ impl Emitter<'_> {
         self.indent += 1;
         self.line("fn trace(&self, visit: &mut dyn FnMut(graphite_core::heap::Handle)) {");
         self.indent += 1;
-        for field in &class.fields {
-            self.emit_trace_heap(field.ty, &format!("self.{}", rust_ident(&field.name)));
+        for (name, ty) in &fields {
+            self.emit_trace_heap(*ty, &format!("self.{name}"));
         }
         self.indent -= 1;
         self.line("}");
         self.line("fn as_any(&self) -> &dyn std::any::Any { self }");
         self.line("fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }");
+        self.line("fn grf_type_id(&self) -> u32 { self.grf_type }");
         self.indent -= 1;
         self.line("}");
     }
 
     fn emit_class_behavior(&mut self, class: &CheckedClass) {
-        let struct_name = class_struct(&class.name);
+        let id = self.class_id(&class.name);
+        for (index, field) in class.fields.iter().enumerate() {
+            if field.is_static {
+                self.emit_static_field(id, index);
+            }
+        }
+        let struct_name = self.object_struct(id);
         let params = class.init.as_ref().map(|init| &init.params);
         let param_list = params
             .map(|params| {
@@ -2474,22 +2531,104 @@ impl Emitter<'_> {
             "let this = graphite_core::heap::alloc({struct_name} {{"
         ));
         self.indent += 1;
-        for field in &class.fields {
-            self.line(&format!(
-                "{}: {},",
-                rust_ident(&field.name),
-                self.heap_default(field.ty)
-            ));
+        self.line(&format!("grf_type: {},", id.0));
+        for (name, ty) in self.layout_fields(id) {
+            self.line(&format!("{name}: {},", self.heap_default(ty)));
         }
         self.indent -= 1;
         self.line("})?;");
-        for field in &class.fields {
-            if let Some(initializer) = &field.initializer {
-                let value = self.emit_expr(initializer);
-                self.emit_field_store(class, field, &value, &self.empty_site(), field.const_field);
+        let forwarded = class
+            .init
+            .as_ref()
+            .map(|init| {
+                init.params
+                    .iter()
+                    .map(|(name, _)| rust_ident(name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let init_args = if forwarded.is_empty() {
+            "this".to_string()
+        } else {
+            format!("this, {forwarded}")
+        };
+        self.line(&format!(
+            "grf_init_{}({init_args})",
+            class.name
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+        self.emit_class_init(class, id);
+
+        for (index, method) in class.methods.iter().enumerate() {
+            if !method.is_abstract {
+                self.emit_class_method(class, method, index);
+            }
+            if method.is_virtual && self.is_method_origin(id, index) {
+                self.emit_virtual(id, index);
             }
         }
+    }
+
+    fn emit_class_init(&mut self, class: &CheckedClass, id: ClassId) {
+        let params = class.init.as_ref().map(|init| &init.params);
+        let param_list = params
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|(name, ty)| format!(", mut {}: {}", rust_ident(name), self.ty_name(*ty)))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+        self.constructor_return = false;
+        self.fn_ret = "graphite_core::heap::Rooted".to_string();
+        self.tries.clear();
+        self.line(&format!(
+            "fn grf_init_{}(this: graphite_core::heap::Rooted{param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
+            class.name
+        ));
+        self.indent += 1;
         if let Some(init) = &class.init {
+            self.emit_param_limits(&init.params);
+        }
+        if let Some(parent) = class.parent {
+            let parent_name = self.classes[parent.0 as usize].name.clone();
+            let args = class
+                .init
+                .as_ref()
+                .and_then(|init| {
+                    init.body.iter().find_map(|statement| match statement {
+                        CheckedStmt::Super { args, .. } => Some(args.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_default();
+            let rendered = args
+                .iter()
+                .map(|arg| self.emit_expr(arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let call = if rendered.is_empty() {
+                format!("grf_init_{parent_name}(this.clone())?")
+            } else {
+                format!("grf_init_{parent_name}(this.clone(), {rendered})?")
+            };
+            self.line(&format!("let _grf_parent = {call};"));
+        }
+        let owned = class.clone();
+        for field in &owned.fields {
+            if field.is_static {
+                continue;
+            }
+            if let Some(initializer) = &field.initializer {
+                let value = self.emit_expr(initializer);
+                self.emit_field_store(&owned, field, &value, &self.empty_site(), field.const_field);
+            }
+        }
+        if let Some(init) = &owned.init {
             self.constructor_return = true;
             for statement in &init.body {
                 self.emit_stmt(statement);
@@ -2500,13 +2639,15 @@ impl Emitter<'_> {
         self.indent -= 1;
         self.line("}");
         self.out.push('\n');
-
-        for method in &class.methods {
-            self.emit_class_method(class, method);
-        }
+        let _ = id;
     }
 
-    fn emit_class_method(&mut self, class: &CheckedClass, method: &crate::semantic::CheckedMethod) {
+    fn emit_class_method(
+        &mut self,
+        class: &CheckedClass,
+        method: &crate::semantic::CheckedMethod,
+        index: usize,
+    ) {
         self.constructor_return = false;
         let params = method
             .params
@@ -2530,9 +2671,10 @@ impl Emitter<'_> {
         self.tries.clear();
         self.line(&format!(
             "fn {}({all_params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{",
-            class_method_fn(&class.name, &method.name)
+            self.method_symbol(self.class_id(&class.name), index, false)
         ));
         self.indent += 1;
+        self.emit_param_limits(&method.params);
         for statement in &method.body {
             self.emit_stmt(statement);
         }
@@ -2554,8 +2696,14 @@ impl Emitter<'_> {
         site: &str,
         freeze: bool,
     ) {
-        let struct_name = class_struct(&class.name);
-        let field_name = rust_ident(&field.name);
+        let class_id = self.class_id(&class.name);
+        let struct_name = self.object_struct(class_id);
+        let field_index = class
+            .fields
+            .iter()
+            .position(|item| item.name == field.name)
+            .unwrap_or(0);
+        let field_name = self.field_symbol(class_id, field_index);
         let packed = self.pack_expr(field.ty, "grf_stored");
         self.line(&format!("let grf_stored = {value};"));
         self.line(&format!("let grf_packed = {packed};"));
@@ -2593,10 +2741,14 @@ impl Emitter<'_> {
     }
 
     fn emit_class_get(&mut self, object: &CheckedExpr, class: ClassId, field: usize) -> String {
-        let info = &self.classes[class.0 as usize];
-        let struct_name = class_struct(&info.name);
-        let field_name = rust_ident(&info.fields[field].name);
-        let field_ty = info.fields[field].ty;
+        if self.classes[class.0 as usize].fields[field].is_static {
+            let object = self.emit_expr(object);
+            let read = format!("crate::{}()?", self.static_getter(class, field));
+            return format!("{{ let _grf_recv = {object}; {read} }}");
+        }
+        let struct_name = self.object_struct(class);
+        let field_name = self.field_symbol(class, field);
+        let field_ty = self.classes[class.0 as usize].fields[field].ty;
         let object = self.emit_expr(object);
         let read = self.read_inside(field_ty, &format!("obj.{field_name}"));
         let unpack = self.unpack_expr(field_ty, "grf_raw");
@@ -2616,13 +2768,24 @@ impl Emitter<'_> {
         column: u32,
         end_column: u32,
     ) -> String {
-        let info = &self.classes[class.0 as usize];
-        let struct_name = class_struct(&info.name);
-        let field_name = rust_ident(&info.fields[field].name);
-        let field_ty = info.fields[field].ty;
-        let const_field = info.fields[field].const_field;
+        let field_ty = self.classes[class.0 as usize].fields[field].ty;
+        let const_field = self.classes[class.0 as usize].fields[field].const_field;
+        let is_static = self.classes[class.0 as usize].fields[field].is_static;
         let object = self.emit_expr(object);
         let value = self.emit_expr(value);
+        if is_static {
+            let setter = self.static_setter(class, field);
+            let freeze = if const_field && self.contains_class(field_ty) {
+                self.freeze_block(field_ty, "grf_stored")
+            } else {
+                String::new()
+            };
+            return format!(
+                "{{ let _grf_recv = {object}; let grf_stored = {value}; crate::{setter}(grf_stored.clone())?; {freeze} grf_stored }}"
+            );
+        }
+        let struct_name = self.object_struct(class);
+        let field_name = self.field_symbol(class, field);
         let packed = self.pack_expr(field_ty, "grf_stored");
         let site = self.locate(file, line, column, end_column);
         let freeze = if const_field && self.contains_class(field_ty) {
@@ -2641,15 +2804,22 @@ impl Emitter<'_> {
         method: usize,
         object: &Option<Box<CheckedExpr>>,
         args: &[CheckedExpr],
+        direct: bool,
         file: &str,
         line: u32,
         column: u32,
         end_column: u32,
     ) -> String {
-        let info = &self.classes[class.0 as usize];
-        let is_static = info.methods[method].is_static;
-        let method_name = info.methods[method].name.clone();
-        let path = format!("crate::{}", class_method_fn(&info.name, &method_name));
+        let is_static = self.classes[class.0 as usize].methods[method].is_static;
+        let is_virtual = self.classes[class.0 as usize].methods[method].is_virtual;
+        let method_name = self.classes[class.0 as usize].methods[method].name.clone();
+        let (target, index, virt) = if !direct && is_virtual && !is_static {
+            let (origin, origin_index) = self.origin_method(class, method);
+            (origin, origin_index, true)
+        } else {
+            (class, method, false)
+        };
+        let path = format!("crate::{}", self.method_symbol(target, index, virt));
         let args = args
             .iter()
             .map(|arg| self.emit_expr(arg))
@@ -2682,8 +2852,473 @@ impl Emitter<'_> {
         }
     }
 
+    fn emit_iface_call(
+        &mut self,
+        interface: InterfaceId,
+        method: usize,
+        object: &CheckedExpr,
+        args: &[CheckedExpr],
+        file: &str,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    ) -> String {
+        let name = self.interfaces[interface.0 as usize].methods[method].name.clone();
+        let path = format!("crate::{}", self.iface_symbol(interface, method));
+        let object = self.emit_expr(object);
+        let args = args
+            .iter()
+            .map(|arg| self.emit_expr(arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let site = self.locate(file, line, column, end_column);
+        let call_args = if args.is_empty() {
+            object
+        } else {
+            format!("{object}, {args}")
+        };
+        format!(
+            "match {path}({call_args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{name}\", {site})) }}"
+        )
+    }
+
+    fn class_id(&self, name: &str) -> ClassId {
+        ClassId(
+            self.classes
+                .iter()
+                .position(|class| class.name == name)
+                .unwrap_or(0) as u32,
+        )
+    }
+
+    fn root_of(&self, mut class: ClassId) -> ClassId {
+        while let Some(parent) = self.classes[class.0 as usize].parent {
+            class = parent;
+        }
+        class
+    }
+
+    fn shared(&self, class: ClassId) -> bool {
+        let root = self.root_of(class);
+        self.classes.iter().enumerate().any(|(index, item)| {
+            let id = ClassId(index as u32);
+            item.parent.is_some() && self.root_of(id) == root
+        })
+    }
+
+    fn object_struct(&self, class: ClassId) -> String {
+        let root = self.root_of(class);
+        class_struct(&self.classes[root.0 as usize].name)
+    }
+
+    fn field_symbol(&self, class: ClassId, field: usize) -> String {
+        let info = &self.classes[class.0 as usize];
+        if self.shared(class) {
+            rust_ident(&format!("{}_{}", info.name, info.fields[field].name))
+        } else {
+            rust_ident(&info.fields[field].name)
+        }
+    }
+
+    fn layout_fields(&self, class: ClassId) -> Vec<(String, CanonicalType)> {
+        if !self.shared(class) {
+            return self.classes[class.0 as usize]
+                .fields
+                .iter()
+                .filter(|field| !field.is_static)
+                .map(|field| (rust_ident(&field.name), field.ty))
+                .collect();
+        }
+        let root = self.root_of(class);
+        let mut fields = Vec::new();
+        for (index, info) in self.classes.iter().enumerate() {
+            let id = ClassId(index as u32);
+            if self.root_of(id) != root {
+                continue;
+            }
+            for field in &info.fields {
+                if field.is_static {
+                    continue;
+                }
+                fields.push((
+                    rust_ident(&format!("{}_{}", info.name, field.name)),
+                    field.ty,
+                ));
+            }
+        }
+        fields
+    }
+
+    fn method_symbol(&self, class: ClassId, method: usize, virt: bool) -> String {
+        let info = &self.classes[class.0 as usize];
+        let name = &info.methods[method].name;
+        let overloaded = info.methods.iter().filter(|item| item.name == *name).count() > 1;
+        let prefix = if virt { "grf_virt" } else { "grf_method" };
+        if overloaded {
+            format!("{prefix}_{}_{name}_{method}", info.name)
+        } else {
+            format!("{prefix}_{}_{name}", info.name)
+        }
+    }
+
+    fn static_slot(&self, class: ClassId, field: usize) -> String {
+        let info = &self.classes[class.0 as usize];
+        rust_ident(&format!(
+            "GRF_SF_{}_{}",
+            info.name, info.fields[field].name
+        ))
+    }
+
+    fn static_getter(&self, class: ClassId, field: usize) -> String {
+        let info = &self.classes[class.0 as usize];
+        format!("grf_sget_{}_{}", info.name, info.fields[field].name)
+    }
+
+    fn static_setter(&self, class: ClassId, field: usize) -> String {
+        let info = &self.classes[class.0 as usize];
+        format!("grf_sset_{}_{}", info.name, info.fields[field].name)
+    }
+
+    fn iface_symbol(&self, interface: InterfaceId, method: usize) -> String {
+        let info = &self.interfaces[interface.0 as usize];
+        format!(
+            "grf_iface_{}_{}_{method}",
+            info.name, info.methods[method].name
+        )
+    }
+
+    fn same_signature(&self, class: ClassId, method: usize, name: &str, params: &[(String, CanonicalType)]) -> bool {
+        let info = &self.classes[class.0 as usize].methods[method];
+        info.name == name
+            && !info.is_static
+            && info.params.len() == params.len()
+            && info
+                .params
+                .iter()
+                .zip(params)
+                .all(|((_, left), (_, right))| left == right)
+    }
+
+    fn is_method_origin(&self, class: ClassId, method: usize) -> bool {
+        let Some(parent) = self.classes[class.0 as usize].parent else {
+            return true;
+        };
+        let name = self.classes[class.0 as usize].methods[method].name.clone();
+        let params = self.classes[class.0 as usize].methods[method].params.clone();
+        !self.classes[parent.0 as usize]
+            .methods
+            .iter()
+            .enumerate()
+            .any(|(index, _)| self.same_signature(parent, index, &name, &params))
+    }
+
+    fn origin_method(&self, mut class: ClassId, mut method: usize) -> (ClassId, usize) {
+        let name = self.classes[class.0 as usize].methods[method].name.clone();
+        let params = self.classes[class.0 as usize].methods[method].params.clone();
+        while let Some(parent) = self.classes[class.0 as usize].parent {
+            let Some(index) = self.classes[parent.0 as usize]
+                .methods
+                .iter()
+                .enumerate()
+                .find(|(index, _)| self.same_signature(parent, *index, &name, &params))
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            class = parent;
+            method = index;
+        }
+        (class, method)
+    }
+
+    fn find_implementation(&self, class: ClassId, name: &str, params: &[CanonicalType]) -> Option<(ClassId, usize)> {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if let Some(index) = self.classes[id.0 as usize].methods.iter().position(|method| {
+                !method.is_static
+                    && !method.is_abstract
+                    && method.name == name
+                    && method.params.len() == params.len()
+                    && method
+                        .params
+                        .iter()
+                        .zip(params)
+                        .all(|((_, left), right)| left == right)
+            }) {
+                return Some((id, index));
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        None
+    }
+
+    fn implements_interface(&self, class: ClassId, interface: InterfaceId) -> bool {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if self.classes[id.0 as usize].implements.contains(&interface) {
+                return true;
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        false
+    }
+
+    #[allow(dead_code)]
+    fn emit_parent_chain(&mut self, child: ClassId) {
+        let Some(parent) = self.classes[child.0 as usize].parent else {
+            return;
+        };
+        let args = self.classes[child.0 as usize]
+            .init
+            .as_ref()
+            .and_then(|init| {
+                init.body.iter().find_map(|statement| match statement {
+                    CheckedStmt::Super { args, .. } => Some(args.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let params = self.classes[parent.0 as usize]
+            .init
+            .as_ref()
+            .map(|init| init.params.clone())
+            .unwrap_or_default();
+        self.line("{");
+        self.indent += 1;
+        for ((name, ty), arg) in params.iter().zip(args.iter()) {
+            let value = self.emit_expr(arg);
+            self.line(&format!(
+                "let mut {}: {} = {value};",
+                rust_ident(name),
+                self.ty_name(*ty)
+            ));
+        }
+        self.emit_parent_chain(parent);
+        let parent_class = self.classes[parent.0 as usize].clone();
+        for field in &parent_class.fields {
+            if field.is_static {
+                continue;
+            }
+            if let Some(initializer) = &field.initializer {
+                let value = self.emit_expr(initializer);
+                self.emit_field_store(
+                    &parent_class,
+                    field,
+                    &value,
+                    &self.empty_site(),
+                    field.const_field,
+                );
+            }
+        }
+        if let Some(init) = &parent_class.init {
+            let saved = self.constructor_return;
+            self.constructor_return = true;
+            for statement in &init.body {
+                self.emit_stmt(statement);
+            }
+            self.constructor_return = saved;
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn emit_static_field(&mut self, class: ClassId, field: usize) {
+        let info_name = self.classes[class.0 as usize].name.clone();
+        let field_name = self.classes[class.0 as usize].fields[field].name.clone();
+        let ty = self.classes[class.0 as usize].fields[field].ty;
+        let slot = self.static_slot(class, field);
+        let rust_ty = self.ty_name(ty);
+        let initializer = self.classes[class.0 as usize].fields[field]
+            .initializer
+            .clone();
+        self.line("thread_local! {");
+        self.line(&format!(
+            "    static {slot}: std::cell::RefCell<Option<{rust_ty}>> = const {{ std::cell::RefCell::new(None) }};"
+        ));
+        self.line("}");
+        self.line(&format!(
+            "fn grf_sget_{info_name}_{field_name}() -> Result<{rust_ty}, graphite_core::diagnostic::RuntimeError> {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "if let Some(value) = {slot}.with(|slot| slot.borrow().clone()) {{ return Ok(value); }}"
+        ));
+        let value = if let Some(initializer) = &initializer {
+            self.emit_expr(initializer)
+        } else {
+            self.rust_default(ty)
+        };
+        self.line(&format!("let value = {value};"));
+        self.line(&format!(
+            "{slot}.with(|slot| *slot.borrow_mut() = Some(value.clone()));"
+        ));
+        self.line("Ok(value)");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "fn grf_sset_{info_name}_{field_name}(value: {rust_ty}) -> Result<{rust_ty}, graphite_core::diagnostic::RuntimeError> {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "{slot}.with(|slot| *slot.borrow_mut() = Some(value.clone()));"
+        ));
+        self.line("Ok(value)");
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+    }
+
+    fn rust_default(&self, ty: CanonicalType) -> String {
+        match ty {
+            CanonicalType::Flt32 | CanonicalType::Flt64 => "0.0".to_string(),
+            CanonicalType::Bln => "false".to_string(),
+            CanonicalType::Chr => "'\\0'".to_string(),
+            CanonicalType::Str => "String::new()".to_string(),
+            CanonicalType::Array { .. } => "Vec::new()".to_string(),
+            CanonicalType::Optional(_) => "None".to_string(),
+            CanonicalType::Map(_) => "std::collections::HashMap::new()".to_string(),
+            other if other.is_integer() => "0".to_string(),
+            _ => "Default::default()".to_string(),
+        }
+    }
+
+    fn emit_virtual(&mut self, origin: ClassId, method: usize) {
+        let name = self.classes[origin.0 as usize].methods[method].name.clone();
+        let params = self.classes[origin.0 as usize].methods[method].params.clone();
+        let ret = self.classes[origin.0 as usize].methods[method].ret;
+        let rust_ret = if ret == CanonicalType::Void {
+            "()".to_string()
+        } else {
+            self.ty_name(ret)
+        };
+        let extra = params
+            .iter()
+            .map(|(param, ty)| format!(", mut {}: {}", rust_ident(param), self.ty_name(*ty)))
+            .collect::<String>();
+        let forward = params
+            .iter()
+            .map(|(param, _)| rust_ident(param))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let forward = if forward.is_empty() {
+            "this".to_string()
+        } else {
+            format!("this, {forward}")
+        };
+        self.line(&format!(
+            "fn {}(this: graphite_core::heap::Rooted{extra}) -> Result<{rust_ret}, graphite_core::diagnostic::RuntimeError> {{",
+            self.method_symbol(origin, method, true)
+        ));
+        self.indent += 1;
+        self.line("let grf_tag = graphite_core::heap::type_id(this.handle())?;");
+        self.line("match grf_tag {");
+        self.indent += 1;
+        let root = self.root_of(origin);
+        let param_types = params.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+        for index in 0..self.classes.len() {
+            let id = ClassId(index as u32);
+            if self.root_of(id) != root || self.classes[index].abstract_class {
+                continue;
+            }
+            let Some((impl_class, impl_index)) = self.find_implementation(id, &name, &param_types)
+            else {
+                continue;
+            };
+            self.line(&format!(
+                "{} => crate::{}({forward}),",
+                id.0,
+                self.method_symbol(impl_class, impl_index, false)
+            ));
+        }
+        self.line("_ => Err(graphite_core::diagnostic::runtime_internal(\"abstract method\")),");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.out.push('\n');
+    }
+
+    fn emit_interface_dispatch(&mut self) {
+        for iface_index in 0..self.interfaces.len() {
+            let interface = InterfaceId(iface_index as u32);
+            let method_count = self.interfaces[iface_index].methods.len();
+            for method_index in 0..method_count {
+                let name = self.interfaces[interface.0 as usize].methods[method_index]
+                    .name
+                    .clone();
+                let params = self.interfaces[interface.0 as usize].methods[method_index]
+                    .params
+                    .clone();
+                let ret = self.interfaces[interface.0 as usize].methods[method_index].ret;
+                let rust_ret = if ret == CanonicalType::Void {
+                    "()".to_string()
+                } else {
+                    self.ty_name(ret)
+                };
+                let extra = params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| format!(", mut grf_arg{index}: {}", self.ty_name(*ty)))
+                    .collect::<String>();
+                let forward = (0..params.len())
+                    .map(|index| format!("grf_arg{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let forward = if forward.is_empty() {
+                    "this".to_string()
+                } else {
+                    format!("this, {forward}")
+                };
+                self.line(&format!(
+                    "fn {}(this: graphite_core::heap::Rooted{extra}) -> Result<{rust_ret}, graphite_core::diagnostic::RuntimeError> {{",
+                    self.iface_symbol(interface, method_index)
+                ));
+                self.indent += 1;
+                self.line("let grf_tag = graphite_core::heap::type_id(this.handle())?;");
+                self.line("match grf_tag {");
+                self.indent += 1;
+                for class_index in 0..self.classes.len() {
+                    let id = ClassId(class_index as u32);
+                    if self.classes[class_index].abstract_class
+                        || !self.implements_interface(id, interface)
+                    {
+                        continue;
+                    }
+                    let Some((impl_class, impl_index)) =
+                        self.find_implementation(id, &name, &params)
+                    else {
+                        continue;
+                    };
+                    self.line(&format!(
+                        "{} => crate::{}({forward}),",
+                        id.0,
+                        self.method_symbol(impl_class, impl_index, false)
+                    ));
+                }
+                self.line(
+                    "_ => Err(graphite_core::diagnostic::runtime_internal(\"interface method is not implemented\")),",
+                );
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+                self.out.push('\n');
+            }
+        }
+    }
+
     fn empty_site(&self) -> String {
         site_expr("", 0, 1, 1, "")
+    }
+
+    fn emit_param_limits(&mut self, params: &[(String, CanonicalType)]) {
+        let site = self.empty_site();
+        for (name, ty) in params {
+            let checks = limit_checks(*ty, &rust_ident(name), &site);
+            if !checks.is_empty() {
+                self.line(&checks);
+            }
+        }
     }
 
     fn contains_class(&self, ty: CanonicalType) -> bool {
@@ -2692,7 +3327,7 @@ impl Emitter<'_> {
 
     fn contains_class_seen(&self, ty: CanonicalType, seen: &mut Vec<u32>) -> bool {
         match ty {
-            CanonicalType::Class(_) => true,
+            CanonicalType::Class(_) | CanonicalType::Interface(_) => true,
             CanonicalType::Optional(kind) => self.contains_class_seen(kind.canonical(), seen),
             CanonicalType::Record(id) => {
                 if !seen.contains(&id.0) {
@@ -3304,6 +3939,7 @@ impl Emitter<'_> {
         } else {
             self.ty_name(ret)
         };
+        self.emit_param_limits(params);
         for statement in body {
             self.emit_stmt(statement);
         }
@@ -3366,10 +4002,6 @@ fn class_struct(name: &str) -> String {
 
 fn class_new_fn(name: &str) -> String {
     format!("grf_new_{name}")
-}
-
-fn class_method_fn(class: &str, method: &str) -> String {
-    format!("grf_method_{class}_{method}")
 }
 
 fn record_order(records: &[CheckedRecord]) -> Vec<usize> {
@@ -3722,6 +4354,60 @@ impl Emitter<'_> {
             span.start.column,
             span.end.column,
         )
+    }
+}
+
+fn limit_checks(ty: CanonicalType, access: &str, site: &str) -> String {
+    let mut id = 0u32;
+    limit_checks_at(ty, access, site, &mut id)
+}
+
+fn limit_checks_at(ty: CanonicalType, access: &str, site: &str, id: &mut u32) -> String {
+    match ty {
+        CanonicalType::Optional(kind) => {
+            let name = format!("grf_present{id}");
+            *id += 1;
+            let inner = limit_checks_at(kind.canonical(), &name, site, id);
+            if inner.is_empty() {
+                String::new()
+            } else {
+                format!("if let Some({name}) = {access}.as_ref() {{ {inner} }}")
+            }
+        }
+        CanonicalType::Array {
+            leaf,
+            depth,
+            limits,
+        } if depth > 0 => {
+            let mut out = String::new();
+            let outer = (depth - 1) as usize;
+            if let Some(limit) = limits[outer] {
+                out.push_str(&format!(
+                    "graphite_core::array::ensure_limit({access}.len() as u64, Some({limit}u64), {site})?;"
+                ));
+            }
+            if depth > 1 {
+                let name = format!("grf_item{id}");
+                *id += 1;
+                let mut inner_limits = limits;
+                inner_limits[outer] = None;
+                let inner = limit_checks_at(
+                    CanonicalType::Array {
+                        leaf,
+                        depth: depth - 1,
+                        limits: inner_limits,
+                    },
+                    &name,
+                    site,
+                    id,
+                );
+                if !inner.is_empty() {
+                    out.push_str(&format!("for {name} in {access}.iter() {{ {inner} }}"));
+                }
+            }
+            out
+        }
+        _ => String::new(),
     }
 }
 

@@ -229,6 +229,13 @@ fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, Ru
             working_directory: None,
         });
     }
+    let mut compiler_stderr = String::new();
+    for warning in &analysis.warnings {
+        compiler_stderr.push_str(&format!(
+            "warning[{}]: {}\n",
+            warning.code, warning.message
+        ));
+    }
     let checked = analysis.program.expect("checked program");
     let rust = generate_with_source(&checked, &source_name, &source);
     let workspace = discover_workspace().map_err(|error| failed(format!("grf: {error}\n")))?;
@@ -308,7 +315,7 @@ resolver = "3"
         build_dir,
         working_directory,
         ast: if print_ast { ast } else { None },
-        compiler_stderr: String::new(),
+        compiler_stderr,
     })
 }
 
@@ -610,6 +617,18 @@ void main() {
     }
 
     #[test]
+    fn oop_example_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/oop/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "My name is Buddy\nBuddy says woof!\nMy name is Luna\nLuna says meow!\nAnnual Report\nInteger\nHello\n2\n2\n2\n"
+        );
+    }
+
+    #[test]
     fn lambdas_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/lambdas/main.grf");
@@ -783,6 +802,10 @@ void main() {
             &path,
             r#"import grf.io;
 
+int[] echo(int[] items) {
+    return items;
+}
+
 void main() {
     int[3] values = [];
     values.push(1);
@@ -800,6 +823,15 @@ void main() {
     dynamic.push(3);
     dynamic.push(4);
     io.println(dynamic);
+    int[3] shared = [1, 2];
+    shared = echo(shared);
+    io.println(shared);
+    shared.push(3);
+    io.println(shared.length());
+    int[] grown = [];
+    grown[0] = 7;
+    grown[1] = 8;
+    io.println(grown);
 }
 "#,
         )
@@ -808,7 +840,7 @@ void main() {
         assert_eq!(output.status, 0, "{}", output.stderr);
         assert_eq!(
             output.stdout,
-            "[1, 2, 3]\n[1, 8, 4]\n[[1], []]\n[1, 2, 3, 4]\n"
+            "[1, 2, 3]\n[1, 8, 4]\n[[1], []]\n[1, 2, 3, 4]\n[1, 2]\n3\n[7, 8]\n"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -897,6 +929,34 @@ void main() {
         fs::write(
             &path,
             "import grf.io;\n\nvoid main() {\n    int[3] values = [1, 2, 3];\n    values[0:0] = [8, 9];\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output.stderr.contains("array exceeds its maximum length"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] values = [];\n    values[1] = 1;\n}\n",
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0);
+        assert!(
+            output
+                .stderr
+                .contains("index 1 is out of bounds for an array of length 0"),
+            "{}",
+            output.stderr
+        );
+
+        fs::write(
+            &path,
+            "import grf.io;\n\nvoid main() {\n    int[] dynamic = [1, 2, 3, 4];\n    int[3] bounded = dynamic;\n    io.println(bounded);\n}\n",
         )
         .unwrap();
         let output = run_captured(&path);
@@ -2362,8 +2422,8 @@ void main() {
                 "<class 'str'>",
                 "int64[]",
                 "<class 'int64[]'>",
-                "int64[3]",
-                "<class 'int64[3]'>",
+                "int64[]",
+                "<class 'int64[]'>",
                 "map<str, int64>",
                 "<class 'map<str, int64>'>",
                 "User",

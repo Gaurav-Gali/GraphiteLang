@@ -31,20 +31,25 @@ pub fn method_flags(class: &ClassDecl) -> Vec<MethodFlag> {
         let mut changed = false;
         for (index, scan) in scans.iter().enumerate() {
             for name in &scan.calls {
-                let Some(callee) = class
+                let matches = class
                     .methods
                     .iter()
-                    .position(|method| method.name.name == *name)
-                else {
+                    .enumerate()
+                    .filter(|(_, method)| method.name.name == *name)
+                    .map(|(callee, _)| callee)
+                    .collect::<Vec<_>>();
+                if matches.is_empty() {
                     continue;
-                };
-                if flags[callee].mutating && !flags[index].mutating {
-                    flags[index].mutating = true;
-                    changed = true;
                 }
-                if flags[callee].leaks && !flags[index].leaks {
-                    flags[index].leaks = true;
-                    changed = true;
+                for callee in matches {
+                    if flags[callee].mutating && !flags[index].mutating {
+                        flags[index].mutating = true;
+                        changed = true;
+                    }
+                    if flags[callee].leaks && !flags[index].leaks {
+                        flags[index].leaks = true;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -206,6 +211,11 @@ fn scan_stmt(stmt: &Stmt, tainted: &mut HashSet<String>, scan: &mut Scan) {
             scan_stmt(&stmt.action, &mut then_taint, scan);
             tainted.extend(then_taint);
         }
+        Stmt::Super(stmt) => {
+            for argument in &stmt.arguments {
+                let _ = scan_expr(argument, tainted, scan);
+            }
+        }
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
@@ -341,7 +351,7 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
             }
             false
         }
-        Expr::Literal(_) => false,
+        Expr::Super { .. } | Expr::Literal(_) => false,
     }
 }
 
@@ -549,6 +559,11 @@ fn walk_stmt(
                     flow.tainted_fields[index] =
                         then_flow.tainted_fields[index] || flow.tainted_fields[index];
                 }
+            }
+        }
+        Stmt::Super(stmt) => {
+            for argument in &stmt.arguments {
+                let _ = walk_expr(argument, class, leaks, checking, flow, issues);
             }
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
@@ -762,7 +777,7 @@ fn walk_expr(
             }
             false
         }
-        Expr::Literal(_) => false,
+        Expr::Super { .. } | Expr::Literal(_) => false,
     }
 }
 

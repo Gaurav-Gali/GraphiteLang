@@ -5,6 +5,7 @@ pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub types: Vec<TypeDecl>,
     pub classes: Vec<ClassDecl>,
+    pub interfaces: Vec<InterfaceDecl>,
     pub functions: Vec<FunctionDecl>,
     pub span: Span,
 }
@@ -19,9 +20,29 @@ pub struct TypeDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDecl {
     pub name: Identifier,
+    pub parent: Option<Identifier>,
+    pub interfaces: Vec<Identifier>,
+    pub abstract_class: bool,
+    pub final_class: bool,
     pub fields: Vec<ClassField>,
     pub init: Option<ClassInit>,
     pub methods: Vec<ClassMethod>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceDecl {
+    pub name: Identifier,
+    pub methods: Vec<InterfaceMethod>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceMethod {
+    pub return_type: TypeSyntax,
+    pub name: Identifier,
+    pub parameters: Vec<Parameter>,
+    pub deprecated: bool,
     pub span: Span,
 }
 
@@ -32,6 +53,9 @@ pub struct ClassField {
     pub conversion: ConversionMode,
     pub const_field: bool,
     pub public: bool,
+    pub protected: bool,
+    pub is_static: bool,
+    pub deprecated: bool,
     pub initializer: Option<Expr>,
     pub span: Span,
 }
@@ -39,6 +63,8 @@ pub struct ClassField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassInit {
     pub public: bool,
+    pub protected: bool,
+    pub deprecated: bool,
     pub parameters: Vec<Parameter>,
     pub body: BlockStmt,
     pub span: Span,
@@ -47,7 +73,12 @@ pub struct ClassInit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassMethod {
     pub public: bool,
+    pub protected: bool,
     pub is_static: bool,
+    pub is_override: bool,
+    pub is_abstract: bool,
+    pub is_final: bool,
+    pub deprecated: bool,
     pub return_type: TypeSyntax,
     pub name: Identifier,
     pub parameters: Vec<Parameter>,
@@ -159,6 +190,13 @@ pub enum Stmt {
     Try(TryStmt),
     Expression(ExpressionStmt),
     Conditional(ConditionalStmt),
+    Super(SuperStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuperStmt {
+    pub arguments: Vec<Expr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +329,7 @@ pub enum Expr {
     Slice(SliceExpr),
     Ternary(TernaryExpr),
     Lambda(LambdaExpr),
+    Super { span: Span },
     Parenthesized { expression: Box<Expr>, span: Span },
 }
 
@@ -314,6 +353,7 @@ impl Expr {
             Expr::Slice(slice) => slice.span,
             Expr::Ternary(ternary) => ternary.span,
             Expr::Lambda(lambda) => lambda.span,
+            Expr::Super { span } => *span,
             Expr::Parenthesized { span, .. } => *span,
         }
     }

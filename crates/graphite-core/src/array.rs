@@ -57,6 +57,34 @@ pub fn write_unsigned<T: Clone>(
     Ok(())
 }
 
+/// Replace `items[index]`, or append when a nonnegative index equals the
+/// current length. A larger index stays out of bounds, so holes are not filled.
+pub fn assign_signed<T: Clone>(
+    items: &mut Vec<T>,
+    index: i128,
+    value: T,
+    limit: Option<u64>,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
+    if index >= 0 && index == i128::from(items.len() as u64) {
+        return push(items, value, limit, site);
+    }
+    write_signed(items, index, value, site)
+}
+
+pub fn assign_unsigned<T: Clone>(
+    items: &mut Vec<T>,
+    index: u128,
+    value: T,
+    limit: Option<u64>,
+    site: Site<'_>,
+) -> Result<(), RuntimeError> {
+    if index == u128::from(items.len() as u64) {
+        return push(items, value, limit, site);
+    }
+    write_unsigned(items, index, value, site)
+}
+
 pub fn extend<T: Clone>(
     items: &mut Vec<T>,
     extra: &[T],

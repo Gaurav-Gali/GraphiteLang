@@ -147,8 +147,7 @@ descriptors.
   Expression type      `name()`            Descriptor display
   -------------------- ------------------- -------------------------
   `int` / `int64`      `int64`             `<class 'int64'>`
-  `int[]`              `int64[]`           `<class 'int64[]'>`
-  `int[3]`             `int64[3]`          `<class 'int64[3]'>`
+  `int[]` / `int[3]`   `int64[]`           `<class 'int64[]'>`
   `map<str, int>`      `map<str, int64>`   `<class 'map<str, int64>'>`
   `User`               `User`              `<type 'User'>`
   `User[]`             `User[]`            `<class 'User[]'>`
@@ -156,7 +155,7 @@ descriptors.
   `Type`               `Type`              `<class 'Type'>`
 
 Use `<type 'Name'>` only for a named custom record type itself. Built-in
-types, arrays, fixed-size arrays, maps, and `Type` itself use
+types, arrays, maps, and `Type` itself use
 `<class 'CanonicalName'>`. Include the other built-in spellings already
 implemented by Graphite, such as `int16`, `int32`, `uint16`, `uint32`,
 `uint64`, `flt32`, `flt64`, `bln`, `chr`, and `str`. Do not invent names
@@ -204,9 +203,9 @@ Static return type: `str`.
 
 It returns the canonical Graphite type name. Built-in types return their
 canonical names. Aliases return the canonical target name. Custom record
-types return their declared record name. Arrays, fixed-size arrays, and
-maps return the recursive canonical spelling, such as `int64[]`,
-`int64[3]`, and `map<str, int64>`.
+types return their declared record name. Arrays and maps return the
+recursive canonical spelling, such as `int64[]` and `map<str, int64>`.
+A maximum length such as `int[3]` is not part of the type name.
 
 `name()` does not return a formatted display string. For example,
 `typeOf(21).name()` returns `int64`, not `<class 'int64'>`.

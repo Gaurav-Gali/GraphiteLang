@@ -57,6 +57,9 @@ pub struct MapId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClassId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InterfaceId(pub u32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallableId(pub u32);
 
@@ -71,7 +74,7 @@ pub struct CallableSignature {
     pub ret: CanonicalType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Eq)]
 pub enum CanonicalType {
     Void,
     Int16,
@@ -100,10 +103,12 @@ pub enum CanonicalType {
     Optional(OptionalKind),
     /// A function value. The signature lives in the program's callable table.
     Callable(CallableId),
+    /// A reference whose static type is an interface.
+    Interface(InterfaceId),
 }
 
 /// The type inside `T?`. One level of nullability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Eq)]
 pub enum OptionalKind {
     Int16,
     Int32,
@@ -119,6 +124,7 @@ pub enum OptionalKind {
     Type,
     Record(RecordId),
     Class(ClassId),
+    Interface(InterfaceId),
     Map(MapId),
     Array {
         leaf: Leaf,
@@ -144,6 +150,7 @@ impl OptionalKind {
             OptionalKind::Type => CanonicalType::Type,
             OptionalKind::Record(id) => CanonicalType::Record(id),
             OptionalKind::Class(id) => CanonicalType::Class(id),
+            OptionalKind::Interface(id) => CanonicalType::Interface(id),
             OptionalKind::Map(id) => CanonicalType::Map(id),
             OptionalKind::Array {
                 leaf,
@@ -154,6 +161,91 @@ impl OptionalKind {
                 depth,
                 limits,
             },
+        }
+    }
+}
+
+impl PartialEq for OptionalKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                OptionalKind::Array { leaf, depth, .. },
+                OptionalKind::Array {
+                    leaf: other_leaf,
+                    depth: other_depth,
+                    ..
+                },
+            ) => leaf == other_leaf && depth == other_depth,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other) && match (self, other)
+            {
+                (OptionalKind::Record(left), OptionalKind::Record(right)) => left == right,
+                (OptionalKind::Class(left), OptionalKind::Class(right)) => left == right,
+                (OptionalKind::Interface(left), OptionalKind::Interface(right)) => left == right,
+                (OptionalKind::Map(left), OptionalKind::Map(right)) => left == right,
+                (OptionalKind::Array { .. }, _) | (_, OptionalKind::Array { .. }) => false,
+                _ => true,
+            },
+        }
+    }
+}
+
+fn limits_need_check(source: CanonicalType, target: CanonicalType) -> bool {
+    match (source, target) {
+        (CanonicalType::Optional(source), CanonicalType::Optional(target)) => {
+            limits_need_check(source.canonical(), target.canonical())
+        }
+        (
+            CanonicalType::Array {
+                leaf,
+                depth,
+                limits: source_limits,
+            },
+            CanonicalType::Array {
+                leaf: target_leaf,
+                depth: target_depth,
+                limits: target_limits,
+            },
+        ) if leaf == target_leaf && depth == target_depth => (0..depth as usize).any(|index| {
+            match (source_limits[index], target_limits[index]) {
+                (_, None) => false,
+                (Some(source_limit), Some(target_limit)) => source_limit > target_limit,
+                (None, Some(_)) => true,
+            }
+        }),
+        _ => false,
+    }
+}
+
+impl PartialEq for CanonicalType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                CanonicalType::Array { leaf, depth, .. },
+                CanonicalType::Array {
+                    leaf: other_leaf,
+                    depth: other_depth,
+                    ..
+                },
+            ) => leaf == other_leaf && depth == other_depth,
+            (CanonicalType::Optional(left), CanonicalType::Optional(right)) => left == right,
+            (CanonicalType::Record(left), CanonicalType::Record(right)) => left == right,
+            (CanonicalType::Class(left), CanonicalType::Class(right)) => left == right,
+            (CanonicalType::Interface(left), CanonicalType::Interface(right)) => left == right,
+            (CanonicalType::Map(left), CanonicalType::Map(right)) => left == right,
+            (CanonicalType::Callable(left), CanonicalType::Callable(right)) => left == right,
+            _ => {
+                std::mem::discriminant(self) == std::mem::discriminant(other)
+                    && !matches!(
+                        self,
+                        CanonicalType::Array { .. }
+                            | CanonicalType::Optional(_)
+                            | CanonicalType::Record(_)
+                            | CanonicalType::Class(_)
+                            | CanonicalType::Interface(_)
+                            | CanonicalType::Map(_)
+                            | CanonicalType::Callable(_)
+                    )
+            }
         }
     }
 }
@@ -176,6 +268,7 @@ pub enum Leaf {
     ErrorHandle,
     Record(RecordId),
     Class(ClassId),
+    Interface(InterfaceId),
     Map(MapId),
 }
 
@@ -196,7 +289,9 @@ impl CanonicalType {
             CanonicalType::Str => "String".to_string(),
             CanonicalType::Type => "GrfType".to_string(),
             CanonicalType::ErrorHandle => "graphite_core::diagnostic::RuntimeError".to_string(),
-            CanonicalType::Class(_) => "graphite_core::heap::Rooted".to_string(),
+            CanonicalType::Class(_) | CanonicalType::Interface(_) => {
+                "graphite_core::heap::Rooted".to_string()
+            }
             CanonicalType::Record(_) => "GrfRecord".to_string(),
             CanonicalType::Map(_) => "HashMap<(), ()>".to_string(),
             CanonicalType::Array { leaf, depth, .. } => {
@@ -233,6 +328,7 @@ impl CanonicalType {
             CanonicalType::Type => OptionalKind::Type,
             CanonicalType::Record(id) => OptionalKind::Record(id),
             CanonicalType::Class(id) => OptionalKind::Class(id),
+            CanonicalType::Interface(id) => OptionalKind::Interface(id),
             CanonicalType::Map(id) => OptionalKind::Map(id),
             CanonicalType::Array {
                 leaf,
@@ -275,20 +371,12 @@ impl CanonicalType {
             CanonicalType::Type => "Type".to_string(),
             CanonicalType::ErrorHandle => "RuntimeError".to_string(),
             CanonicalType::Class(_) => "class".to_string(),
+            CanonicalType::Interface(_) => "interface".to_string(),
             CanonicalType::Record(_) => "record".to_string(),
             CanonicalType::Map(_) => "map".to_string(),
-            CanonicalType::Array {
-                leaf,
-                depth,
-                limits,
-            } => {
+            CanonicalType::Array { leaf, depth, .. } => {
                 let mut name = leaf.spelling().to_string();
-                for bound in limits.iter().take(depth as usize) {
-                    match bound {
-                        None => name.push_str("[]"),
-                        Some(limit) => name.push_str(&format!("[{limit}]")),
-                    }
-                }
+                name.push_str(&"[]".repeat(depth as usize));
                 name
             }
             CanonicalType::Optional(kind) => format!("{}?", kind.canonical().spelling()),
@@ -350,6 +438,7 @@ impl CanonicalType {
                 | CanonicalType::ErrorHandle
                 | CanonicalType::Record(_)
                 | CanonicalType::Class(_)
+                | CanonicalType::Interface(_)
                 | CanonicalType::Map(_)
                 | CanonicalType::Array { .. }
                 | CanonicalType::Optional(_)
@@ -362,6 +451,14 @@ impl CanonicalType {
 
     pub fn is_class(self) -> bool {
         matches!(self, CanonicalType::Class(_))
+    }
+
+    pub fn is_interface(self) -> bool {
+        matches!(self, CanonicalType::Interface(_))
+    }
+
+    pub fn is_object(self) -> bool {
+        self.is_class() || self.is_interface()
     }
 
     pub fn is_map(self) -> bool {
@@ -429,6 +526,7 @@ impl CanonicalType {
             CanonicalType::ErrorHandle => Leaf::ErrorHandle,
             CanonicalType::Record(id) => Leaf::Record(id),
             CanonicalType::Class(id) => Leaf::Class(id),
+            CanonicalType::Interface(id) => Leaf::Interface(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
             CanonicalType::Optional(_) | CanonicalType::Callable(_) => Leaf::Void,
@@ -475,6 +573,7 @@ impl Leaf {
             Leaf::ErrorHandle => CanonicalType::ErrorHandle,
             Leaf::Record(id) => CanonicalType::Record(id),
             Leaf::Class(id) => CanonicalType::Class(id),
+            Leaf::Interface(id) => CanonicalType::Interface(id),
             Leaf::Map(id) => CanonicalType::Map(id),
         }
     }
@@ -497,6 +596,7 @@ impl Leaf {
             Leaf::ErrorHandle => "RuntimeError",
             Leaf::Record(_) => "record",
             Leaf::Class(_) => "class",
+            Leaf::Interface(_) => "interface",
             Leaf::Map(_) => "map",
         }
     }
@@ -580,20 +680,38 @@ impl std::fmt::Display for SemanticDiagnostic {
 pub struct Analysis {
     pub program: Option<CheckedProgram>,
     pub diagnostics: Vec<SemanticDiagnostic>,
+    pub warnings: Vec<SemanticDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedProgram {
     pub records: Vec<CheckedRecord>,
     pub classes: Vec<CheckedClass>,
+    pub interfaces: Vec<CheckedInterface>,
     pub maps: Vec<MapShape>,
     pub callables: Vec<CallableSignature>,
     pub functions: Vec<CheckedFn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedInterface {
+    pub name: String,
+    pub methods: Vec<CheckedIfaceMethod>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedIfaceMethod {
+    pub name: String,
+    pub params: Vec<CanonicalType>,
+    pub ret: CanonicalType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedClass {
     pub name: String,
+    pub parent: Option<ClassId>,
+    pub implements: Vec<InterfaceId>,
+    pub abstract_class: bool,
     pub fields: Vec<CheckedClassField>,
     pub init: Option<CheckedInit>,
     pub methods: Vec<CheckedMethod>,
@@ -604,6 +722,7 @@ pub struct CheckedClassField {
     pub name: String,
     pub ty: CanonicalType,
     pub const_field: bool,
+    pub is_static: bool,
     pub initializer: Option<CheckedExpr>,
 }
 
@@ -611,6 +730,7 @@ pub struct CheckedClassField {
 pub struct CheckedInit {
     pub params: Vec<(String, CanonicalType)>,
     pub body: Vec<CheckedStmt>,
+    pub implicit_super: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -621,6 +741,8 @@ pub struct CheckedMethod {
     pub body: Vec<CheckedStmt>,
     pub mutating: bool,
     pub is_static: bool,
+    pub is_abstract: bool,
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,6 +817,10 @@ pub enum CheckedStmt {
         body: Vec<CheckedStmt>,
         catches: Vec<CheckedCatch>,
         finally_body: Option<Vec<CheckedStmt>>,
+    },
+    Super {
+        class: ClassId,
+        args: Vec<CheckedExpr>,
     },
 }
 
@@ -988,6 +1114,7 @@ pub enum CheckedExpr {
         value: Box<CheckedExpr>,
         ty: CanonicalType,
         text: bool,
+        limit: Option<u64>,
         file: String,
         line: u32,
         column: u32,
@@ -1102,6 +1229,31 @@ pub enum CheckedExpr {
         object: Option<Box<CheckedExpr>>,
         args: Vec<CheckedExpr>,
         ty: CanonicalType,
+        direct: bool,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    IfaceCall {
+        interface: InterfaceId,
+        method: usize,
+        object: Box<CheckedExpr>,
+        args: Vec<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    Upcast {
+        expr: Box<CheckedExpr>,
+        ty: CanonicalType,
+    },
+    /// Same array type, with the destination's maximum lengths checked.
+    EnsureLimit {
+        expr: Box<CheckedExpr>,
+        ty: CanonicalType,
         file: String,
         line: u32,
         column: u32,
@@ -1165,6 +1317,9 @@ impl CheckedExpr {
             | CheckedExpr::ClassGet { ty, .. }
             | CheckedExpr::ClassSet { ty, .. }
             | CheckedExpr::ClassCall { ty, .. }
+            | CheckedExpr::IfaceCall { ty, .. }
+            | CheckedExpr::Upcast { ty, .. }
+            | CheckedExpr::EnsureLimit { ty, .. }
             | CheckedExpr::Null { ty }
             | CheckedExpr::Wrap { ty, .. }
             | CheckedExpr::Unwrap { ty, .. }
@@ -1224,6 +1379,10 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         record_names: HashMap::new(),
         classes: Vec::new(),
         class_names: HashMap::new(),
+        interfaces: Vec::new(),
+        interface_names: HashMap::new(),
+        warnings: Vec::new(),
+        at_super_slot: false,
         maps: Vec::new(),
         resolve_stack: Vec::new(),
         scopes: Vec::new(),
@@ -1241,9 +1400,12 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         lambda_var: None,
     };
     checker.collect_imports(program);
+    checker.collect_interfaces(program);
     checker.collect_classes(program);
+    checker.link_classes();
     checker.collect_records(program);
     checker.finish_class_types();
+    checker.check_inheritance();
     checker.prepare_class_effects(program);
     checker.collect_functions(program);
     checker.check_entry_point(program);
@@ -1281,6 +1443,22 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
                     })
                     .collect(),
                 classes: checked_classes,
+                interfaces: checker
+                    .interfaces
+                    .iter()
+                    .map(|interface| CheckedInterface {
+                        name: interface.name.clone(),
+                        methods: interface
+                            .methods
+                            .iter()
+                            .map(|method| CheckedIfaceMethod {
+                                name: method.name.clone(),
+                                params: method.params.iter().map(|param| param.ty).collect(),
+                                ret: method.ret,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
                 maps: checker.maps,
                 callables: checker.callables,
                 functions,
@@ -1289,6 +1467,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
             None
         },
         diagnostics: checker.diagnostics,
+        warnings: checker.warnings,
     }
 }
 
@@ -1316,6 +1495,9 @@ struct ClassFieldInfo {
     auto: bool,
     const_field: bool,
     public: bool,
+    protected: bool,
+    is_static: bool,
+    deprecated: bool,
     span: Span,
 }
 
@@ -1326,7 +1508,13 @@ struct ClassMethodInfo {
     ret: CanonicalType,
     ret_syntax: TypeSyntax,
     public: bool,
+    protected: bool,
     is_static: bool,
+    is_override: bool,
+    is_abstract: bool,
+    is_final: bool,
+    is_virtual: bool,
+    deprecated: bool,
     mutating: bool,
     leaks: bool,
     span: Span,
@@ -1336,6 +1524,25 @@ struct ClassInitInfo {
     params: Vec<ParamInfo>,
     param_syntax: Vec<RawParam>,
     public: bool,
+    protected: bool,
+    deprecated: bool,
+}
+
+struct InterfaceInfo {
+    name: String,
+    methods: Vec<IfaceMethodInfo>,
+    #[allow(dead_code)]
+    span: Span,
+}
+
+struct IfaceMethodInfo {
+    name: String,
+    params: Vec<ParamInfo>,
+    param_syntax: Vec<RawParam>,
+    ret: CanonicalType,
+    ret_syntax: TypeSyntax,
+    deprecated: bool,
+    span: Span,
 }
 
 #[derive(Clone)]
@@ -1351,6 +1558,12 @@ struct RawParam {
 struct ClassInfo {
     name: String,
     span: Span,
+    parent: Option<ClassId>,
+    parent_name: Option<(String, Span)>,
+    interface_names: Vec<(String, Span)>,
+    implements: Vec<InterfaceId>,
+    abstract_class: bool,
+    final_class: bool,
     fields: Vec<ClassFieldInfo>,
     methods: Vec<ClassMethodInfo>,
     init: Option<ClassInitInfo>,
@@ -1366,6 +1579,10 @@ struct Checker<'a> {
     record_names: HashMap<String, RecordId>,
     classes: Vec<ClassInfo>,
     class_names: HashMap<String, ClassId>,
+    interfaces: Vec<InterfaceInfo>,
+    interface_names: HashMap<String, InterfaceId>,
+    warnings: Vec<SemanticDiagnostic>,
+    at_super_slot: bool,
     maps: Vec<MapShape>,
     resolve_stack: Vec<RecordId>,
     scopes: Vec<HashMap<String, Binding>>,
@@ -1602,6 +1819,12 @@ impl<'a> Checker<'a> {
                     syntax,
                 );
             }
+            if let Some(id) = self.interface_names.get(&syntax.name).copied() {
+                return self.finish_optional(
+                    self.with_bounds(CanonicalType::Interface(id), &syntax.bounds),
+                    syntax,
+                );
+            }
         }
         let scalar = if syntax.kind == TypeKind::Named {
             let Some(id) = self.record_names.get(&syntax.name).copied() else {
@@ -1675,6 +1898,7 @@ impl<'a> Checker<'a> {
         match ty {
             CanonicalType::Record(id) => self.record_name(id),
             CanonicalType::Class(id) => self.class_name(id),
+            CanonicalType::Interface(id) => self.interface_name(id),
             CanonicalType::Map(id) => {
                 let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
                     key: CanonicalType::Void,
@@ -1689,45 +1913,22 @@ impl<'a> Checker<'a> {
             CanonicalType::Array {
                 leaf: Leaf::Class(id),
                 depth,
-                limits,
-            } => {
-                let mut name = self.class_name(id);
-                for bound in limits.iter().take(depth as usize) {
-                    match bound {
-                        None => name.push_str("[]"),
-                        Some(limit) => name.push_str(&format!("[{limit}]")),
-                    }
-                }
-                name
-            }
+                ..
+            } => format!("{}{}", self.class_name(id), "[]".repeat(depth as usize)),
             CanonicalType::Array {
                 leaf: Leaf::Record(id),
                 depth,
-                limits,
-            } => {
-                let mut name = self.record_name(id);
-                for bound in limits.iter().take(depth as usize) {
-                    match bound {
-                        None => name.push_str("[]"),
-                        Some(limit) => name.push_str(&format!("[{limit}]")),
-                    }
-                }
-                name
-            }
+                ..
+            } => format!("{}{}", self.record_name(id), "[]".repeat(depth as usize)),
             CanonicalType::Array {
                 leaf: Leaf::Map(id),
                 depth,
-                limits,
-            } => {
-                let mut name = self.spell(CanonicalType::Map(id));
-                for bound in limits.iter().take(depth as usize) {
-                    match bound {
-                        None => name.push_str("[]"),
-                        Some(limit) => name.push_str(&format!("[{limit}]")),
-                    }
-                }
-                name
-            }
+                ..
+            } => format!(
+                "{}{}",
+                self.spell(CanonicalType::Map(id)),
+                "[]".repeat(depth as usize)
+            ),
             CanonicalType::Optional(kind) => format!("{}?", self.spell(kind.canonical())),
             CanonicalType::Callable(id) => self.spell_callable(id),
             other => other.spelling(),
@@ -2054,7 +2255,40 @@ impl<'a> Checker<'a> {
                 }
                 Some(CheckedStmt::Expr(expr))
             }
+            Stmt::Super(stmt) => self.check_super(stmt),
         }
+    }
+
+    fn check_super(&mut self, stmt: &SuperStmt) -> Option<CheckedStmt> {
+        if !self.in_init {
+            self.error(stmt.span, "super can only be used in a constructor");
+            return None;
+        }
+        if !self.at_super_slot {
+            self.error(
+                stmt.span,
+                "super must be the first statement in the constructor",
+            );
+        }
+        let Some(class) = self.current_class else {
+            self.error(stmt.span, "super requires a parent class");
+            return None;
+        };
+        let Some(parent) = self.classes[class.0 as usize].parent else {
+            self.error(stmt.span, "super requires a parent class");
+            for argument in &stmt.arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return None;
+        };
+        let saved = self.current_class;
+        self.current_class = Some(class);
+        let constructed = self.check_construct(parent, &stmt.arguments, stmt.span);
+        self.current_class = saved;
+        let CheckedExpr::ClassNew { args, .. } = constructed else {
+            return None;
+        };
+        Some(CheckedStmt::Super { class, args })
     }
 
     fn check_try(&mut self, stmt: &TryStmt) -> CheckedStmt {
@@ -2288,6 +2522,7 @@ impl<'a> Checker<'a> {
             }
             CanonicalType::Optional(_) => Some(CheckedExpr::Null { ty }),
             CanonicalType::Class(_)
+            | CanonicalType::Interface(_)
             | CanonicalType::Type
             | CanonicalType::Void
             | CanonicalType::ErrorHandle
@@ -2296,7 +2531,10 @@ impl<'a> Checker<'a> {
     }
 
     fn can_delay(&self, ty: CanonicalType) -> bool {
-        matches!(ty, CanonicalType::Class(_) | CanonicalType::Record(_))
+        matches!(
+            ty,
+            CanonicalType::Class(_) | CanonicalType::Interface(_) | CanonicalType::Record(_)
+        )
     }
 
     fn check_variable(&mut self, decl: &VariableDecl) -> Option<CheckedStmt> {
@@ -2575,6 +2813,10 @@ impl<'a> Checker<'a> {
             Expr::Index(expr) => self.check_index(expr),
             Expr::Slice(expr) => self.check_slice(expr),
             Expr::Member(expr) => self.check_member(expr),
+            Expr::Super { span } => {
+                self.error(*span, "super must name a parent member");
+                self.dummy(None)
+            }
             Expr::InterpolatedString(expr) => self.check_interpolation(expr),
         };
         self.allow_convert = saved_convert;
@@ -2844,12 +3086,16 @@ impl<'a> Checker<'a> {
                 span: expr.span,
             };
         }
-        if left.ty().is_class() || right.ty().is_class() {
+        if left.ty().is_object() || right.ty().is_object() {
             let equality = matches!(
                 expr.operator,
                 BinaryOperator::Equal | BinaryOperator::NotEqual
             );
-            if equality && left.ty() == right.ty() {
+            if equality
+                && (left.ty() == right.ty()
+                    || self.assignable(left.ty(), right.ty())
+                    || self.assignable(right.ty(), left.ty()))
+            {
                 return CheckedExpr::Binary {
                     op: expr.operator,
                     ty: CanonicalType::Bln,
@@ -3300,6 +3546,9 @@ impl<'a> Checker<'a> {
 
     fn check_call(&mut self, expr: &CallExpr, allow_void: bool) -> CheckedExpr {
         if let Expr::Member(member) = &*expr.callee {
+            if matches!(&*member.object, Expr::Super { .. }) {
+                return self.check_super_call(member, &expr.arguments, expr.span);
+            }
             if let Expr::Identifier(object) = &*member.object {
                 if self.imports.contains_key(&object.name) {
                     return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
@@ -3516,16 +3765,31 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         }
         if self.class_names.contains_key(&ident.name) && !self.functions.contains_key(&ident.name) {
-            self.error(ident.span, format!("construct '{}' with new", ident.name));
+            let id = self.class_names[&ident.name];
+            if self.classes[id.0 as usize].abstract_class {
+                self.error(
+                    ident.span,
+                    format!("cannot construct abstract class '{}'", ident.name),
+                );
+            }
+            let deprecated = self.classes[id.0 as usize]
+                .init
+                .as_ref()
+                .is_some_and(|init| init.deprecated);
+            self.note_deprecated(deprecated, ident.span, &ident.name);
+            return self.check_construct(id, arguments, span);
+        }
+        if self.interface_names.contains_key(&ident.name)
+            && !self.functions.contains_key(&ident.name)
+        {
+            self.error(
+                ident.span,
+                format!("cannot construct interface '{}'", ident.name),
+            );
             for argument in arguments {
                 let _ = self.check_expr(argument, None, false);
             }
-            let ty = self
-                .class_names
-                .get(&ident.name)
-                .copied()
-                .map(CanonicalType::Class);
-            return self.dummy(ty);
+            return self.dummy(None);
         }
         let Some(resolved) = self.functions.get(&ident.name).map(|signature| {
             (
@@ -3632,8 +3896,26 @@ impl<'a> Checker<'a> {
             );
             return expr;
         }
-        if from == target {
-            return expr;
+        if limits_need_check(from, target) {
+            let (file, line, column, end_column) = self.located(span);
+            return CheckedExpr::EnsureLimit {
+                expr: Box::new(expr),
+                ty: target,
+                file,
+                line,
+                column,
+                end_column,
+            };
+        }
+        if from == target || self.assignable(from, target) {
+            return if from == target {
+                expr
+            } else {
+                CheckedExpr::Upcast {
+                    expr: Box::new(expr),
+                    ty: target,
+                }
+            };
         }
         if let (CanonicalType::Callable(from_id), CanonicalType::Callable(to_id)) = (from, target) {
             if self.callable_compatible(from_id, to_id) {
@@ -3653,7 +3935,25 @@ impl<'a> Checker<'a> {
             if matches!(expr, CheckedExpr::Null { .. }) {
                 return CheckedExpr::Null { ty: target };
             }
-            if from == inner {
+            if from == inner || self.assignable(from, inner) {
+                let expr = if limits_need_check(from, inner) {
+                    let (file, line, column, end_column) = self.located(span);
+                    CheckedExpr::EnsureLimit {
+                        expr: Box::new(expr),
+                        ty: inner,
+                        file,
+                        line,
+                        column,
+                        end_column,
+                    }
+                } else if from == inner {
+                    expr
+                } else {
+                    CheckedExpr::Upcast {
+                        expr: Box::new(expr),
+                        ty: inner,
+                    }
+                };
                 return CheckedExpr::Wrap {
                     expr: Box::new(expr),
                     ty: target,
@@ -3927,6 +4227,17 @@ impl<'a> Checker<'a> {
     }
 
     fn check_member(&mut self, expr: &MemberExpr) -> CheckedExpr {
+        if let Expr::Super { .. } = &*expr.object {
+            return self.finish_super_field(expr);
+        }
+        if let Expr::Identifier(object) = &*expr.object {
+            if self.lookup(&object.name).is_none()
+                && self.class_names.contains_key(&object.name)
+            {
+                let id = self.class_names[&object.name];
+                return self.finish_named_static_field(id, expr);
+            }
+        }
         if let Expr::Identifier(object) = &*expr.object {
             if self.imports.contains_key(&object.name) {
                 self.error(
@@ -3947,6 +4258,9 @@ impl<'a> Checker<'a> {
         }
         if let CanonicalType::Class(id) = object.ty() {
             return self.finish_class_get(object, id, expr);
+        }
+        if let CanonicalType::Interface(id) = object.ty() {
+            return self.finish_interface_get(object, id, expr);
         }
         let CanonicalType::Record(id) = object.ty() else {
             self.error(
@@ -3980,8 +4294,29 @@ impl<'a> Checker<'a> {
         value: &Expr,
         op: Option<BinaryOperator>,
     ) -> CheckedExpr {
+        if let Expr::Identifier(object) = &*member.object {
+            if self.lookup(&object.name).is_none() && self.class_names.contains_key(&object.name)
+            {
+                let id = self.class_names[&object.name];
+                if self
+                    .locate_field(id, &member.member.name)
+                    .is_some_and(|(owner, index)| {
+                        !self.classes[owner.0 as usize].fields[index].is_static
+                    })
+                {
+                    self.error(
+                        member.member.span,
+                        format!("field '{}' requires an instance", member.member.name),
+                    );
+                    let _ = self.check_expr(value, None, false);
+                    return self.dummy(None);
+                }
+                let dummy = CheckedExpr::Bool(false);
+                return self.finish_class_set(dummy, id, member, value, op);
+            }
+        }
         if self.peek_type(&member.object).is_some_and(|ty| {
-            ty.is_class() || ty.optional_inner().is_some_and(|inner| inner.is_class())
+            ty.is_object() || ty.optional_inner().is_some_and(|inner| inner.is_object())
         }) {
             let object = self.check_expr(&member.object, None, false);
             let object = self.adopt_object(object, member.object.span());
@@ -4199,6 +4534,7 @@ impl<'a> Checker<'a> {
                 value: Box::new(value),
                 ty: element,
                 text,
+                limit: array_ty.limit(),
                 file,
                 line,
                 column,
@@ -4238,6 +4574,7 @@ impl<'a> Checker<'a> {
             end_column,
         };
         let value = self.store_value(op, current, value, element, false, value.span());
+        let limit = if text { None } else { object.ty().limit() };
         CheckedExpr::IndexSet {
             place: None,
             object: Some(Box::new(object)),
@@ -4245,6 +4582,7 @@ impl<'a> Checker<'a> {
             value: Box::new(value),
             ty: element,
             text,
+            limit,
             file,
             line,
             column,
@@ -4400,16 +4738,8 @@ impl<'a> Checker<'a> {
         let CanonicalType::Class(id) = object.ty() else {
             return None;
         };
-        let Some(index) = self.classes[id.0 as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == member.member.name)
-        else {
-            if self.classes[id.0 as usize]
-                .methods
-                .iter()
-                .any(|method| method.name == member.member.name)
-            {
+        let Some((owner, index)) = self.locate_field(id, &member.member.name) else {
+            if self.has_method_name(id, &member.member.name) {
                 self.error(
                     member.span,
                     format!("method '{}' must be called", member.member.name),
@@ -4422,11 +4752,12 @@ impl<'a> Checker<'a> {
             }
             return None;
         };
-        let public = self.classes[id.0 as usize].fields[index].public;
-        let const_field = self.classes[id.0 as usize].fields[index].const_field;
-        let ty = self.classes[id.0 as usize].fields[index].ty;
-        let name = self.classes[id.0 as usize].fields[index].name.clone();
-        if !public && self.current_class != Some(id) {
+        let public = self.classes[owner.0 as usize].fields[index].public;
+        let protected = self.classes[owner.0 as usize].fields[index].protected;
+        let const_field = self.classes[owner.0 as usize].fields[index].const_field;
+        let ty = self.classes[owner.0 as usize].fields[index].ty;
+        let name = self.classes[owner.0 as usize].fields[index].name.clone();
+        if !self.member_visible(public, protected, owner) {
             self.error(
                 member.member.span,
                 format!("field '{name}' is not accessible"),
@@ -4446,7 +4777,7 @@ impl<'a> Checker<'a> {
         let (file, line, column, end_column) = self.located(member.span);
         Some(ArrayPlace::ClassField {
             object: Box::new(object),
-            class: id,
+            class: owner,
             field: index,
             ty,
             file,
@@ -4598,12 +4929,15 @@ impl<'a> Checker<'a> {
                 | "sort"
         );
         if self.peek_type(&member.object).is_some_and(|ty| {
-            ty.is_class() || ty.optional_inner().is_some_and(|inner| inner.is_class())
+            ty.is_object() || ty.optional_inner().is_some_and(|inner| inner.is_object())
         }) {
             let object = self.check_expr(&member.object, None, false);
             let object = self.adopt_object(object, member.object.span());
             if let CanonicalType::Class(id) = object.ty() {
                 return self.finish_class_call(object, id, member, arguments, span);
+            }
+            if let CanonicalType::Interface(id) = object.ty() {
+                return self.finish_interface_call(object, id, member, arguments, span);
             }
         }
         if let Some(place) = self.check_place(&member.object, mutating) {
@@ -5752,8 +6086,13 @@ impl<'a> Checker<'a> {
             None => {
                 if ident.name == "this" && self.current_static {
                     self.error(ident.span, "static method cannot use 'this'");
-                } else if self.class_names.contains_key(&ident.name) {
-                    self.error(ident.span, format!("construct '{}' with new", ident.name));
+                } else if self.class_names.contains_key(&ident.name)
+                    || self.interface_names.contains_key(&ident.name)
+                {
+                    self.error(
+                        ident.span,
+                        format!("construct '{}' with new or a call", ident.name),
+                    );
                 } else {
                     self.error(ident.span, format!("unknown name '{}'", ident.name));
                 }
@@ -5869,6 +6208,199 @@ impl<'a> Checker<'a> {
             .unwrap_or_else(|| "unknown".to_string())
     }
 
+    fn interface_name(&self, id: InterfaceId) -> String {
+        self.interfaces
+            .get(id.0 as usize)
+            .map(|interface| interface.name.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn inherits(&self, child: ClassId, ancestor: ClassId) -> bool {
+        let mut current = self.classes.get(child.0 as usize).and_then(|class| class.parent);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.classes.get(id.0 as usize).and_then(|class| class.parent);
+        }
+        false
+    }
+
+    fn class_implements(&self, class: ClassId, iface: InterfaceId) -> bool {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if self
+                .classes
+                .get(id.0 as usize)
+                .is_some_and(|info| info.implements.contains(&iface))
+            {
+                return true;
+            }
+            current = self.classes.get(id.0 as usize).and_then(|info| info.parent);
+        }
+        false
+    }
+
+    fn assignable(&self, from: CanonicalType, to: CanonicalType) -> bool {
+        match (from, to) {
+            (CanonicalType::Class(child), CanonicalType::Class(parent)) => {
+                child == parent || self.inherits(child, parent)
+            }
+            (CanonicalType::Class(class), CanonicalType::Interface(iface)) => {
+                self.class_implements(class, iface)
+            }
+            _ => false,
+        }
+    }
+
+    fn member_visible(&self, public: bool, protected: bool, owner: ClassId) -> bool {
+        if public {
+            return true;
+        }
+        let Some(current) = self.current_class else {
+            return false;
+        };
+        current == owner || (protected && self.inherits(current, owner))
+    }
+
+    fn locate_field(&self, start: ClassId, name: &str) -> Option<(ClassId, usize)> {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            if let Some(index) = self.classes[id.0 as usize]
+                .fields
+                .iter()
+                .position(|field| field.name == name)
+            {
+                return Some((id, index));
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        None
+    }
+
+    fn has_method_name(&self, start: ClassId, name: &str) -> bool {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            if self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .any(|method| method.name == name)
+            {
+                return true;
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        false
+    }
+
+    fn note_deprecated(&mut self, deprecated: bool, span: Span, name: &str) {
+        if deprecated {
+            self.warn(span, format!("'{name}' is deprecated"));
+        }
+    }
+
+    fn collect_methods(&self, start: ClassId, name: &str, want_static: bool) -> Vec<(ClassId, usize)> {
+        let mut found = Vec::new();
+        let mut current = Some(start);
+        while let Some(id) = current {
+            for (index, method) in self.classes[id.0 as usize].methods.iter().enumerate() {
+                if method.name != name || method.is_static != want_static {
+                    continue;
+                }
+                let hidden = found.iter().any(|(owner, other): &(ClassId, usize)| {
+                    self.same_params(
+                        &self.classes[owner.0 as usize].methods[*other].params,
+                        &method.params,
+                    )
+                });
+                if !hidden {
+                    found.push((id, index));
+                }
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        found
+    }
+
+    fn adaptable(&self, from: CanonicalType, to: CanonicalType, auto: bool) -> bool {
+        if from == to || self.assignable(from, to) {
+            return true;
+        }
+        if let Some(inner) = to.optional_inner() {
+            if from == inner || self.assignable(from, inner) {
+                return true;
+            }
+            if auto && crate::semantic::convert::conversion(from, inner).is_some() {
+                return true;
+            }
+        }
+        auto && crate::semantic::convert::conversion(from, to).is_some()
+    }
+
+    fn resolve_methods(
+        &mut self,
+        start: ClassId,
+        name: &str,
+        want_static: bool,
+        arguments: &[Expr],
+        span: Span,
+    ) -> Option<(ClassId, usize, Vec<CheckedExpr>)> {
+        let found = self.collect_methods(start, name, want_static);
+        if found.is_empty() {
+            return None;
+        }
+        if found.len() == 1 {
+            let (class, index) = found[0];
+            let params = self.classes[class.0 as usize].methods[index]
+                .params
+                .iter()
+                .map(|param| (param.ty, param.auto))
+                .collect::<Vec<_>>();
+            let deprecated = self.classes[class.0 as usize].methods[index].deprecated;
+            self.note_deprecated(deprecated, span, name);
+            let args = self.check_arguments(arguments, &params, span);
+            return Some((class, index, args));
+        }
+        let prelim = arguments
+            .iter()
+            .map(|argument| self.check_expr(argument, None, false))
+            .collect::<Vec<_>>();
+        let matches = found
+            .iter()
+            .copied()
+            .filter(|(class, index)| {
+                let params = &self.classes[class.0 as usize].methods[*index].params;
+                params.len() == prelim.len()
+                    && params.iter().zip(&prelim).all(|(param, argument)| {
+                        self.adaptable(argument.ty(), param.ty, param.auto)
+                    })
+            })
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            self.error(
+                span,
+                format!("no overload of '{name}' matches the arguments"),
+            );
+            return None;
+        }
+        if matches.len() > 1 {
+            self.error(span, format!("ambiguous call to '{name}'"));
+            return None;
+        }
+        let (class, index) = matches[0];
+        let params = self.classes[class.0 as usize].methods[index].params.clone();
+        let deprecated = self.classes[class.0 as usize].methods[index].deprecated;
+        self.note_deprecated(deprecated, span, name);
+        let args = prelim
+            .into_iter()
+            .zip(arguments.iter().zip(params))
+            .map(|(argument, (source, param))| {
+                self.apply_conversion(argument, param.ty, param.auto, source.span())
+            })
+            .collect();
+        Some((class, index, args))
+    }
+
     fn collect_classes(&mut self, program: &Program) {
         for declaration in &program.classes {
             if declaration.name.name == "Type" {
@@ -5876,6 +6408,13 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.reject_reserved_name(&declaration.name.name, declaration.name.span) {
+                continue;
+            }
+            if self.interface_names.contains_key(&declaration.name.name) {
+                self.error(
+                    declaration.name.span,
+                    format!("'{}' is already declared", declaration.name.name),
+                );
                 continue;
             }
             if let Some(previous) = self.class_names.get(&declaration.name.name).copied() {
@@ -5906,21 +6445,24 @@ impl<'a> Checker<'a> {
                     auto: field.conversion == ConversionMode::Auto,
                     const_field: field.const_field,
                     public: field.public,
+                    protected: field.protected,
+                    is_static: field.is_static,
+                    deprecated: field.deprecated,
                     span: field.span,
                 });
             }
             let mut methods = Vec::new();
             for method in &declaration.methods {
                 let _ = self.reject_reserved_name(&method.name.name, method.name.span);
-                if seen
-                    .insert(method.name.name.clone(), method.name.span)
-                    .is_some()
+                if seen.contains_key(&method.name.name)
+                    && fields.iter().any(|field| field.name == method.name.name)
                 {
                     self.error(
                         method.name.span,
                         format!("duplicate member '{}'", method.name.name),
                     );
                 }
+                seen.insert(method.name.name.clone(), method.name.span);
                 methods.push(ClassMethodInfo {
                     name: method.name.name.clone(),
                     params: Vec::new(),
@@ -5928,7 +6470,13 @@ impl<'a> Checker<'a> {
                     ret: CanonicalType::Void,
                     ret_syntax: method.return_type.clone(),
                     public: method.public,
+                    protected: method.protected,
                     is_static: method.is_static,
+                    is_override: method.is_override,
+                    is_abstract: method.is_abstract,
+                    is_final: method.is_final,
+                    is_virtual: false,
+                    deprecated: method.deprecated,
                     mutating: false,
                     leaks: false,
                     span: method.span,
@@ -5938,15 +6486,65 @@ impl<'a> Checker<'a> {
                 params: Vec::new(),
                 param_syntax: self.raw_params(&init.parameters),
                 public: init.public,
+                protected: init.protected,
+                deprecated: init.deprecated,
             });
             let id = ClassId(self.classes.len() as u32);
             self.class_names.insert(declaration.name.name.clone(), id);
             self.classes.push(ClassInfo {
                 name: declaration.name.name.clone(),
                 span: declaration.span,
+                parent: None,
+                parent_name: declaration
+                    .parent
+                    .as_ref()
+                    .map(|name| (name.name.clone(), name.span)),
+                interface_names: declaration
+                    .interfaces
+                    .iter()
+                    .map(|name| (name.name.clone(), name.span))
+                    .collect(),
+                implements: Vec::new(),
+                abstract_class: declaration.abstract_class,
+                final_class: declaration.final_class,
                 fields,
                 methods,
                 init,
+            });
+        }
+    }
+
+    fn collect_interfaces(&mut self, program: &Program) {
+        for declaration in &program.interfaces {
+            if self.class_names.contains_key(&declaration.name.name)
+                || self.interface_names.contains_key(&declaration.name.name)
+            {
+                self.error(
+                    declaration.name.span,
+                    format!("'{}' is already declared", declaration.name.name),
+                );
+                continue;
+            }
+            let methods = declaration
+                .methods
+                .iter()
+                .map(|method| IfaceMethodInfo {
+                    name: method.name.name.clone(),
+                    params: Vec::new(),
+                    param_syntax: self.raw_params(&method.parameters),
+                    ret: CanonicalType::Void,
+                    ret_syntax: method.return_type.clone(),
+                    deprecated: method.deprecated,
+                    span: method.span,
+                })
+                .collect();
+            let id = InterfaceId(self.interfaces.len() as u32);
+            self.interface_names
+                .insert(declaration.name.name.clone(), id);
+            self.interfaces.push(InterfaceInfo {
+                name: declaration.name.name.clone(),
+                methods,
+                span: declaration.span,
             });
         }
     }
@@ -6103,6 +6701,362 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        let interface_count = self.interfaces.len();
+        for index in 0..interface_count {
+            let method_count = self.interfaces[index].methods.len();
+            for method_index in 0..method_count {
+                let syntax = self.interfaces[index].methods[method_index]
+                    .ret_syntax
+                    .clone();
+                let span = self.interfaces[index].methods[method_index].span;
+                let ret = self.resolve_type(&syntax);
+                let raw = self.interfaces[index].methods[method_index]
+                    .param_syntax
+                    .clone();
+                let params = self.resolve_raw_params(&raw);
+                self.interfaces[index].methods[method_index].ret = ret;
+                self.interfaces[index].methods[method_index].params = params;
+                let _ = span;
+            }
+        }
+    }
+
+    fn link_classes(&mut self) {
+        let count = self.classes.len();
+        for index in 0..count {
+            let Some((name, span)) = self.classes[index].parent_name.clone() else {
+                continue;
+            };
+            let Some(parent) = self.class_names.get(&name).copied() else {
+                self.error(span, format!("unknown class '{name}'"));
+                continue;
+            };
+            if parent.0 as usize == index {
+                self.error(span, format!("class '{name}' cannot extend itself"));
+                continue;
+            }
+            self.classes[index].parent = Some(parent);
+        }
+        for index in 0..count {
+            let mut seen = Vec::new();
+            let mut current = Some(ClassId(index as u32));
+            while let Some(id) = current {
+                if seen.contains(&id) {
+                    self.error(
+                        self.classes[index].span,
+                        format!(
+                            "inheritance cycle involving '{}'",
+                            self.classes[index].name
+                        ),
+                    );
+                    self.classes[index].parent = None;
+                    break;
+                }
+                seen.push(id);
+                current = self.classes[id.0 as usize].parent;
+            }
+        }
+        for index in 0..count {
+            let Some(parent) = self.classes[index].parent else {
+                continue;
+            };
+            if self.classes[parent.0 as usize].final_class {
+                let parent_name = self.classes[parent.0 as usize].name.clone();
+                self.error(
+                    self.classes[index].span,
+                    format!("cannot extend final class '{parent_name}'"),
+                );
+            }
+            let own = self.classes[index]
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.span))
+                .collect::<Vec<_>>();
+            let mut ancestor = Some(parent);
+            while let Some(id) = ancestor {
+                for (name, span) in &own {
+                    if self.classes[id.0 as usize]
+                        .fields
+                        .iter()
+                        .any(|field| field.name == *name)
+                    {
+                        self.error(span.clone(), format!("duplicate member '{name}'"));
+                    }
+                }
+                ancestor = self.classes[id.0 as usize].parent;
+            }
+        }
+        for index in 0..count {
+            let names = self.classes[index].interface_names.clone();
+            let mut implements = Vec::new();
+            for (name, span) in names {
+                let Some(id) = self.interface_names.get(&name).copied() else {
+                    self.error(span, format!("unknown interface '{name}'"));
+                    continue;
+                };
+                if implements.contains(&id) {
+                    self.error(span, format!("interface '{name}' is implemented twice"));
+                    continue;
+                }
+                implements.push(id);
+            }
+            self.classes[index].implements = implements;
+        }
+    }
+
+    fn check_inheritance(&mut self) {
+        let count = self.classes.len();
+        for index in 0..count {
+            let method_count = self.classes[index].methods.len();
+            for left in 0..method_count {
+                for right in (left + 1)..method_count {
+                    let same_name = self.classes[index].methods[left].name
+                        == self.classes[index].methods[right].name;
+                    let same_sig = self.same_params(
+                        &self.classes[index].methods[left].params,
+                        &self.classes[index].methods[right].params,
+                    );
+                    if same_name && same_sig {
+                        let name = self.classes[index].methods[right].name.clone();
+                        let span = self.classes[index].methods[right].span;
+                        self.error(span, format!("duplicate method '{name}'"));
+                    }
+                }
+            }
+        }
+        for index in 0..count {
+            let id = ClassId(index as u32);
+            let method_count = self.classes[index].methods.len();
+            for method_index in 0..method_count {
+                let is_static = self.classes[index].methods[method_index].is_static;
+                let is_override = self.classes[index].methods[method_index].is_override;
+                let is_abstract = self.classes[index].methods[method_index].is_abstract;
+                let is_final = self.classes[index].methods[method_index].is_final;
+                let public = self.classes[index].methods[method_index].public;
+                let protected = self.classes[index].methods[method_index].protected;
+                let name = self.classes[index].methods[method_index].name.clone();
+                let span = self.classes[index].methods[method_index].span;
+                let ret = self.classes[index].methods[method_index].ret;
+                let params = self.classes[index].methods[method_index].params.clone();
+                if is_static && is_override {
+                    self.error(span, format!("@static and @override cannot be combined"));
+                }
+                if is_abstract && is_static {
+                    self.error(span, "a static method cannot be abstract");
+                }
+                if is_abstract && is_final {
+                    self.error(span, "an abstract method cannot be final");
+                }
+                if is_abstract && !public && !protected {
+                    self.error(span, format!("abstract method '{name}' cannot be private"));
+                }
+                if is_abstract {
+                    self.classes[index].methods[method_index].is_virtual = true;
+                }
+                if is_abstract && !self.classes[index].abstract_class {
+                    let class_name = self.classes[index].name.clone();
+                    self.error(
+                        span,
+                        format!("concrete class '{class_name}' cannot declare abstract method '{name}'"),
+                    );
+                }
+                let parent_method = self.classes[index].parent.and_then(|parent| {
+                    self.find_method(parent, &name, &params, is_static)
+                });
+                let interface_method = !is_static
+                    && self.matches_interface_method(ClassId(index as u32), &name, &params, ret);
+                if is_override {
+                    if let Some((owner, other)) = parent_method {
+                        if self.classes[owner.0 as usize].methods[other].is_final {
+                            self.error(span, format!("final method '{name}' cannot be overridden"));
+                        }
+                        let parent_ret = self.classes[owner.0 as usize].methods[other].ret;
+                        if parent_ret != ret {
+                            self.error(
+                                span,
+                                format!(
+                                    "override of '{name}' must return '{}'",
+                                    self.spell(parent_ret)
+                                ),
+                            );
+                        }
+                        self.classes[index].methods[method_index].is_virtual = true;
+                        self.classes[owner.0 as usize].methods[other].is_virtual = true;
+                        self.mark_override_chain(owner, other);
+                    } else if !interface_method {
+                        self.error(
+                            span,
+                            format!("method '{name}' does not override a parent method"),
+                        );
+                    }
+                } else if !is_static && (parent_method.is_some() || interface_method) {
+                    self.error(
+                        span,
+                        format!("method '{name}' overrides a parent method and needs @override"),
+                    );
+                }
+            }
+            if !self.classes[index].abstract_class {
+                self.require_implementations(id);
+            }
+            self.require_interfaces(id);
+        }
+    }
+
+    fn matches_interface_method(
+        &self,
+        class: ClassId,
+        name: &str,
+        params: &[ParamInfo],
+        ret: CanonicalType,
+    ) -> bool {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            for iface in &self.classes[id.0 as usize].implements {
+                if self.interfaces[iface.0 as usize].methods.iter().any(|method| {
+                    method.name == name
+                        && method.ret == ret
+                        && method.params.len() == params.len()
+                        && method
+                            .params
+                            .iter()
+                            .zip(params)
+                            .all(|(left, right)| left.ty == right.ty)
+                }) {
+                    return true;
+                }
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        false
+    }
+
+    fn same_params(&self, left: &[ParamInfo], right: &[ParamInfo]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|(left, right)| left.ty == right.ty)
+    }
+
+    fn find_method(
+        &self,
+        start: ClassId,
+        name: &str,
+        params: &[ParamInfo],
+        is_static: bool,
+    ) -> Option<(ClassId, usize)> {
+        let mut current = Some(start);
+        while let Some(id) = current {
+            if let Some(index) = self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .position(|method| {
+                    method.name == name
+                        && method.is_static == is_static
+                        && self.same_params(&method.params, params)
+                })
+            {
+                return Some((id, index));
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        None
+    }
+
+    fn mark_override_chain(&mut self, mut class: ClassId, mut index: usize) {
+        while let Some(parent) = self.classes[class.0 as usize].parent {
+            let name = self.classes[class.0 as usize].methods[index].name.clone();
+            let params = self.classes[class.0 as usize].methods[index].params.clone();
+            let is_static = self.classes[class.0 as usize].methods[index].is_static;
+            let Some((owner, other)) = self.find_method(parent, &name, &params, is_static) else {
+                break;
+            };
+            self.classes[owner.0 as usize].methods[other].is_virtual = true;
+            if !self.classes[owner.0 as usize].methods[other].is_override
+                && !self.classes[owner.0 as usize].methods[other].is_abstract
+            {
+                break;
+            }
+            class = owner;
+            index = other;
+        }
+    }
+
+    fn require_implementations(&mut self, class: ClassId) {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            let abstracts = self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .filter(|method| method.is_abstract)
+                .map(|method| (method.name.clone(), method.params.clone(), method.span))
+                .collect::<Vec<_>>();
+            for (name, params, span) in abstracts {
+                if !self.has_concrete(class, &name, &params) {
+                    let class_name = self.classes[class.0 as usize].name.clone();
+                    self.error(
+                        self.classes[class.0 as usize].span,
+                        format!("class '{class_name}' must implement '{name}'"),
+                    );
+                    let _ = span;
+                }
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+    }
+
+    fn has_concrete(&self, class: ClassId, name: &str, params: &[ParamInfo]) -> bool {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if self.classes[id.0 as usize].methods.iter().any(|method| {
+                !method.is_static
+                    && !method.is_abstract
+                    && method.name == name
+                    && self.same_params(&method.params, params)
+            }) {
+                return true;
+            }
+            current = self.classes[id.0 as usize].parent;
+        }
+        false
+    }
+
+    fn require_interfaces(&mut self, class: ClassId) {
+        let concrete = !self.classes[class.0 as usize].abstract_class;
+        let implements = self.classes[class.0 as usize].implements.clone();
+        for iface in implements {
+            let methods = self.interfaces[iface.0 as usize]
+                .methods
+                .iter()
+                .map(|method| {
+                    (
+                        method.name.clone(),
+                        method.params.clone(),
+                        method.ret,
+                        method.span,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let iface_name = self.interfaces[iface.0 as usize].name.clone();
+            for (name, params, ret, span) in methods {
+                let found = self.find_method(class, &name, &params, false);
+                let ok = found.is_some_and(|(owner, index)| {
+                    let method = &self.classes[owner.0 as usize].methods[index];
+                    method.ret == ret
+                        && method.public
+                        && (!concrete || !method.is_abstract)
+                });
+                if !ok {
+                    let class_name = self.classes[class.0 as usize].name.clone();
+                    self.error(
+                        self.classes[class.0 as usize].span,
+                        format!("class '{class_name}' must implement '{iface_name}.{name}'"),
+                    );
+                    let _ = span;
+                }
+            }
+        }
     }
 
     fn prepare_class_effects(&mut self, program: &Program) {
@@ -6166,10 +7120,12 @@ impl<'a> Checker<'a> {
             } else {
                 None
             };
+            let is_static = self.classes[id.0 as usize].fields[index].is_static;
             checked_fields.push(CheckedClassField {
                 name,
                 ty,
                 const_field,
+                is_static,
                 initializer,
             });
         }
@@ -6192,14 +7148,24 @@ impl<'a> Checker<'a> {
                 false,
             );
             self.in_init = false;
+            let saw_super = init
+                .body
+                .statements
+                .iter()
+                .any(|statement| matches!(statement, Stmt::Super(_)));
+            let implicit_super = self.finish_super_requirement(id, init.span, saw_super);
             Some(CheckedInit {
                 params: params
                     .into_iter()
                     .map(|param| (param.name, param.ty))
                     .collect(),
                 body,
+                implicit_super,
             })
         } else {
+            if self.classes[id.0 as usize].parent.is_some() {
+                let _ = self.finish_super_requirement(id, declaration.span, false);
+            }
             None
         };
         let mut methods = Vec::new();
@@ -6208,8 +7174,13 @@ impl<'a> Checker<'a> {
             let ret = self.classes[id.0 as usize].methods[index].ret;
             let mutating = self.classes[id.0 as usize].methods[index].mutating;
             let is_static = self.classes[id.0 as usize].methods[index].is_static;
+            let is_abstract = self.classes[id.0 as usize].methods[index].is_abstract;
+            let is_virtual = self.classes[id.0 as usize].methods[index].is_virtual;
             let name = self.classes[id.0 as usize].methods[index].name.clone();
-            let body = self.check_member_body(
+            let body = if is_abstract {
+                Vec::new()
+            } else {
+                self.check_member_body(
                 id,
                 &params,
                 ret,
@@ -6218,7 +7189,8 @@ impl<'a> Checker<'a> {
                 &name,
                 true,
                 is_static,
-            );
+            )
+            };
             methods.push(CheckedMethod {
                 name,
                 params: params
@@ -6229,14 +7201,64 @@ impl<'a> Checker<'a> {
                 body,
                 mutating,
                 is_static,
+                is_abstract,
+                is_virtual,
             });
         }
         Some(CheckedClass {
             name: declaration.name.name.clone(),
+            parent: self.classes[id.0 as usize].parent,
+            implements: self.classes[id.0 as usize].implements.clone(),
+            abstract_class: self.classes[id.0 as usize].abstract_class,
             fields: checked_fields,
             init,
             methods,
         })
+    }
+
+    fn finish_super_requirement(&mut self, id: ClassId, span: Span, saw_super: bool) -> bool {
+        let Some(parent) = self.classes[id.0 as usize].parent else {
+            if saw_super {
+                self.error(span, "super requires a parent class");
+            }
+            return false;
+        };
+        if saw_super {
+            return false;
+        }
+        let needs_args = self.classes[parent.0 as usize]
+            .init
+            .as_ref()
+            .is_some_and(|init| !init.params.is_empty());
+        if needs_args {
+            let parent_name = self.classes[parent.0 as usize].name.clone();
+            self.error(
+                span,
+                format!("constructor must call super for '{parent_name}'"),
+            );
+            false
+        } else {
+            let public = self.classes[parent.0 as usize]
+                .init
+                .as_ref()
+                .is_none_or(|init| init.public);
+            let protected = self.classes[parent.0 as usize]
+                .init
+                .as_ref()
+                .is_some_and(|init| init.protected);
+            self.current_class = Some(id);
+            if self.classes[parent.0 as usize].init.is_some()
+                && !self.member_visible(public, protected, parent)
+            {
+                let parent_name = self.classes[parent.0 as usize].name.clone();
+                self.error(
+                    span,
+                    format!("constructor of '{parent_name}' is not accessible"),
+                );
+            }
+            self.current_class = None;
+            true
+        }
     }
 
     fn check_member_body(
@@ -6282,11 +7304,15 @@ impl<'a> Checker<'a> {
             }
         }
         let mut checked = Vec::new();
+        let mut super_slot = self.in_init;
         for statement in &body.statements {
+            self.at_super_slot = super_slot;
             if let Some(stmt) = self.check_stmt(statement) {
                 checked.push(stmt);
             }
+            super_slot = false;
         }
+        self.at_super_slot = false;
         if require_return && ret != CanonicalType::Void && !guaranteed_return(&body.statements) {
             self.error(
                 span,
@@ -6311,6 +7337,17 @@ impl<'a> Checker<'a> {
             }
             return self.dummy(None);
         };
+        if self.classes[id.0 as usize].abstract_class {
+            self.error(
+                expr.name.span,
+                format!("cannot construct abstract class '{}'", expr.name.name),
+            );
+        }
+        let deprecated = self.classes[id.0 as usize]
+            .init
+            .as_ref()
+            .is_some_and(|init| init.deprecated);
+        self.note_deprecated(deprecated, expr.name.span, &expr.name.name);
         self.check_construct(id, &expr.arguments, expr.span)
     }
 
@@ -6327,50 +7364,46 @@ impl<'a> Checker<'a> {
             self.error(object.span, format!("unknown class '{}'", object.name));
             return self.dummy(None);
         };
-        let Some(index) = self.classes[id.0 as usize]
-            .methods
-            .iter()
-            .position(|method| method.name == member.member.name)
+        let Some((owner, index, args)) =
+            self.resolve_methods(id, &member.member.name, true, arguments, span)
         else {
-            self.error(
-                member.member.span,
-                format!("unknown method '{}'", member.member.name),
-            );
-            for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+            if self.has_method_name(id, &member.member.name) {
+                let name = member.member.name.clone();
+                let class_name = self.class_name(id);
+                self.error(
+                    member.member.span,
+                    format!("method '{name}' requires an instance of '{class_name}'"),
+                );
+            } else if !self.diagnostics.iter().any(|diagnostic| {
+                diagnostic.span.start.offset == span.start.offset
+                    && (diagnostic.message.contains("ambiguous call")
+                        || diagnostic.message.contains("no overload"))
+            }) {
+                self.error(
+                    member.member.span,
+                    format!("unknown method '{}'", member.member.name),
+                );
             }
             return self.dummy(None);
         };
-        let is_static = self.classes[id.0 as usize].methods[index].is_static;
-        let public = self.classes[id.0 as usize].methods[index].public;
-        let ret = self.classes[id.0 as usize].methods[index].ret;
-        let params = self.classes[id.0 as usize].methods[index]
-            .params
-            .iter()
-            .map(|param| (param.ty, param.auto))
-            .collect::<Vec<_>>();
-        let name = self.classes[id.0 as usize].methods[index].name.clone();
-        let class_name = self.class_name(id);
-        if !is_static {
-            self.error(
-                member.member.span,
-                format!("method '{name}' requires an instance of '{class_name}'"),
-            );
-        }
-        if !public && self.current_class != Some(id) {
+        let public = self.classes[owner.0 as usize].methods[index].public;
+        let protected = self.classes[owner.0 as usize].methods[index].protected;
+        let ret = self.classes[owner.0 as usize].methods[index].ret;
+        let name = self.classes[owner.0 as usize].methods[index].name.clone();
+        if !self.member_visible(public, protected, owner) {
             self.error(
                 member.member.span,
                 format!("method '{name}' is not accessible"),
             );
         }
-        let args = self.check_arguments(arguments, &params, span);
         let (file, line, column, end_column) = self.located(span);
         CheckedExpr::ClassCall {
-            class: id,
+            class: owner,
             method: index,
             object: None,
             args,
             ty: ret,
+            direct: false,
             file,
             line,
             column,
@@ -6380,13 +7413,16 @@ impl<'a> Checker<'a> {
 
     fn check_construct(&mut self, id: ClassId, arguments: &[Expr], span: Span) -> CheckedExpr {
         let name = self.class_name(id);
-        let init = self.classes[id.0 as usize]
-            .init
-            .as_ref()
-            .map(|init| (init.public, init.params.clone()));
+        let init = self.classes[id.0 as usize].init.as_ref().map(|init| {
+            (
+                init.public,
+                init.protected,
+                init.params.clone(),
+            )
+        });
         let (file, line, column, end_column) = self.located(span);
-        let args = if let Some((public, params)) = init {
-            if !public && self.current_class != Some(id) {
+        let args = if let Some((public, protected, params)) = init {
+            if !self.member_visible(public, protected, id) {
                 self.error(span, format!("constructor of '{name}' is not accessible"));
             }
             let pairs = params
@@ -6423,32 +7459,27 @@ impl<'a> Checker<'a> {
         id: ClassId,
         expr: &MemberExpr,
     ) -> CheckedExpr {
-        if let Some(index) = self.classes[id.0 as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == expr.member.name)
-        {
-            let public = self.classes[id.0 as usize].fields[index].public;
-            let ty = self.classes[id.0 as usize].fields[index].ty;
-            let name = self.classes[id.0 as usize].fields[index].name.clone();
-            if !public && self.current_class != Some(id) {
+        if let Some((owner, index)) = self.locate_field(id, &expr.member.name) {
+            let public = self.classes[owner.0 as usize].fields[index].public;
+            let protected = self.classes[owner.0 as usize].fields[index].protected;
+            let ty = self.classes[owner.0 as usize].fields[index].ty;
+            let name = self.classes[owner.0 as usize].fields[index].name.clone();
+            let deprecated = self.classes[owner.0 as usize].fields[index].deprecated;
+            if !self.member_visible(public, protected, owner) {
                 self.error(
                     expr.member.span,
                     format!("field '{name}' is not accessible"),
                 );
             }
+            self.note_deprecated(deprecated, expr.member.span, &name);
             return CheckedExpr::ClassGet {
                 object: Box::new(object),
-                class: id,
+                class: owner,
                 field: index,
                 ty,
             };
         }
-        if self.classes[id.0 as usize]
-            .methods
-            .iter()
-            .any(|method| method.name == expr.member.name)
-        {
+        if self.has_method_name(id, &expr.member.name) {
             self.error(
                 expr.span,
                 format!("method '{}' must be called", expr.member.name),
@@ -6470,16 +7501,8 @@ impl<'a> Checker<'a> {
         value: &Expr,
         op: Option<BinaryOperator>,
     ) -> CheckedExpr {
-        let Some(index) = self.classes[id.0 as usize]
-            .fields
-            .iter()
-            .position(|field| field.name == member.member.name)
-        else {
-            if self.classes[id.0 as usize]
-                .methods
-                .iter()
-                .any(|method| method.name == member.member.name)
-            {
+        let Some((owner, index)) = self.locate_field(id, &member.member.name) else {
+            if self.has_method_name(id, &member.member.name) {
                 self.error(
                     member.span,
                     format!("method '{}' must be called", member.member.name),
@@ -6493,18 +7516,22 @@ impl<'a> Checker<'a> {
             let _ = self.check_expr(value, None, false);
             return self.dummy(None);
         };
-        let public = self.classes[id.0 as usize].fields[index].public;
-        let const_field = self.classes[id.0 as usize].fields[index].const_field;
-        let ty = self.classes[id.0 as usize].fields[index].ty;
-        let auto = self.classes[id.0 as usize].fields[index].auto;
-        let name = self.classes[id.0 as usize].fields[index].name.clone();
-        if !public && self.current_class != Some(id) {
+        let public = self.classes[owner.0 as usize].fields[index].public;
+        let protected = self.classes[owner.0 as usize].fields[index].protected;
+        let const_field = self.classes[owner.0 as usize].fields[index].const_field;
+        let is_static = self.classes[owner.0 as usize].fields[index].is_static;
+        let ty = self.classes[owner.0 as usize].fields[index].ty;
+        let auto = self.classes[owner.0 as usize].fields[index].auto;
+        let name = self.classes[owner.0 as usize].fields[index].name.clone();
+        let deprecated = self.classes[owner.0 as usize].fields[index].deprecated;
+        self.note_deprecated(deprecated, member.member.span, &name);
+        if !self.member_visible(public, protected, owner) {
             self.error(
                 member.member.span,
                 format!("field '{name}' is not accessible"),
             );
         }
-        if const_field && !self.in_init {
+        if const_field && (is_static || !self.in_init) {
             self.error(
                 member.span,
                 format!("cannot assign to constant field '{name}'"),
@@ -6515,7 +7542,7 @@ impl<'a> Checker<'a> {
         }
         let current = CheckedExpr::ClassGet {
             object: Box::new(object.clone()),
-            class: id,
+            class: owner,
             field: index,
             ty,
         };
@@ -6523,7 +7550,7 @@ impl<'a> Checker<'a> {
         let (file, line, column, end_column) = self.located(member.span);
         CheckedExpr::ClassSet {
             object: Box::new(object),
-            class: id,
+            class: owner,
             field: index,
             value: Box::new(value),
             ty,
@@ -6542,17 +7569,11 @@ impl<'a> Checker<'a> {
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
-        let Some(index) = self.classes[id.0 as usize]
-            .methods
-            .iter()
-            .position(|method| method.name == member.member.name)
-        else {
-            if let Some(field) = self.classes[id.0 as usize]
-                .fields
-                .iter()
-                .find(|field| field.name == member.member.name)
-            {
-                let spelled = self.spell(field.ty);
+        let instance = self.collect_methods(id, &member.member.name, false);
+        let statics = self.collect_methods(id, &member.member.name, true);
+        if instance.is_empty() && statics.is_empty() {
+            if let Some((owner, index)) = self.locate_field(id, &member.member.name) {
+                let spelled = self.spell(self.classes[owner.0 as usize].fields[index].ty);
                 self.error(
                     member.span,
                     format!("cannot call a value of type '{spelled}'"),
@@ -6567,18 +7588,20 @@ impl<'a> Checker<'a> {
                 let _ = self.check_expr(argument, None, false);
             }
             return self.dummy(None);
+        }
+        let want_static = instance.is_empty();
+        let Some((owner, index, args)) =
+            self.resolve_methods(id, &member.member.name, want_static, arguments, span)
+        else {
+            return self.dummy(None);
         };
-        let public = self.classes[id.0 as usize].methods[index].public;
-        let is_static = self.classes[id.0 as usize].methods[index].is_static;
-        let mutating = self.classes[id.0 as usize].methods[index].mutating;
-        let ret = self.classes[id.0 as usize].methods[index].ret;
-        let params = self.classes[id.0 as usize].methods[index]
-            .params
-            .iter()
-            .map(|param| (param.ty, param.auto))
-            .collect::<Vec<_>>();
-        let name = self.classes[id.0 as usize].methods[index].name.clone();
-        if !public && self.current_class != Some(id) {
+        let public = self.classes[owner.0 as usize].methods[index].public;
+        let protected = self.classes[owner.0 as usize].methods[index].protected;
+        let is_static = self.classes[owner.0 as usize].methods[index].is_static;
+        let mutating = self.classes[owner.0 as usize].methods[index].mutating;
+        let ret = self.classes[owner.0 as usize].methods[index].ret;
+        let name = self.classes[owner.0 as usize].methods[index].name.clone();
+        if !self.member_visible(public, protected, owner) {
             self.error(
                 member.member.span,
                 format!("method '{name}' is not accessible"),
@@ -6592,14 +7615,14 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        let args = self.check_arguments(arguments, &params, span);
         let (file, line, column, end_column) = self.located(span);
         CheckedExpr::ClassCall {
-            class: id,
+            class: owner,
             method: index,
             object: Some(Box::new(object)),
             args,
             ty: ret,
+            direct: false,
             file,
             line,
             column,
@@ -6932,6 +7955,261 @@ impl<'a> Checker<'a> {
             code,
             help,
         });
+    }
+
+    fn warn(&mut self, span: Span, message: impl Into<String>) {
+        let message = message.into();
+        self.warnings.push(SemanticDiagnostic {
+            source_name: self.source_name.to_string(),
+            span,
+            message,
+            code: "GRF-SEM-035",
+            help: None,
+        });
+    }
+
+    fn finish_named_static_field(&mut self, id: ClassId, expr: &MemberExpr) -> CheckedExpr {
+        let Some((owner, index)) = self.locate_field(id, &expr.member.name) else {
+            if self.has_method_name(id, &expr.member.name) {
+                self.error(
+                    expr.span,
+                    format!("method '{}' must be called", expr.member.name),
+                );
+            } else {
+                self.error(
+                    expr.member.span,
+                    format!("unknown field '{}'", expr.member.name),
+                );
+            }
+            return self.dummy(None);
+        };
+        let (is_static, public, protected, ty, deprecated, name) = {
+            let field = &self.classes[owner.0 as usize].fields[index];
+            (
+                field.is_static,
+                field.public,
+                field.protected,
+                field.ty,
+                field.deprecated,
+                field.name.clone(),
+            )
+        };
+        if !is_static {
+            self.error(
+                expr.member.span,
+                format!("field '{name}' requires an instance"),
+            );
+        }
+        if !self.member_visible(public, protected, owner) {
+            self.error(
+                expr.member.span,
+                format!("field '{name}' is not accessible"),
+            );
+        }
+        self.note_deprecated(deprecated, expr.member.span, &name);
+        CheckedExpr::ClassGet {
+            object: Box::new(CheckedExpr::Bool(false)),
+            class: owner,
+            field: index,
+            ty,
+        }
+    }
+
+    fn finish_super_field(&mut self, expr: &MemberExpr) -> CheckedExpr {
+        let Some(class) = self.current_class else {
+            self.error(expr.span, "super requires a parent class");
+            return self.dummy(None);
+        };
+        if self.current_static {
+            self.error(expr.span, "static method cannot use 'super'");
+            return self.dummy(None);
+        }
+        let Some(parent) = self.classes[class.0 as usize].parent else {
+            self.error(expr.span, "super requires a parent class");
+            return self.dummy(None);
+        };
+        let this = CheckedExpr::Load {
+            name: "this".to_string(),
+            ty: CanonicalType::Class(class),
+        };
+        self.finish_class_get(this, parent, expr)
+    }
+
+    fn check_super_call(
+        &mut self,
+        member: &MemberExpr,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        let Some(class) = self.current_class else {
+            self.error(span, "super requires a parent class");
+            return self.dummy(None);
+        };
+        if self.current_static {
+            self.error(span, "static method cannot use 'super'");
+            return self.dummy(None);
+        }
+        let Some(parent) = self.classes[class.0 as usize].parent else {
+            self.error(span, "super requires a parent class");
+            return self.dummy(None);
+        };
+        let before = self.diagnostics.len();
+        let Some((owner, index, args)) =
+            self.resolve_methods(parent, &member.member.name, false, arguments, span)
+        else {
+            if self.diagnostics.len() == before {
+                self.error(
+                    member.member.span,
+                    format!("unknown method '{}'", member.member.name),
+                );
+            }
+            return self.dummy(None);
+        };
+        if self.classes[owner.0 as usize].methods[index].is_abstract {
+            self.error(
+                member.member.span,
+                format!(
+                    "super cannot call abstract method '{}'",
+                    member.member.name
+                ),
+            );
+        }
+        let ret = self.classes[owner.0 as usize].methods[index].ret;
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::ClassCall {
+            class: owner,
+            method: index,
+            object: Some(Box::new(CheckedExpr::Load {
+                name: "this".to_string(),
+                ty: CanonicalType::Class(class),
+            })),
+            args,
+            ty: ret,
+            direct: true,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
+    fn finish_interface_get(
+        &mut self,
+        _object: CheckedExpr,
+        id: InterfaceId,
+        expr: &MemberExpr,
+    ) -> CheckedExpr {
+        if self.interfaces[id.0 as usize]
+            .methods
+            .iter()
+            .any(|method| method.name == expr.member.name)
+        {
+            self.error(
+                expr.span,
+                format!("method '{}' must be called", expr.member.name),
+            );
+        } else {
+            self.error(
+                expr.member.span,
+                format!(
+                    "interface '{}' has no field '{}'",
+                    self.interface_name(id),
+                    expr.member.name
+                ),
+            );
+        }
+        self.dummy(None)
+    }
+
+    fn finish_interface_call(
+        &mut self,
+        object: CheckedExpr,
+        id: InterfaceId,
+        member: &MemberExpr,
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        let found = self.interfaces[id.0 as usize]
+            .methods
+            .iter()
+            .enumerate()
+            .filter(|(_, method)| method.name == member.member.name)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if found.is_empty() {
+            self.error(
+                member.member.span,
+                format!("unknown method '{}'", member.member.name),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(None);
+        }
+        let chosen = if found.len() == 1 {
+            let index = found[0];
+            let params = self.interfaces[id.0 as usize].methods[index]
+                .params
+                .iter()
+                .map(|param| (param.ty, param.auto))
+                .collect::<Vec<_>>();
+            let args = self.check_arguments(arguments, &params, span);
+            Some((index, args))
+        } else {
+            let prelim = arguments
+                .iter()
+                .map(|argument| self.check_expr(argument, None, false))
+                .collect::<Vec<_>>();
+            let matches = found
+                .iter()
+                .copied()
+                .filter(|index| {
+                    let params = &self.interfaces[id.0 as usize].methods[*index].params;
+                    params.len() == prelim.len()
+                        && params.iter().zip(&prelim).all(|(param, argument)| {
+                            self.adaptable(argument.ty(), param.ty, param.auto)
+                        })
+                })
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                self.error(
+                    span,
+                    format!("ambiguous call to '{}'", member.member.name),
+                );
+                None
+            } else {
+                let index = matches[0];
+                let params = self.interfaces[id.0 as usize].methods[index].params.clone();
+                let args = prelim
+                    .into_iter()
+                    .zip(arguments.iter().zip(params))
+                    .map(|(argument, (source, param))| {
+                        self.apply_conversion(argument, param.ty, param.auto, source.span())
+                    })
+                    .collect();
+                Some((index, args))
+            }
+        };
+        let Some((index, args)) = chosen else {
+            return self.dummy(None);
+        };
+        let method = &self.interfaces[id.0 as usize].methods[index];
+        let ret = method.ret;
+        let deprecated = method.deprecated;
+        let name = method.name.clone();
+        self.note_deprecated(deprecated, span, &name);
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::IfaceCall {
+            interface: id,
+            method: index,
+            object: Box::new(object),
+            args,
+            ty: ret,
+            file,
+            line,
+            column,
+            end_column,
+        }
     }
 }
 

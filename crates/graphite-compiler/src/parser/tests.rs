@@ -1008,16 +1008,19 @@ void main() {
     );
     assert!(omitted.classes[0].init.as_ref().unwrap().public);
 
-    assert_rejected(
+    let child = parse_clean(
         "\
-class Counter extends Other {
-    value: int = 0;
+class Dog extends Animal {
+    int age;
 }
 
 void main() {
 }
 ",
-        "inheritance is not supported",
+    );
+    assert_eq!(
+        child.classes[0].parent.as_ref().map(|name| name.name.as_str()),
+        Some("Animal")
     );
     assert_rejected(
         "\

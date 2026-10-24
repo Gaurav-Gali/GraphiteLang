@@ -139,6 +139,22 @@ pub fn semantic_code(message: &str) -> &'static str {
         "GRF-SEM-010"
     } else if message.contains("short-circuit") {
         "GRF-SEM-011"
+    } else if message.contains("override") {
+        "GRF-SEM-028"
+    } else if message.contains("abstract") || message.contains("must implement") {
+        "GRF-SEM-029"
+    } else if message.contains("cannot extend")
+        || message.contains("final method")
+        || message.contains("final class")
+        || message.contains("inheritance")
+    {
+        "GRF-SEM-030"
+    } else if message.contains("super ") || message.starts_with("super") {
+        "GRF-SEM-031"
+    } else if message.contains("ambiguous call") || message.contains("no overload") {
+        "GRF-SEM-032"
+    } else if message.contains("interface") {
+        "GRF-SEM-033"
     } else if message.contains("not accessible") {
         "GRF-SEM-023"
     } else if message.contains("not initialized")

@@ -1,17 +1,28 @@
 import grf.io;
 
 void main() {
-  str[] arr = io.input(">>> ").split("");
-  auto int[] arr_int = forEach(arr, int (str x) return int(x));
+  auto int n = io.input("n >>> ");
+  int[] arr;
 
-  io.println(arr_int);
-}
-
-int[] forEach(str[] arr, int fn(str x)) {
-  int[] n = [];
-  loop(str i = arr.iter()) {
-    n.push(fn(i));
+  loop(int i = 0; i < n; i++) {
+    arr[i] = int(io.input(">>> "));
   }
 
-  return n;
+  arr = array.forEach(arr, int (int x) {
+    if(x%2 == 0) return x**2;
+    return x;
+  });
+
+  io.println(arr);
+}
+
+class array {
+  @static
+  int[] forEach(int[] arr, int fn(int x)) {
+    loop(int i = 0; i < lengthOf(arr); i++) {
+      arr[i] = fn(arr[i]);
+    }
+
+    return arr;
+  }
 }

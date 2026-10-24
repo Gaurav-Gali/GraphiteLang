@@ -209,6 +209,7 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
         }
         Stmt::Break(_) => write_line(out, prefix, last, "Break"),
         Stmt::Continue(_) => write_line(out, prefix, last, "Continue"),
+        Stmt::Super(_) => write_line(out, prefix, last, "Super"),
         Stmt::Try(try_statement) => {
             write_line(out, prefix, last, "Try");
             let child = child_prefix(prefix, last);
@@ -482,6 +483,7 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             write_line(out, &child, true, "Else");
             write_expression(out, &child_prefix(&child, true), true, &ternary.else_branch);
         }
+        Expr::Super { .. } => write_line(out, prefix, last, "Super"),
         Expr::Parenthesized { expression, .. } => {
             write_line(out, prefix, last, "Parenthesized");
             write_expression(out, &child_prefix(prefix, last), true, expression);

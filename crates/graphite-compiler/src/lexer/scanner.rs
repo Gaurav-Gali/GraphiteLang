@@ -211,6 +211,7 @@ impl<'a> Scanner<'a> {
             '~' => self.emit(TokenKind::Tilde, start, None),
             ':' => self.emit(TokenKind::Colon, start, None),
             '?' => self.emit(TokenKind::Question, start, None),
+            '@' => self.emit(TokenKind::At, start, None),
             ch if is_ident_start(ch) => self.finish_identifier(start),
             _ => self.unexpected(start),
         }
