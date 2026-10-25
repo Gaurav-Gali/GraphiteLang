@@ -2480,4 +2480,20 @@ void main() {
 ",
     );
     assert!(zero_step.contains("step cannot be zero"), "{zero_step}");
+
+    let optional_generics = messages(
+        "\
+T? empty<T>() {
+    return null;
+}
+iter<T>? missing<T>() {
+    return null;
+}
+void main() {
+    int? a = empty<int>();
+    iter<int>? it = missing<int>();
+}
+",
+    );
+    assert!(optional_generics.is_empty(), "{optional_generics}");
 }

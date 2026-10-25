@@ -1,19 +1,32 @@
 import grf.io;
 
-void main(){
-  int[] arr = [1,2,3,4,5];
+void main() {
+  int? b = a<int>();
+  io.println(b);
 
-  iter<int> it = for_each<int>(arr, int (int x) {
-    return x;
-  } );
+  iter<int>? missing = maybe<int>(false, 1);
+  io.println(missing == null);
 
-  loop(int i : it){
-    io.println(i);
+  iter<int>? present = maybe<int>(true, 42);
+  if (present != null) {
+    iter<int> it = present;
+    loop (int n : it) {
+      io.println(n);
+    }
   }
 }
 
-iter<T> for_each<T>(T[] arr, T fn(T x)){
-  loop(int i = 0 ; i < lengthOf(arr) ; i++){
-    emit fn(arr[i]);
+T? a<T>() {
+  return null;
+}
+
+iter<T> one<T>(T value) {
+  emit value;
+}
+
+iter<T>? maybe<T>(bln give, T value) {
+  if (!give) {
+    return null;
   }
+  return one<T>(value);
 }

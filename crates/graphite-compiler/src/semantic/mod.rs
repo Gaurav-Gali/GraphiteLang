@@ -155,6 +155,7 @@ pub enum OptionalKind {
     },
     Param(TypeParamId),
     Generic(GenericId),
+    Iter(IterId),
 }
 
 impl OptionalKind {
@@ -187,6 +188,7 @@ impl OptionalKind {
             },
             OptionalKind::Param(id) => CanonicalType::Param(id),
             OptionalKind::Generic(id) => CanonicalType::Generic(id),
+            OptionalKind::Iter(id) => CanonicalType::Iter(id),
         }
     }
 }
@@ -215,6 +217,7 @@ impl PartialEq for OptionalKind {
                         (OptionalKind::Generic(left), OptionalKind::Generic(right)) => {
                             left == right
                         }
+                        (OptionalKind::Iter(left), OptionalKind::Iter(right)) => left == right,
                         (OptionalKind::Array { .. }, _) | (_, OptionalKind::Array { .. }) => false,
                         _ => true,
                     }
@@ -355,8 +358,7 @@ impl CanonicalType {
             CanonicalType::Optional(_)
             | CanonicalType::Void
             | CanonicalType::ErrorHandle
-            | CanonicalType::Callable(_)
-            | CanonicalType::Iter(_) => {
+            | CanonicalType::Callable(_) => {
                 return None;
             }
             CanonicalType::Int16 => OptionalKind::Int16,
@@ -386,6 +388,7 @@ impl CanonicalType {
             },
             CanonicalType::Param(id) => OptionalKind::Param(id),
             CanonicalType::Generic(id) => OptionalKind::Generic(id),
+            CanonicalType::Iter(id) => OptionalKind::Iter(id),
         };
         Some(CanonicalType::Optional(kind))
     }
@@ -1538,6 +1541,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         specializations: Vec::new(),
         specialized_keys: HashMap::new(),
         instantiation: None,
+        param_substitution: None,
     };
     checker.collect_imports(program);
     checker.collect_interfaces(program);
@@ -1772,6 +1776,10 @@ struct Checker<'a> {
     specialized_keys: HashMap<String, String>,
     /// When set, diagnostics are attributed to a generic instantiation.
     instantiation: Option<String>,
+    /// Active type-parameter → concrete type map while monomorphizing a
+    /// generic function. Named type arguments like `one<T>` resolve through
+    /// this map so nested generic calls see concrete types.
+    param_substitution: Option<Vec<(TypeParamId, CanonicalType)>>,
 }
 
 #[derive(Clone)]
@@ -2010,8 +2018,17 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
+                let resolved = self
+                    .param_substitution
+                    .as_ref()
+                    .and_then(|map| {
+                        map.iter()
+                            .find(|(id, _)| *id == param)
+                            .map(|(_, concrete)| *concrete)
+                    })
+                    .unwrap_or(CanonicalType::Param(param));
                 return self.finish_optional(
-                    self.with_bounds(CanonicalType::Param(param), &syntax.bounds),
+                    self.with_bounds(resolved, &syntax.bounds),
                     syntax,
                 );
             }
@@ -2401,6 +2418,51 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
+    fn type_mentions_param(&self, ty: CanonicalType) -> bool {
+        match ty {
+            CanonicalType::Param(_) => true,
+            CanonicalType::Optional(kind) => self.type_mentions_param(kind.canonical()),
+            CanonicalType::Array { leaf, .. } => match leaf {
+                Leaf::Param(_) => true,
+                Leaf::Generic(id) => self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.type_mentions_param(*arg))
+                }),
+                Leaf::Map(id) => self.maps.get(id.0 as usize).is_some_and(|shape| {
+                    self.type_mentions_param(shape.key) || self.type_mentions_param(shape.value)
+                }),
+                _ => false,
+            },
+            CanonicalType::Generic(id) => {
+                self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.type_mentions_param(*arg))
+                })
+            }
+            CanonicalType::Map(id) => self.maps.get(id.0 as usize).is_some_and(|shape| {
+                self.type_mentions_param(shape.key) || self.type_mentions_param(shape.value)
+            }),
+            CanonicalType::Iter(id) => self
+                .iters
+                .get(id.0 as usize)
+                .is_some_and(|shape| self.type_mentions_param(shape.element)),
+            CanonicalType::Callable(id) => {
+                self.callables.get(id.0 as usize).is_some_and(|signature| {
+                    signature
+                        .params
+                        .iter()
+                        .any(|param| self.type_mentions_param(*param))
+                        || self.type_mentions_param(signature.ret)
+                })
+            }
+            _ => false,
+        }
+    }
+
     fn uses_class_params(&self, ty: CanonicalType, class_params: &[TypeParamId]) -> bool {
         match ty {
             CanonicalType::Param(id) => class_params.contains(&id),
@@ -2426,6 +2488,9 @@ impl<'a> Checker<'a> {
             CanonicalType::Map(id) => self.maps.get(id.0 as usize).is_some_and(|shape| {
                 self.uses_class_params(shape.key, class_params)
                     || self.uses_class_params(shape.value, class_params)
+            }),
+            CanonicalType::Iter(id) => self.iters.get(id.0 as usize).is_some_and(|shape| {
+                self.uses_class_params(shape.element, class_params)
             }),
             CanonicalType::Callable(id) => {
                 self.callables.get(id.0 as usize).is_some_and(|signature| {
@@ -2630,6 +2695,12 @@ impl<'a> Checker<'a> {
             return existing.clone();
         }
         let mangled = Self::mangle_specialization(name, type_args);
+        // While typechecking a generic template, nested calls may still mention
+        // type parameters (`one<T>`). Those are only for signature checking —
+        // do not emit a monomorphized body until the args are concrete.
+        if type_args.iter().any(|ty| self.type_mentions_param(*ty)) {
+            return mangled;
+        }
         let Some(decl) = self.function_asts.get(name).cloned() else {
             return name.to_string();
         };
@@ -2647,7 +2718,10 @@ impl<'a> Checker<'a> {
         };
         let saved_return = self.current_return;
         let saved_instantiation = self.instantiation.clone();
+        let saved_substitution = self.param_substitution.clone();
         self.instantiation = Some(display);
+        self.param_substitution = Some(map.to_vec());
+        self.push_type_params(&signature.type_params);
         let params: Vec<(String, CanonicalType, bool)> = signature
             .params
             .iter()
@@ -2705,6 +2779,8 @@ impl<'a> Checker<'a> {
         }
         self.scopes.pop();
         self.generator_element = saved_generator;
+        self.pop_type_params();
+        self.param_substitution = saved_substitution;
         self.current_return = saved_return;
         self.instantiation = saved_instantiation;
         self.specializations.push(CheckedFn {
