@@ -3,6 +3,8 @@ pub mod convert;
 pub mod diagnostic;
 pub mod heap;
 pub mod io;
+pub mod iter;
 pub mod map;
 pub mod numeric;
 pub mod text;
+pub mod value;

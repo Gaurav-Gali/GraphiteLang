@@ -665,10 +665,10 @@ void main() {
     uint64 count = lengthOf(fixed);
     uint64 same = fixed.length();
     int a, const int b = [8, 9];
-    loop (int value = values.iter()) {
+    loop (int value : values) {
         io.println(value);
     }
-    loop (uint64 idx, int value = values.enumerate()) {
+    loop (uint64 idx, int value : values.enumerate()) {
         io.println(idx);
         io.println(value);
     }
@@ -730,13 +730,12 @@ void main() {
         "import grf.io;\n\nvoid main() {\n    int[] values = [1];\n    str text = f\"{values}\";\n    io.println(values);\n    io.println(str(values));\n    io.println(text);\n}\n",
     );
     assert!(interpolated.is_empty(), "{interpolated}");
-    let outside = messages("void main() {\n    int[] values = [1];\n    values.iter();\n}\n");
-    assert!(
-        outside.contains("can only be used as a loop source"),
-        "{outside}"
+    let outside = messages(
+        "void main() {\n    int[] values = [1];\n    iter<int> it = values.iter();\n    bln more = it.hasNext();\n}\n",
     );
+    assert!(outside.is_empty(), "{outside}");
     let index_type = messages(
-        "void main() {\n    int[] values = [1];\n    loop (int idx, int value = values.enumerate()) {\n        io.println(value);\n    }\n}\n",
+        "void main() {\n    int[] values = [1];\n    loop (int idx, int value : values.enumerate()) {\n        io.println(value);\n    }\n}\n",
     );
     assert!(index_type.contains("uint64"), "{index_type}");
     let constant = messages(
@@ -744,9 +743,9 @@ void main() {
     );
     assert!(constant.contains("cannot assign to constant"), "{constant}");
     let during = messages(
-        "void main() {\n    int[] values = [1, 2];\n    int i = 0;\n    loop (int value = values.iter()) {\n        values[i] = value + 1;\n        values.push(0);\n        i++;\n    }\n}\n",
+        "void main() {\n    int[] values = [1, 2];\n    int i = 0;\n    loop (int value : values) {\n        values[i] = value + 1;\n        values.push(0);\n        i++;\n    }\n}\n",
     );
-    assert!(during.is_empty(), "{during}");
+    assert!(during.contains("while it is being iterated"), "{during}");
     let duplicate = messages("void main() {\n    int a, int a = [1, 2];\n}\n");
     assert!(duplicate.contains("duplicate binding"), "{duplicate}");
     let too_long = messages("void main() {\n    int[3] values = [1, 2, 3, 4];\n}\n");
@@ -1148,7 +1147,7 @@ void main() {
     int kept = scores.getOrDefault(\"Ada\", 0);
     str[] names = scores.keys();
     int total = 0;
-    loop (str key, int value = scores.entries()) {
+    loop (str key, int value : scores.entries()) {
         total = total + value;
     }
     io.println(scores);
@@ -1233,11 +1232,11 @@ void main() {
             "maps do not support slicing",
         ),
         (
-            "void main() { map<str, int> scores = {}; loop (str key = scores.entries()) {} }\n",
+            "void main() { map<str, int> scores = {}; loop (str key : scores.entries()) {} }\n",
             "this loop expects 2 bindings, found 1",
         ),
         (
-            "void main() { map<str, int> scores = {}; loop (int key, str value = scores.entries()) {} }\n",
+            "void main() { map<str, int> scores = {}; loop (int key, str value : scores.entries()) {} }\n",
             "type mismatch: expected 'str', found 'int64'",
         ),
         (
@@ -1362,12 +1361,7 @@ void main() {
     );
     assert!(program.diagnostics.is_empty(), "{:?}", program.diagnostics);
     let rust = generate(program.program.as_ref().unwrap());
-    for name in [
-        "int64[]",
-        "map<str, int64>",
-        "User[]",
-        "map<str, User>",
-    ] {
+    for name in ["int64[]", "map<str, int64>", "User[]", "map<str, User>"] {
         assert!(rust.contains(name), "{name} missing from {rust}");
     }
 
@@ -1401,7 +1395,7 @@ void main() {
             "'typeOf' is a reserved built-in name",
         ),
         (
-            "void main() {\n    int[] items = [1];\n    loop (int typeOf = items.iter()) {\n    }\n}\n",
+            "void main() {\n    int[] items = [1];\n    loop (int typeOf : items) {\n    }\n}\n",
             "'typeOf' is a reserved built-in name",
         ),
         (
@@ -1495,7 +1489,7 @@ fn reserved_identifiers_cannot_be_declaration_names() {
                 "void main() {{\n    int[] items = [1, 2];\n    int {name}, int other = items;\n}}\n"
             ),
             format!(
-                "void main() {{\n    int[] items = [1];\n    loop (int {name} = items.iter()) {{\n    }}\n}}\n"
+                "void main() {{\n    int[] items = [1];\n    loop (int {name} : items) {{\n    }}\n}}\n"
             ),
         ];
         for source in rejected {
@@ -2386,9 +2380,104 @@ void main() {
     assert!(rejected.contains("must implement 'speak'"), "{rejected}");
     assert!(rejected.contains("does not override"), "{rejected}");
     assert!(rejected.contains("final class"), "{rejected}");
-    assert!(rejected.contains("@static and @override cannot be combined"), "{rejected}");
+    assert!(
+        rejected.contains("@static and @override cannot be combined"),
+        "{rejected}"
+    );
     assert!(rejected.contains("final method"), "{rejected}");
-    assert!(rejected.contains("must implement 'Named.label'"), "{rejected}");
-    assert!(rejected.contains("cannot construct abstract class 'Animal'"), "{rejected}");
-    assert!(rejected.contains("cannot construct abstract class 'Shape'"), "{rejected}");
+    assert!(
+        rejected.contains("must implement 'Named.label'"),
+        "{rejected}"
+    );
+    assert!(
+        rejected.contains("cannot construct abstract class 'Animal'"),
+        "{rejected}"
+    );
+    assert!(
+        rejected.contains("cannot construct abstract class 'Shape'"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn generators_and_iterators_typecheck() {
+    let accepted = messages(
+        "\
+iter<T> repeat<T>(T value, int count) {
+    loop (int i = 0; i < count; i++) {
+        emit value;
+    }
+}
+
+void main() {
+    iter<int> numbers = repeat<int>(1, 2);
+    iter<str> words = repeat<str>(\"hi\", 1);
+    loop (int n : numbers) {}
+    loop (chr c : \"ab\") {}
+    iter<int> r = range(0, 5, 1);
+}
+",
+    );
+    assert!(accepted.is_empty(), "{accepted}");
+
+    let missing_args = messages(
+        "\
+iter<T> repeat<T>(T value, int count) {
+    emit value;
+}
+void main() {
+    iter<int> n = repeat(1, 2);
+}
+",
+    );
+    assert!(
+        missing_args.contains("requires type arguments"),
+        "{missing_args}"
+    );
+
+    let bad_emit = messages(
+        "\
+iter<int> bad() {
+    emit \"nope\";
+}
+void main() {}
+",
+    );
+    assert!(bad_emit.contains("expected 'int64'"), "{bad_emit}");
+
+    let valued_return = messages(
+        "\
+iter<int> bad() {
+    emit 1;
+    return 2;
+}
+void main() {}
+",
+    );
+    assert!(
+        valued_return.contains("cannot return a value"),
+        "{valued_return}"
+    );
+
+    let emit_outside = messages(
+        "\
+void bad() {
+    emit 1;
+}
+void main() {}
+",
+    );
+    assert!(
+        emit_outside.contains("emit is only allowed"),
+        "{emit_outside}"
+    );
+
+    let zero_step = messages(
+        "\
+void main() {
+    iter<int> it = range(0, 5, 0);
+}
+",
+    );
+    assert!(zero_step.contains("step cannot be zero"), "{zero_step}");
 }

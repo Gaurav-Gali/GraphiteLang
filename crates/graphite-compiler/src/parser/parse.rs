@@ -171,7 +171,8 @@ impl<'a> Parser<'a> {
                             "a class cannot be static or an override",
                         );
                     }
-                    if let Some(declaration) = self.parse_class(mods.abstract_class, mods.final_class)
+                    if let Some(declaration) =
+                        self.parse_class(mods.abstract_class, mods.final_class)
                     {
                         classes.push(declaration);
                     }
@@ -326,11 +327,13 @@ impl<'a> Parser<'a> {
     fn parse_class(&mut self, abstract_class: bool, final_class: bool) -> Option<ClassDecl> {
         let start = self.bump().span.start;
         let name = self.expect_identifier("expected a class name")?;
+        let type_params = self.parse_type_parameters();
         let mut parent = None;
         let mut interfaces = Vec::new();
         if self.check(TokenKind::KwExtends) {
             self.bump();
             parent = self.expect_identifier("expected a parent class name");
+            self.reject_generic_inheritance();
         }
         if self.check(TokenKind::KwImplements) {
             self.bump();
@@ -338,6 +341,7 @@ impl<'a> Parser<'a> {
                 let Some(interface) = self.expect_identifier("expected an interface name") else {
                     break;
                 };
+                self.reject_generic_inheritance();
                 interfaces.push(interface);
                 if !self.check(TokenKind::Comma) {
                     break;
@@ -374,6 +378,7 @@ impl<'a> Parser<'a> {
         };
         Some(ClassDecl {
             name,
+            type_params,
             parent,
             interfaces,
             abstract_class,
@@ -421,7 +426,11 @@ impl<'a> Parser<'a> {
 
     fn parse_interface_method(&mut self) -> Option<InterfaceMethod> {
         let mods = self.parse_member_mods();
-        if mods.is_static || mods.is_override || mods.is_abstract || mods.is_final || mods.saw_visibility
+        if mods.is_static
+            || mods.is_override
+            || mods.is_abstract
+            || mods.is_final
+            || mods.saw_visibility
         {
             self.error(
                 ParserDiagnosticKind::InvalidDeclaration,
@@ -586,6 +595,7 @@ impl<'a> Parser<'a> {
                     "auto is only valid on a field",
                 );
             }
+            let type_params = self.parse_type_parameters();
             if !self.consume(TokenKind::LeftParen, "expected '(' after method name") {
                 return;
             }
@@ -628,6 +638,7 @@ impl<'a> Parser<'a> {
                 },
                 return_type: ty,
                 name,
+                type_params,
                 parameters,
                 body,
             });
@@ -776,6 +787,7 @@ impl<'a> Parser<'a> {
     fn parse_function(&mut self) -> Option<FunctionDecl> {
         let return_type = self.parse_type()?;
         let name = self.expect_identifier("expected a function name")?;
+        let type_params = self.parse_type_parameters();
         if !self.consume(TokenKind::LeftParen, "expected '(' after function name") {
             self.synchronize_top_level();
             return None;
@@ -790,6 +802,7 @@ impl<'a> Parser<'a> {
         Some(FunctionDecl {
             return_type,
             name,
+            type_params,
             parameters,
             body,
             span,
@@ -856,11 +869,27 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let default = if self.check(TokenKind::Equal) {
+            if callable.is_some() {
+                self.error(
+                    ParserDiagnosticKind::InvalidDeclaration,
+                    self.current().span,
+                    "callable parameters cannot have default values",
+                );
+            }
+            self.bump();
+            let value = self.parse_expression();
+            end = value.span().end;
+            Some(value)
+        } else {
+            None
+        };
         Some(Parameter {
             name,
             ty,
             conversion,
             callable,
+            default,
             span: Span { start, end },
         })
     }
@@ -936,6 +965,9 @@ impl<'a> Parser<'a> {
         }
         if self.check(TokenKind::KwReturn) {
             return Some(self.parse_return());
+        }
+        if self.check(TokenKind::KwEmit) {
+            return Some(self.parse_emit());
         }
         if self.check(TokenKind::KwIf) {
             return Some(self.parse_if());
@@ -1344,6 +1376,16 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_emit(&mut self) -> Stmt {
+        let start = self.bump().span.start;
+        let value = self.parse_expression();
+        let end = self.finish_statement_end(value.span().end, "expected ';' after emit");
+        Stmt::Emit(EmitStmt {
+            value,
+            span: Span { start, end },
+        })
+    }
+
     fn parse_return(&mut self) -> Stmt {
         let start = self.bump().span.start;
         let value = if self.can_start_expression() {
@@ -1403,6 +1445,13 @@ impl<'a> Parser<'a> {
             if let Some(head) = self.parse_binding_head() {
                 if self.check(TokenKind::Comma) {
                     self.parse_iteration(vec![head])
+                } else if self.check(TokenKind::Colon) {
+                    self.bump();
+                    let iterable = self.parse_expression();
+                    LoopKind::Iteration {
+                        bindings: vec![head],
+                        iterable,
+                    }
                 } else if self.check(TokenKind::Equal) {
                     self.bump();
                     let initializer = self.parse_expression();
@@ -1418,6 +1467,11 @@ impl<'a> Parser<'a> {
                         };
                         self.parse_cstyle_tail(Some(declaration))
                     } else {
+                        self.error(
+                            ParserDiagnosticKind::ExpectedToken,
+                            self.current().span,
+                            "use ':' for iteration loops: loop (Type name : iterable)",
+                        );
                         LoopKind::Iteration {
                             bindings: vec![head],
                             iterable: initializer,
@@ -1445,7 +1499,7 @@ impl<'a> Parser<'a> {
                     self.error(
                         ParserDiagnosticKind::ExpectedToken,
                         self.current().span,
-                        "expected '=' in loop binding",
+                        "expected ':' for iteration or '=' for a C-style loop",
                     );
                     self.parse_cstyle_tail(None)
                 }
@@ -1534,9 +1588,23 @@ impl<'a> Parser<'a> {
                 "auto is not allowed in a loop binding",
             );
         }
-        let iterable = if self.consume(TokenKind::Equal, "expected '=' in loop binding") {
+        let iterable = if self.check(TokenKind::Colon) {
+            self.bump();
+            self.parse_expression()
+        } else if self.check(TokenKind::Equal) {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "use ':' for iteration loops: loop (Type name : iterable)",
+            );
+            self.bump();
             self.parse_expression()
         } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected ':' in iteration loop binding",
+            );
             Expr::Literal(LiteralExpr::Integer {
                 lexeme: "0".to_string(),
                 span: self.current().span,
@@ -1865,7 +1933,13 @@ impl<'a> Parser<'a> {
         let mut expression = self.parse_primary();
         loop {
             if self.check(TokenKind::LeftParen) {
-                expression = self.finish_call(expression);
+                expression = self.finish_call(expression, Vec::new());
+            } else if self.check(TokenKind::Less) {
+                if let Some(type_arguments) = self.try_type_arguments() {
+                    expression = self.finish_call(expression, type_arguments);
+                } else {
+                    break;
+                }
             } else if self.check(TokenKind::LeftBracket) {
                 expression = self.parse_subscript(expression);
             } else if self.check(TokenKind::Dot) {
@@ -1923,7 +1997,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn finish_call(&mut self, callee: Expr) -> Expr {
+    fn finish_call(&mut self, callee: Expr, type_arguments: Vec<TypeSyntax>) -> Expr {
         let start = callee.span().start;
         self.bump();
         let mut arguments = Vec::new();
@@ -1957,6 +2031,7 @@ impl<'a> Parser<'a> {
         };
         Expr::Call(CallExpr {
             callee: Box::new(callee),
+            type_arguments,
             arguments,
             span: Span { start, end },
         })
@@ -2222,7 +2297,10 @@ impl<'a> Parser<'a> {
                 span: self.current().span,
             });
         };
-        let _ = self.consume(TokenKind::LeftParen, "expected '(' after lambda return type");
+        let _ = self.consume(
+            TokenKind::LeftParen,
+            "expected '(' after lambda return type",
+        );
         let params = self.parse_parameter_list();
         if self.check(TokenKind::RightParen) {
             self.bump();
@@ -2468,6 +2546,129 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_type_parameters(&mut self) -> Vec<Identifier> {
+        if !self.check(TokenKind::Less) {
+            return Vec::new();
+        }
+        self.bump();
+        let mut params = Vec::new();
+        if !self.check(TokenKind::Greater) {
+            loop {
+                let Some(name) = self.expect_identifier("expected a type parameter") else {
+                    break;
+                };
+                params.push(name);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.bump();
+                if self.check(TokenKind::Greater) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidTypeSyntax,
+                        self.current().span,
+                        "a trailing comma is not allowed in a type parameter list",
+                    );
+                    break;
+                }
+            }
+        }
+        let _ = self.consume(TokenKind::Greater, "expected '>' after type parameters");
+        params
+    }
+
+    fn reject_generic_inheritance(&mut self) {
+        if self.check(TokenKind::Less) {
+            self.error(
+                ParserDiagnosticKind::InvalidDeclaration,
+                self.current().span,
+                "generic inheritance is not supported",
+            );
+            let _ = self.parse_required_type_arguments();
+        }
+    }
+
+    fn parse_required_type_arguments(&mut self) -> (Vec<TypeSyntax>, crate::span::SourcePosition) {
+        let fallback = self.current().span.end;
+        if !self.consume(TokenKind::Less, "expected '<'") {
+            return (Vec::new(), fallback);
+        }
+        let mut arguments = Vec::new();
+        if !self.check(TokenKind::Greater) {
+            loop {
+                if let Some(ty) = self.parse_type() {
+                    arguments.push(ty);
+                } else {
+                    break;
+                }
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.bump();
+                if self.check(TokenKind::Greater) {
+                    self.error(
+                        ParserDiagnosticKind::InvalidTypeSyntax,
+                        self.current().span,
+                        "a trailing comma is not allowed in a type argument list",
+                    );
+                    break;
+                }
+            }
+        }
+        let end = if self.check(TokenKind::Greater) {
+            self.bump().span.end
+        } else {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "expected '>' after type arguments",
+            );
+            self.current().span.end
+        };
+        (arguments, end)
+    }
+
+    /// `<int, str>` followed by `(`. Anything else is left for comparison.
+    fn try_type_arguments(&mut self) -> Option<Vec<TypeSyntax>> {
+        if !self.check(TokenKind::Less) {
+            return None;
+        }
+        let index = self.index;
+        let errors = self.diagnostics.len();
+        self.bump();
+        let mut arguments = Vec::new();
+        if !self.check(TokenKind::Greater) {
+            loop {
+                let Some(ty) = self.parse_type() else {
+                    self.index = index;
+                    self.diagnostics.truncate(errors);
+                    return None;
+                };
+                arguments.push(ty);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.bump();
+                if self.check(TokenKind::Greater) {
+                    self.index = index;
+                    self.diagnostics.truncate(errors);
+                    return None;
+                }
+            }
+        }
+        let closed = self.check(TokenKind::Greater)
+            && self
+                .tokens
+                .get(self.index + 1)
+                .is_some_and(|token| token.kind == TokenKind::LeftParen);
+        if !closed {
+            self.index = index;
+            self.diagnostics.truncate(errors);
+            return None;
+        }
+        self.bump();
+        Some(arguments)
+    }
+
     fn parse_type(&mut self) -> Option<TypeSyntax> {
         let (kind, name, token) = if let Some(kind) = type_kind(self.current().kind) {
             let token = self.bump();
@@ -2486,6 +2687,11 @@ impl<'a> Parser<'a> {
         let mut arguments = Vec::new();
         let mut bounds = Vec::new();
         let mut end = token.span.end;
+        if kind == TypeKind::Named && self.check(TokenKind::Less) {
+            let (parsed, parsed_end) = self.parse_required_type_arguments();
+            arguments = parsed;
+            end = parsed_end;
+        }
         if kind == TypeKind::Map {
             if self.consume(TokenKind::Less, "expected '<' after map") {
                 if let Some(key) = self.parse_type() {
@@ -2618,6 +2824,11 @@ impl<'a> Parser<'a> {
                 span: self.current().span,
             });
         };
+        let type_arguments = if self.check(TokenKind::Less) {
+            self.parse_required_type_arguments().0
+        } else {
+            Vec::new()
+        };
         if !self.consume(TokenKind::LeftParen, "expected '(' after the class name") {
             return Expr::New(NewExpr {
                 span: Span {
@@ -2625,6 +2836,7 @@ impl<'a> Parser<'a> {
                     end: name.span.end,
                 },
                 name,
+                type_arguments,
                 arguments: Vec::new(),
             });
         }
@@ -2659,6 +2871,7 @@ impl<'a> Parser<'a> {
         };
         Expr::New(NewExpr {
             name,
+            type_arguments,
             arguments,
             span: Span { start, end },
         })
@@ -2688,7 +2901,22 @@ impl<'a> Parser<'a> {
 
     fn starts_function(&self) -> bool {
         if type_kind(self.current().kind).is_some() {
-            return true;
+            // `map` is a type keyword that always begins a typed declaration;
+            // incomplete forms such as `map scores;` are diagnosed in type
+            // parsing rather than rejected as unknown top-level tokens.
+            if self.current().kind == TokenKind::KwMap {
+                return true;
+            }
+            let mut index = self.index + 1;
+            index = self.skip_type_suffix_at(index);
+            if self.kind_at(index) != TokenKind::Identifier {
+                return true;
+            }
+            index += 1;
+            index = self.skip_type_arg_list_at(index);
+            return self.kind_at(index) == TokenKind::LeftParen
+                || self.kind_at(index) == TokenKind::Less
+                || self.kind_at(index) == TokenKind::LeftBrace;
         }
         self.named_type_end()
             .is_some_and(|index| self.kind_at(index) == TokenKind::LeftParen)
@@ -2708,10 +2936,7 @@ impl<'a> Parser<'a> {
         self.named_type_end().is_some_and(|index| {
             matches!(
                 self.kind_at(index),
-                TokenKind::Equal
-                    | TokenKind::Semicolon
-                    | TokenKind::Comma
-                    | TokenKind::RightParen
+                TokenKind::Equal | TokenKind::Semicolon | TokenKind::Comma | TokenKind::RightParen
             )
         })
     }
@@ -2721,6 +2946,36 @@ impl<'a> Parser<'a> {
             return None;
         }
         let mut index = self.index + 1;
+        index = self.skip_type_arg_list_at(index);
+        index = self.skip_type_suffix_at(index);
+        if self.kind_at(index) != TokenKind::Identifier {
+            return None;
+        }
+        index += 1;
+        index = self.skip_type_arg_list_at(index);
+        Some(index)
+    }
+
+    /// Skip `<...>` type arguments. Nested `<` / `>` pairs are balanced.
+    fn skip_type_arg_list_at(&self, mut index: usize) -> usize {
+        if self.kind_at(index) != TokenKind::Less {
+            return index;
+        }
+        index += 1;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.kind_at(index) {
+                TokenKind::Eof => return index,
+                TokenKind::Less => depth += 1,
+                TokenKind::Greater => depth -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        index
+    }
+
+    fn skip_type_suffix_at(&self, mut index: usize) -> usize {
         loop {
             if self.kind_at(index) != TokenKind::LeftBracket {
                 break;
@@ -2730,17 +2985,14 @@ impl<'a> Parser<'a> {
                 index += 1;
             }
             if self.kind_at(index) != TokenKind::RightBracket {
-                return None;
+                return index;
             }
             index += 1;
         }
         if self.kind_at(index) == TokenKind::Question {
             index += 1;
         }
-        if self.kind_at(index) != TokenKind::Identifier {
-            return None;
-        }
-        Some(index + 1)
+        index
     }
 
     fn kind_at(&self, index: usize) -> TokenKind {
@@ -3045,6 +3297,7 @@ fn statement_span(statement: &Stmt) -> Span {
         Stmt::VariableDecl(declaration) => declaration.span,
         Stmt::Destructure(declaration) => declaration.span,
         Stmt::Return(return_statement) => return_statement.span,
+        Stmt::Emit(emit_statement) => emit_statement.span,
         Stmt::If(if_statement) => if_statement.span,
         Stmt::Loop(loop_statement) => loop_statement.span,
         Stmt::Break(span) | Stmt::Continue(span) => *span,

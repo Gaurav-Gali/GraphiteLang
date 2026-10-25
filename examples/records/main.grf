@@ -110,7 +110,7 @@ void main() {
     Profile left, Profile right = people;
     io.println(left.name);
     io.println(right.age);
-    loop (Profile person = people.iter()) {
+    loop (Profile person : people) {
         io.println(person.name);
     }
 

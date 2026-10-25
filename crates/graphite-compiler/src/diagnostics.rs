@@ -205,6 +205,17 @@ pub fn semantic_code(message: &str) -> &'static str {
         "GRF-SEM-021"
     } else if message.contains("cannot call a value") {
         "GRF-SEM-022"
+    } else if message.contains("cannot infer") || message.contains("requires type arguments") {
+        "GRF-SEM-034"
+    } else if message.contains("emit")
+        || message.contains("generator")
+        || message.contains("not iterable")
+        || message.contains("iter()")
+        || message.contains("range ")
+        || message.starts_with("range ")
+        || message.contains("default")
+    {
+        "GRF-SEM-035"
     } else {
         "GRF-SEM-900"
     }

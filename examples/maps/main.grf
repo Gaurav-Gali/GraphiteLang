@@ -54,7 +54,7 @@ void main() {
     io.println(nested["group"]["count"]);
 
     int total = 0;
-    loop (str key, int value = scores.entries()) {
+    loop (str key, int value : scores.entries()) {
         total = total + value;
         io.println(lengthOf(key) > 0);
     }

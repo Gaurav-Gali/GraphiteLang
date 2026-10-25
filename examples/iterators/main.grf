@@ -1,0 +1,93 @@
+import grf.io;
+
+// LLD-21: iter<T>, colon loops, auto .iter(), generators, range(), and strings.
+
+iter<T> repeat<T>(T value, int count) {
+    loop (int i = 0; i < count; i++) {
+        emit value;
+    }
+}
+
+iter<int> countTo(int end) {
+    loop (int i = 0; i < end; i++) {
+        emit i;
+    }
+}
+
+iter<int> evenNumbers(int end) {
+    loop (int i = 0; i < end; i++) {
+        if (i % 2 == 0) {
+            emit i;
+        }
+    }
+}
+
+iter<int> earlyStop(int limit) {
+    loop (int i = 0; i < limit; i++) {
+        if (i == 3) {
+            return;
+        }
+        emit i;
+    }
+}
+
+void main() {
+    io.println("manual");
+    int[] numbers = [10, 20, 30];
+    iter<int> it = numbers.iter();
+    loop (it.hasNext()) {
+        int value = it.next();
+        io.println(value);
+    }
+
+    io.println("alias");
+    iter<int> a = numbers.iter();
+    iter<int> b = a.iter();
+    io.println(a.next());
+    io.println(b.next());
+
+    io.println("loop array");
+    loop (int value : numbers) {
+        io.println(value);
+    }
+
+    io.println("redundant iter");
+    loop (int value : numbers.iter()) {
+        io.println(value);
+    }
+
+    io.println("generator");
+    loop (int value : countTo(4)) {
+        io.println(value);
+    }
+
+    io.println("generic");
+    loop (str w : repeat<str>("hi", 2)) {
+        io.println(w);
+    }
+
+    io.println("conditional emit");
+    loop (int value : evenNumbers(10)) {
+        io.println(value);
+    }
+
+    io.println("early return");
+    loop (int value : earlyStop(10)) {
+        io.println(value);
+    }
+
+    io.println("range");
+    loop (int value : range(1, 5)) {
+        io.println(value);
+    }
+
+    io.println("range step");
+    loop (int value : range(1, 10, 2)) {
+        io.println(value);
+    }
+
+    io.println("chars");
+    loop (chr c : "ab") {
+        io.println(c);
+    }
+}

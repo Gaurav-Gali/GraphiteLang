@@ -150,16 +150,16 @@ void main() {
     io.println(locked);
 
     io.println("iterate");
-    loop (int value = empty.iter()) {
+    loop (int value : empty) {
         io.println(value);
     }
-    loop (int value = [4, 5, 6].iter()) {
+    loop (int value : [4, 5, 6]) {
         io.println(value);
     }
-    loop (uint64 idx, int value = [7, 8].enumerate()) {
+    loop (uint64 idx, int value : [7, 8].enumerate()) {
         io.println(f"{idx} - {value}");
     }
-    loop (int value = fixed.iter()) {
+    loop (int value : fixed) {
         if (value == 20) {
             continue;
         }

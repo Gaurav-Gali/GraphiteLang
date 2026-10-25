@@ -190,7 +190,10 @@ flt32 flt64 bln chr str if else loop break continue return type map import true 
             TokenKind::Eof,
         ]
     );
-    assert_eq!(kinds("@static"), vec![TokenKind::At, TokenKind::KwStatic, TokenKind::Eof]);
+    assert_eq!(
+        kinds("@static"),
+        vec![TokenKind::At, TokenKind::KwStatic, TokenKind::Eof]
+    );
 }
 
 #[test]

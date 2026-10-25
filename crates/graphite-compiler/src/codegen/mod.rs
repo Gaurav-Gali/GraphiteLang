@@ -15,10 +15,10 @@ use crate::parser::{BinaryOperator, UnaryOperator};
 use crate::semantic::convert::{ConvOp, conversion};
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
-    ArrayMethod, ArrayPlace, CallableSignature, CanonicalType, CheckedClass, CheckedExpr, CheckedFn,
-    CheckedInterface, CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId, InterfaceId,
-    Leaf, LoopSourceKind,
-    MapEntry, MapMethod, MapShape, RecordId, TextMethod,
+    ArrayMethod, ArrayPlace, CallableSignature, CanonicalType, CheckedClass, CheckedExpr,
+    CheckedFn, CheckedInterface, CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId,
+    GenericInstance, InterfaceId, IterMethod, IterShape, Leaf, LoopSourceKind, MapEntry, MapMethod,
+    MapShape, RecordId, TextMethod,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -43,10 +43,18 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         classes: &program.classes,
         interfaces: &program.interfaces,
         maps: &program.maps,
+        iters: &program.iters,
         callables: &program.callables,
+        generics: &program.generics,
+        type_param_names: &program.type_param_names,
         source_name,
         source,
         constructor_return: false,
+        in_generator: false,
+        gen_states: Vec::new(),
+        gen_next_id: 0,
+        gen_loops: Vec::new(),
+        gen_iter_locals: Vec::new(),
     };
     for index in record_order(&program.records) {
         emitter.emit_record(&program.records[index]);
@@ -63,11 +71,18 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
     let mut others = Vec::new();
     let mut entry = Vec::new();
     for function in &program.functions {
+        // Generic templates are not emitted; call sites use monomorphized copies.
+        if !function.type_params.is_empty() {
+            continue;
+        }
         if function.name == "main" {
             entry.push(function);
         } else {
             others.push(function);
         }
+    }
+    for function in &program.specializations {
+        others.push(function);
     }
     if !others.is_empty() {
         emitter.line("mod grf_fns {");
@@ -104,10 +119,21 @@ struct Emitter<'a> {
     classes: &'a [CheckedClass],
     interfaces: &'a [CheckedInterface],
     maps: &'a [MapShape],
+    iters: &'a [IterShape],
     callables: &'a [CallableSignature],
+    generics: &'a [GenericInstance],
+    type_param_names: &'a [String],
     source_name: &'a str,
     source: &'a str,
     constructor_return: bool,
+    in_generator: bool,
+    /// State-machine arms for the generator currently being lowered.
+    gen_states: Vec<(u32, Vec<String>)>,
+    gen_next_id: u32,
+    /// `(continue_state, break_state)` for loops inside a generator.
+    gen_loops: Vec<(u32, u32)>,
+    /// Hoisted `iter<T>` temps for nested iteration inside generators.
+    gen_iter_locals: Vec<(String, CanonicalType)>,
 }
 
 impl Emitter<'_> {
@@ -130,6 +156,7 @@ impl Emitter<'_> {
         } else {
             name.as_str()
         };
+        let generics = self.generic_params(&function.type_params, false);
         let ret = if function.ret == CanonicalType::Void {
             "()".to_string()
         } else {
@@ -138,17 +165,21 @@ impl Emitter<'_> {
         self.fn_ret = ret.clone();
         self.tries.clear();
         self.line(&format!(
-            "{visibility}fn {rust_name}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
+            "{visibility}fn {rust_name}{generics}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
         ));
         self.indent += 1;
         self.emit_param_limits(&function.params);
-        for statement in &function.body {
-            self.emit_stmt(statement);
-        }
-        if function.ret == CanonicalType::Void {
-            self.line("Ok(())");
+        if function.is_generator {
+            self.emit_generator_from_fn(&function.body);
         } else {
-            self.line("unreachable!();");
+            for statement in &function.body {
+                self.emit_stmt(statement);
+            }
+            if function.ret == CanonicalType::Void {
+                self.line("Ok(())");
+            } else {
+                self.line("unreachable!();");
+            }
         }
         self.indent -= 1;
         self.line("}");
@@ -199,6 +230,10 @@ impl Emitter<'_> {
                 }
             }
             CheckedStmt::Return(value) => self.emit_return(value),
+            CheckedStmt::Emit { value } => {
+                let value = self.emit_expr(value);
+                self.line(&format!("__grf_emit.push({value});"));
+            }
             CheckedStmt::Expr(expr) => {
                 let value = self.emit_expr(expr);
                 if expr.ty() == CanonicalType::Void {
@@ -324,37 +359,89 @@ impl Emitter<'_> {
                 let inner = self.fresh_label();
                 self.line("{");
                 self.indent += 1;
-                let src = if let CheckedExpr::Load { name, ty } = source {
-                    if ty.is_array() {
-                        rust_ident(name)
-                    } else {
-                        self.line(&format!("let grf_src = &{};", rust_ident(name)));
-                        "grf_src".to_string()
-                    }
-                } else {
+                if *kind == LoopSourceKind::Values && source.ty().is_iter() {
                     let source = self.emit_expr(source);
-                    self.line(&format!("let grf_owned = {source};"));
-                    self.line("let grf_src = &grf_owned;");
-                    "grf_src".to_string()
-                };
-                self.line("let mut grf_i: u64 = 0;");
-                self.line(&format!(
-                    "'{outer}: while (grf_i as usize) < {src}.len() {{"
-                ));
-                self.indent += 1;
-                self.line(&format!("'{inner}: loop {{"));
-                self.indent += 1;
-                self.loops.push((outer.clone(), inner.clone()));
-                if *kind == LoopSourceKind::Enumerate {
+                    self.line(&format!("let grf_it = {source};"));
+                    self.line(&format!("'{outer}: while grf_it.has_next()? {{"));
+                    self.indent += 1;
+                    self.line(&format!("'{inner}: loop {{"));
+                    self.indent += 1;
+                    self.loops.push((outer.clone(), inner.clone()));
                     if let Some((name, ty, mutable)) = bindings.first() {
                         let binding = if *mutable { "let mut" } else { "let" };
+                        let site = self.locate(self.source_name, 0, 0, 0);
                         self.line(&format!(
-                            "{binding} {}: {ty} = grf_i;",
+                            "{binding} {}: {} = grf_it.next({site})?;",
                             rust_ident(name),
-                            ty = self.ty_name(*ty)
+                            self.ty_name(*ty)
                         ));
                     }
-                    if let Some((name, ty, mutable)) = bindings.get(1) {
+                    self.emit_body(body);
+                    self.loops.pop();
+                    self.line(&format!("break '{inner};"));
+                    self.indent -= 1;
+                    self.line("}");
+                    self.indent -= 1;
+                    self.line("}");
+                } else {
+                    let src = if let CheckedExpr::Load { name, ty } = source {
+                        if ty.is_array() {
+                            rust_ident(name)
+                        } else {
+                            self.line(&format!("let grf_src = &{};", rust_ident(name)));
+                            "grf_src".to_string()
+                        }
+                    } else {
+                        let source = self.emit_expr(source);
+                        self.line(&format!("let grf_owned = {source};"));
+                        self.line("let grf_src = &grf_owned;");
+                        "grf_src".to_string()
+                    };
+                    self.line("let mut grf_i: u64 = 0;");
+                    self.line(&format!(
+                        "'{outer}: while (grf_i as usize) < {src}.len() {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!("'{inner}: loop {{"));
+                    self.indent += 1;
+                    self.loops.push((outer.clone(), inner.clone()));
+                    if *kind == LoopSourceKind::Enumerate {
+                        if let Some((name, ty, mutable)) = bindings.first() {
+                            let binding = if *mutable { "let mut" } else { "let" };
+                            self.line(&format!(
+                                "{binding} {}: {ty} = grf_i;",
+                                rust_ident(name),
+                                ty = self.ty_name(*ty)
+                            ));
+                        }
+                        if let Some((name, ty, mutable)) = bindings.get(1) {
+                            let binding = if *mutable { "let mut" } else { "let" };
+                            self.line(&format!(
+                                "{binding} {}: {} = {src}[grf_i as usize].clone();",
+                                rust_ident(name),
+                                self.ty_name(*ty)
+                            ));
+                        }
+                    } else if *kind == LoopSourceKind::Entries {
+                        let pair = self.fresh_tmp();
+                        self.line(&format!("let {pair} = {src}[grf_i as usize].clone();"));
+                        if let Some((name, ty, mutable)) = bindings.first() {
+                            let binding = if *mutable { "let mut" } else { "let" };
+                            self.line(&format!(
+                                "{binding} {}: {} = {pair}.0;",
+                                rust_ident(name),
+                                self.ty_name(*ty)
+                            ));
+                        }
+                        if let Some((name, ty, mutable)) = bindings.get(1) {
+                            let binding = if *mutable { "let mut" } else { "let" };
+                            self.line(&format!(
+                                "{binding} {}: {} = {pair}.1;",
+                                rust_ident(name),
+                                self.ty_name(*ty)
+                            ));
+                        }
+                    } else if let Some((name, ty, mutable)) = bindings.first() {
                         let binding = if *mutable { "let mut" } else { "let" };
                         self.line(&format!(
                             "{binding} {}: {} = {src}[grf_i as usize].clone();",
@@ -362,41 +449,15 @@ impl Emitter<'_> {
                             self.ty_name(*ty)
                         ));
                     }
-                } else if *kind == LoopSourceKind::Entries {
-                    let pair = self.fresh_tmp();
-                    self.line(&format!("let {pair} = {src}[grf_i as usize].clone();"));
-                    if let Some((name, ty, mutable)) = bindings.first() {
-                        let binding = if *mutable { "let mut" } else { "let" };
-                        self.line(&format!(
-                            "{binding} {}: {} = {pair}.0;",
-                            rust_ident(name),
-                            self.ty_name(*ty)
-                        ));
-                    }
-                    if let Some((name, ty, mutable)) = bindings.get(1) {
-                        let binding = if *mutable { "let mut" } else { "let" };
-                        self.line(&format!(
-                            "{binding} {}: {} = {pair}.1;",
-                            rust_ident(name),
-                            self.ty_name(*ty)
-                        ));
-                    }
-                } else if let Some((name, ty, mutable)) = bindings.first() {
-                    let binding = if *mutable { "let mut" } else { "let" };
-                    self.line(&format!(
-                        "{binding} {}: {} = {src}[grf_i as usize].clone();",
-                        rust_ident(name),
-                        self.ty_name(*ty)
-                    ));
+                    self.emit_body(body);
+                    self.loops.pop();
+                    self.line(&format!("break '{inner};"));
+                    self.indent -= 1;
+                    self.line("}");
+                    self.line("grf_i += 1;");
+                    self.indent -= 1;
+                    self.line("}");
                 }
-                self.emit_body(body);
-                self.loops.pop();
-                self.line(&format!("break '{inner};"));
-                self.indent -= 1;
-                self.line("}");
-                self.line("grf_i += 1;");
-                self.indent -= 1;
-                self.line("}");
                 self.indent -= 1;
                 self.line("}");
             }
@@ -409,7 +470,434 @@ impl Emitter<'_> {
         }
     }
 
+    /// Lower a generator body to `Iter::from_fn` with an explicit state machine.
+    /// Each `emit` suspends; resume continues at the next state. Locals that
+    /// span suspension points are hoisted into the closure.
+    fn emit_generator_from_fn(&mut self, body: &[CheckedStmt]) {
+        self.gen_states.clear();
+        self.gen_next_id = 0;
+        self.gen_loops.clear();
+        self.gen_iter_locals.clear();
+        self.in_generator = true;
+
+        let locals = collect_generator_locals(body);
+        let done = self.gen_alloc_state();
+        let start = self.gen_lower_stmts(body, done);
+        self.gen_set_state(done, vec!["return Ok(None);".to_string()]);
+
+        self.line("Ok(graphite_core::iter::Iter::from_fn({");
+        self.indent += 1;
+        self.line(&format!("let mut __st: u32 = {start};"));
+        for (name, ty) in &locals {
+            self.line(&format!(
+                "let mut {}: {} = {};",
+                rust_ident(name),
+                self.ty_name(*ty),
+                self.rust_default(*ty)
+            ));
+        }
+        let iter_locals = self.gen_iter_locals.clone();
+        for (name, ty) in &iter_locals {
+            self.line(&format!(
+                "let mut {}: {} = {};",
+                name,
+                self.ty_name(*ty),
+                self.rust_default(*ty)
+            ));
+        }
+        self.line("move || -> Result<Option<_>, graphite_core::diagnostic::RuntimeError> {");
+        self.indent += 1;
+        self.line("loop {");
+        self.indent += 1;
+        self.line("match __st {");
+        self.indent += 1;
+        // Stable order by state id.
+        let mut states = self.gen_states.clone();
+        states.sort_by_key(|(id, _)| *id);
+        for (id, lines) in states {
+            self.line(&format!("{id} => {{"));
+            self.indent += 1;
+            for line in lines {
+                self.line(&line);
+            }
+            self.indent -= 1;
+            self.line("}");
+        }
+        self.line("_ => return Ok(None),");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}))");
+        self.in_generator = false;
+        self.gen_states.clear();
+        self.gen_loops.clear();
+        self.gen_iter_locals.clear();
+    }
+
+    fn gen_alloc_state(&mut self) -> u32 {
+        let id = self.gen_next_id;
+        self.gen_next_id += 1;
+        self.gen_states.push((id, Vec::new()));
+        id
+    }
+
+    fn gen_set_state(&mut self, id: u32, lines: Vec<String>) {
+        if let Some((_, slot)) = self.gen_states.iter_mut().find(|(sid, _)| *sid == id) {
+            *slot = lines;
+        }
+    }
+
+    fn gen_lower_stmts(&mut self, stmts: &[CheckedStmt], after: u32) -> u32 {
+        let mut next = after;
+        for stmt in stmts.iter().rev() {
+            next = self.gen_lower_stmt(stmt, next);
+        }
+        next
+    }
+
+    fn gen_lower_stmt(&mut self, stmt: &CheckedStmt, after: u32) -> u32 {
+        match stmt {
+            CheckedStmt::Emit { value } => {
+                let s = self.gen_alloc_state();
+                let value = self.emit_expr(value);
+                self.gen_set_state(
+                    s,
+                    vec![
+                        format!("let __grf_yield = {value};"),
+                        format!("__st = {after};"),
+                        "return Ok(Some(__grf_yield));".to_string(),
+                    ],
+                );
+                s
+            }
+            CheckedStmt::Return(_) => {
+                let s = self.gen_alloc_state();
+                self.gen_set_state(s, vec!["return Ok(None);".to_string()]);
+                s
+            }
+            CheckedStmt::Let { name, value, .. } => {
+                let s = self.gen_alloc_state();
+                let value = self.emit_expr(value);
+                self.gen_set_state(
+                    s,
+                    vec![
+                        format!("{} = {value};", rust_ident(name)),
+                        format!("__st = {after};"),
+                        "continue;".to_string(),
+                    ],
+                );
+                s
+            }
+            CheckedStmt::Expr(expr) => {
+                let s = self.gen_alloc_state();
+                let value = self.emit_expr(expr);
+                let mut lines = Vec::new();
+                if expr.ty() == CanonicalType::Void {
+                    lines.push(format!("{value};"));
+                } else {
+                    lines.push(format!("let _ = {value};"));
+                }
+                lines.push(format!("__st = {after};"));
+                lines.push("continue;".to_string());
+                self.gen_set_state(s, lines);
+                s
+            }
+            CheckedStmt::Block { body } => self.gen_lower_stmts(body, after),
+            CheckedStmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let s = self.gen_alloc_state();
+                let then_s = self.gen_lower_stmts(then_body, after);
+                let else_s = if let Some(else_body) = else_body {
+                    self.gen_lower_stmts(else_body, after)
+                } else {
+                    after
+                };
+                let condition = self.emit_expr(condition);
+                self.gen_set_state(
+                    s,
+                    vec![
+                        format!(
+                            "if {condition} {{ __st = {then_s}; }} else {{ __st = {else_s}; }}"
+                        ),
+                        "continue;".to_string(),
+                    ],
+                );
+                s
+            }
+            CheckedStmt::While { condition, body } => {
+                let cond_s = self.gen_alloc_state();
+                let exit_s = after;
+                self.gen_loops.push((cond_s, exit_s));
+                let body_s = self.gen_lower_stmts(body, cond_s);
+                self.gen_loops.pop();
+                let condition = self.emit_expr(condition);
+                self.gen_set_state(
+                    cond_s,
+                    vec![
+                        format!(
+                            "if {condition} {{ __st = {body_s}; }} else {{ __st = {exit_s}; }}"
+                        ),
+                        "continue;".to_string(),
+                    ],
+                );
+                cond_s
+            }
+            CheckedStmt::Loop { body } => {
+                let head_s = self.gen_alloc_state();
+                let exit_s = after;
+                self.gen_loops.push((head_s, exit_s));
+                let body_s = self.gen_lower_stmts(body, head_s);
+                self.gen_loops.pop();
+                self.gen_set_state(
+                    head_s,
+                    vec![format!("__st = {body_s};"), "continue;".to_string()],
+                );
+                head_s
+            }
+            CheckedStmt::CStyle {
+                initializer,
+                init_expr,
+                condition,
+                update,
+                body,
+            } => {
+                let cond_s = self.gen_alloc_state();
+                let update_s = self.gen_alloc_state();
+                let exit_s = after;
+                self.gen_loops.push((update_s, exit_s));
+                let body_s = self.gen_lower_stmts(body, update_s);
+                self.gen_loops.pop();
+
+                let condition = self.emit_expr(condition);
+                self.gen_set_state(
+                    cond_s,
+                    vec![
+                        format!(
+                            "if {condition} {{ __st = {body_s}; }} else {{ __st = {exit_s}; }}"
+                        ),
+                        "continue;".to_string(),
+                    ],
+                );
+
+                let mut update_lines = Vec::new();
+                if let Some(update) = update {
+                    let ty = update.ty();
+                    let update = self.emit_expr(update);
+                    if ty == CanonicalType::Void {
+                        update_lines.push(format!("{update};"));
+                    } else {
+                        update_lines.push(format!("let _ = {update};"));
+                    }
+                }
+                update_lines.push(format!("__st = {cond_s};"));
+                update_lines.push("continue;".to_string());
+                self.gen_set_state(update_s, update_lines);
+
+                // Initializer runs once, then jumps to condition.
+                let init_s = self.gen_alloc_state();
+                let mut init_lines = Vec::new();
+                if let Some(initializer) = initializer {
+                    match initializer.as_ref() {
+                        CheckedStmt::Let { name, value, .. } => {
+                            let value = self.emit_expr(value);
+                            init_lines.push(format!("{} = {value};", rust_ident(name)));
+                        }
+                        other => {
+                            // Rare non-let initializer: evaluate as expression stmt if possible.
+                            let _ = other;
+                        }
+                    }
+                }
+                if let Some(init_expr) = init_expr {
+                    let init_expr = self.emit_expr(init_expr);
+                    init_lines.push(format!("{init_expr};"));
+                }
+                init_lines.push(format!("__st = {cond_s};"));
+                init_lines.push("continue;".to_string());
+                self.gen_set_state(init_s, init_lines);
+                init_s
+            }
+            CheckedStmt::Break => {
+                let s = self.gen_alloc_state();
+                let target = self.gen_loops.last().map(|(_, b)| *b).unwrap_or(after);
+                self.gen_set_state(
+                    s,
+                    vec![format!("__st = {target};"), "continue;".to_string()],
+                );
+                s
+            }
+            CheckedStmt::Continue => {
+                let s = self.gen_alloc_state();
+                let target = self.gen_loops.last().map(|(c, _)| *c).unwrap_or(after);
+                self.gen_set_state(
+                    s,
+                    vec![format!("__st = {target};"), "continue;".to_string()],
+                );
+                s
+            }
+            CheckedStmt::Iterate {
+                bindings,
+                source,
+                kind,
+                body,
+            } => {
+                // Desugar to: it = source.iter(); loop { if !hasNext break; bind = next; body }
+                let setup_s = self.gen_alloc_state();
+                let cond_s = self.gen_alloc_state();
+                let bind_s = self.gen_alloc_state();
+                let exit_s = after;
+                self.gen_loops.push((cond_s, exit_s));
+                let body_s = self.gen_lower_stmts(body, cond_s);
+                self.gen_loops.pop();
+
+                let it = format!("__grf_gen_it_{setup_s}");
+                let iter_ty = if source.ty().is_iter() {
+                    source.ty()
+                } else {
+                    let element = if source.ty() == CanonicalType::Str {
+                        CanonicalType::Chr
+                    } else {
+                        bindings
+                            .first()
+                            .map(|(_, ty, _)| *ty)
+                            .unwrap_or(CanonicalType::Int64)
+                    };
+                    // Build a throwaway Iter type name via rust_default/ty_name using
+                    // an existing interned shape when possible.
+                    self.iters
+                        .iter()
+                        .position(|shape| shape.element == element)
+                        .map(|index| CanonicalType::Iter(crate::semantic::IterId(index as u32)))
+                        .unwrap_or(source.ty())
+                };
+                self.gen_iter_locals.push((it.clone(), iter_ty));
+
+                let source_ty = source.ty();
+                let source = self.emit_expr(source);
+                let mut setup = Vec::new();
+                if *kind == LoopSourceKind::Values && source_ty.is_iter() {
+                    setup.push(format!("{it} = {source};"));
+                } else if source_ty == CanonicalType::Str {
+                    setup.push(format!(
+                        "{it} = graphite_core::iter::from_str_chars(&({source}));"
+                    ));
+                } else {
+                    setup.push(format!(
+                        "{it} = graphite_core::iter::Iter::from_array(&({source}));"
+                    ));
+                }
+                setup.push(format!("__st = {cond_s};"));
+                setup.push("continue;".to_string());
+                self.gen_set_state(setup_s, setup);
+
+                self.gen_set_state(
+                    cond_s,
+                    vec![
+                        format!(
+                            "if {it}.has_next()? {{ __st = {bind_s}; }} else {{ __st = {exit_s}; }}"
+                        ),
+                        "continue;".to_string(),
+                    ],
+                );
+
+                let site = self.locate(self.source_name, 0, 0, 0);
+                let mut bind = Vec::new();
+                if let Some((name, _, _)) = bindings.first() {
+                    bind.push(format!("{} = {it}.next({site})?;", rust_ident(name)));
+                }
+                bind.push(format!("__st = {body_s};"));
+                bind.push("continue;".to_string());
+                self.gen_set_state(bind_s, bind);
+                setup_s
+            }
+            CheckedStmt::Destructure {
+                bindings,
+                value,
+                file,
+                line,
+                column,
+                end_column,
+            } => {
+                let s = self.gen_alloc_state();
+                let element = value.ty().element().unwrap_or(CanonicalType::Int64);
+                let value = self.emit_expr(value);
+                let site = self.locate(file, *line, *column, *end_column);
+                let values = self.fresh_tmp();
+                let mut lines = vec![
+                    format!("let {values} = {value};"),
+                    format!(
+                        "graphite_core::array::expect_len({values}.len(), {}, {site})?;",
+                        bindings.len()
+                    ),
+                ];
+                for (index, (name, ty, _)) in bindings.iter().enumerate() {
+                    let item = format!("{values}[{index}].clone()");
+                    let stored = self.emit_coercion(element, *ty, &item, &site);
+                    lines.push(format!("{} = {stored};", rust_ident(name)));
+                }
+                lines.push(format!("__st = {after};"));
+                lines.push("continue;".to_string());
+                self.gen_set_state(s, lines);
+                s
+            }
+            CheckedStmt::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                // Try/catch inside generators: lower as a single non-suspending
+                // region when the region has no emit; otherwise lower the body
+                // path only (emit in catch/finally is unsupported in v1).
+                if !checked_contains_emit(body)
+                    && !catches.iter().any(|c| checked_contains_emit(&c.body))
+                    && finally_body
+                        .as_ref()
+                        .is_none_or(|b| !checked_contains_emit(b))
+                {
+                    let s = self.gen_alloc_state();
+                    let saved = std::mem::take(&mut self.out);
+                    let saved_indent = self.indent;
+                    self.indent = 0;
+                    self.emit_try(body, catches, finally_body);
+                    let captured = std::mem::replace(&mut self.out, saved);
+                    self.indent = saved_indent;
+                    let mut lines: Vec<String> = captured
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    lines.push(format!("__st = {after};"));
+                    lines.push("continue;".to_string());
+                    self.gen_set_state(s, lines);
+                    s
+                } else {
+                    // Suspend only in the try body; catch/finally run without emit.
+                    self.gen_lower_stmts(body, after)
+                }
+            }
+            CheckedStmt::Super { .. } => {
+                let s = self.gen_alloc_state();
+                self.gen_set_state(s, vec![format!("__st = {after};"), "continue;".to_string()]);
+                s
+            }
+        }
+    }
+
     fn emit_return(&mut self, value: &Option<CheckedExpr>) {
+        if self.in_generator {
+            // Bare return inside a generator ends iteration (state machine path
+            // lowers Return separately; this branch is a safety fallback).
+            self.line("return Ok(None);");
+            return;
+        }
         let constructor = self.constructor_return && value.is_none();
         if let Some(pending) = self.tries.last().map(|frame| frame.pending.clone()) {
             if constructor {
@@ -1122,6 +1610,7 @@ impl Emitter<'_> {
             CheckedExpr::Call {
                 path,
                 args,
+                type_args,
                 callee,
                 file,
                 line,
@@ -1136,6 +1625,7 @@ impl Emitter<'_> {
                 } else {
                     format!("crate::grf_fns::{}", rust_ident(path))
                 };
+                let turbofish = self.turbofish(type_args);
                 let args = args
                     .iter()
                     .map(|arg| self.emit_expr(arg))
@@ -1143,7 +1633,7 @@ impl Emitter<'_> {
                     .join(", ");
                 let site = self.locate(file, *line, *column, *end_column);
                 format!(
-                    "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee}\", {site})) }}"
+                    "match {path}{turbofish}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee}\", {site})) }}"
                 )
             }
             CheckedExpr::HandleCall { name, method, .. } => {
@@ -1191,12 +1681,13 @@ impl Emitter<'_> {
             CheckedExpr::ClassNew {
                 class,
                 args,
+                type_args,
                 file,
                 line,
                 column,
                 end_column,
                 ..
-            } => self.emit_class_new(*class, args, file, *line, *column, *end_column),
+            } => self.emit_class_new(*class, args, type_args, file, *line, *column, *end_column),
             CheckedExpr::ClassGet {
                 object,
                 class,
@@ -1228,6 +1719,7 @@ impl Emitter<'_> {
                 method,
                 object,
                 args,
+                type_args,
                 direct,
                 ty: _,
                 file,
@@ -1239,6 +1731,7 @@ impl Emitter<'_> {
                 *method,
                 object,
                 args,
+                type_args,
                 *direct,
                 file,
                 *line,
@@ -1298,6 +1791,50 @@ impl Emitter<'_> {
                 lines.push("grf_text".to_string());
                 lines.push("}".to_string());
                 lines.join(" ")
+            }
+            CheckedExpr::MakeIter { object, .. } => {
+                let obj_ty = object.ty();
+                let object = self.emit_expr(object);
+                if obj_ty == CanonicalType::Str {
+                    format!("graphite_core::iter::from_str_chars(&({object}))")
+                } else {
+                    format!("graphite_core::iter::Iter::from_array(&({object}))")
+                }
+            }
+            CheckedExpr::IterCall {
+                object,
+                method,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                let object = self.emit_expr(object);
+                match method {
+                    IterMethod::HasNext => format!("({object}).has_next()?"),
+                    IterMethod::Next => {
+                        let site = self.locate(file, *line, *column, *end_column);
+                        format!("({object}).next({site})?")
+                    }
+                    IterMethod::Iter => format!("({object}).iter()"),
+                }
+            }
+            CheckedExpr::Range {
+                start,
+                end,
+                step,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                let start = self.emit_expr(start);
+                let end = self.emit_expr(end);
+                let step = self.emit_expr(step);
+                let site = self.locate(file, *line, *column, *end_column);
+                format!("graphite_core::iter::range({start}, {end}, {step}, {site})?")
             }
         }
     }
@@ -2475,7 +3012,13 @@ impl Emitter<'_> {
         }
         let struct_name = class_struct(&class.name);
         let fields = self.layout_fields(id);
-        self.line(&format!("struct {struct_name} {{"));
+        let struct_params = if fields.iter().any(|(_, ty)| self.type_mentions_param(*ty)) {
+            class.type_params.clone()
+        } else {
+            Vec::new()
+        };
+        let generics = self.generic_params(&struct_params, true);
+        self.line(&format!("struct {struct_name}{generics} {{"));
         self.indent += 1;
         self.line("grf_type: u32,");
         for (name, ty) in &fields {
@@ -2483,8 +3026,21 @@ impl Emitter<'_> {
         }
         self.indent -= 1;
         self.line("}");
+        let impl_generics = self.generic_params(&struct_params, true);
+        let struct_ty = if struct_params.is_empty() {
+            struct_name.clone()
+        } else {
+            format!(
+                "{struct_name}<{}>",
+                struct_params
+                    .iter()
+                    .map(|name| rust_ident(name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         self.line(&format!(
-            "impl graphite_core::heap::GcObject for {struct_name} {{"
+            "impl{impl_generics} graphite_core::heap::GcObject for {struct_ty} {{"
         ));
         self.indent += 1;
         self.line("fn trace(&self, visit: &mut dyn FnMut(graphite_core::heap::Handle)) {");
@@ -2508,7 +3064,11 @@ impl Emitter<'_> {
                 self.emit_static_field(id, index);
             }
         }
-        let struct_name = self.object_struct(id);
+        let struct_params = self.struct_type_params(id);
+        let root = self.root_of(id);
+        let root_name = self.classes[root.0 as usize].name.clone();
+        let struct_ty = self.object_struct_with(&root_name, &struct_params);
+        let generics = self.generic_params(&struct_params, true);
         let params = class.init.as_ref().map(|init| &init.params);
         let param_list = params
             .map(|params| {
@@ -2523,12 +3083,12 @@ impl Emitter<'_> {
         self.fn_ret = "graphite_core::heap::Rooted".to_string();
         self.tries.clear();
         self.line(&format!(
-            "fn {}({param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
+            "fn {}{generics}({param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
             class_new_fn(&class.name)
         ));
         self.indent += 1;
         self.line(&format!(
-            "let this = graphite_core::heap::alloc({struct_name} {{"
+            "let this = graphite_core::heap::alloc({struct_ty} {{"
         ));
         self.indent += 1;
         self.line(&format!("grf_type: {},", id.0));
@@ -2548,19 +3108,20 @@ impl Emitter<'_> {
                     .join(", ")
             })
             .unwrap_or_default();
+        let init_turbofish = self.param_turbofish(&struct_params);
         let init_args = if forwarded.is_empty() {
             "this".to_string()
         } else {
             format!("this, {forwarded}")
         };
         self.line(&format!(
-            "grf_init_{}({init_args})",
+            "grf_init_{}{init_turbofish}({init_args})",
             class.name
         ));
         self.indent -= 1;
         self.line("}");
         self.out.push('\n');
-        self.emit_class_init(class, id);
+        self.emit_class_init(class, id, &struct_params);
 
         for (index, method) in class.methods.iter().enumerate() {
             if !method.is_abstract {
@@ -2572,7 +3133,8 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_class_init(&mut self, class: &CheckedClass, id: ClassId) {
+    fn emit_class_init(&mut self, class: &CheckedClass, id: ClassId, struct_params: &[String]) {
+        let generics = self.generic_params(struct_params, true);
         let params = class.init.as_ref().map(|init| &init.params);
         let param_list = params
             .map(|params| {
@@ -2587,7 +3149,7 @@ impl Emitter<'_> {
         self.fn_ret = "graphite_core::heap::Rooted".to_string();
         self.tries.clear();
         self.line(&format!(
-            "fn grf_init_{}(this: graphite_core::heap::Rooted{param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
+            "fn grf_init_{}{generics}(this: graphite_core::heap::Rooted{param_list}) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {{",
             class.name
         ));
         self.indent += 1;
@@ -2649,6 +3211,19 @@ impl Emitter<'_> {
         index: usize,
     ) {
         self.constructor_return = false;
+        let mut type_params = if method.is_static && method.type_params.is_empty() {
+            // Static methods may still use the class type parameters.
+            class.type_params.clone()
+        } else if method.is_static {
+            Vec::new()
+        } else {
+            class.type_params.clone()
+        };
+        type_params.extend(method.type_params.iter().cloned());
+        let generics = self.generic_params(
+            &type_params,
+            !type_params.is_empty() && (!method.is_static || !class.type_params.is_empty()),
+        );
         let params = method
             .params
             .iter()
@@ -2670,18 +3245,22 @@ impl Emitter<'_> {
         self.fn_ret = ret.clone();
         self.tries.clear();
         self.line(&format!(
-            "fn {}({all_params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{",
+            "fn {}{generics}({all_params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{",
             self.method_symbol(self.class_id(&class.name), index, false)
         ));
         self.indent += 1;
         self.emit_param_limits(&method.params);
-        for statement in &method.body {
-            self.emit_stmt(statement);
-        }
-        if method.ret == CanonicalType::Void {
-            self.line("Ok(())");
+        if method.is_generator {
+            self.emit_generator_from_fn(&method.body);
         } else {
-            self.line("unreachable!();");
+            for statement in &method.body {
+                self.emit_stmt(statement);
+            }
+            if method.ret == CanonicalType::Void {
+                self.line("Ok(())");
+            } else {
+                self.line("unreachable!();");
+            }
         }
         self.indent -= 1;
         self.line("}");
@@ -2697,7 +3276,7 @@ impl Emitter<'_> {
         freeze: bool,
     ) {
         let class_id = self.class_id(&class.name);
-        let struct_name = self.object_struct(class_id);
+        let struct_name = self.object_struct_params(class_id);
         let field_index = class
             .fields
             .iter()
@@ -2722,6 +3301,7 @@ impl Emitter<'_> {
         &mut self,
         class: ClassId,
         args: &[CheckedExpr],
+        type_args: &[CanonicalType],
         file: &str,
         line: u32,
         column: u32,
@@ -2735,8 +3315,9 @@ impl Emitter<'_> {
             .join(", ");
         let site = self.locate(file, line, column, end_column);
         let path = format!("crate::{}", class_new_fn(&name));
+        let turbofish = self.turbofish(type_args);
         format!(
-            "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{name}\", {site})) }}"
+            "match {path}{turbofish}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{name}\", {site})) }}"
         )
     }
 
@@ -2746,9 +3327,9 @@ impl Emitter<'_> {
             let read = format!("crate::{}()?", self.static_getter(class, field));
             return format!("{{ let _grf_recv = {object}; {read} }}");
         }
-        let struct_name = self.object_struct(class);
+        let struct_name = self.specialized_struct(class, object.ty());
         let field_name = self.field_symbol(class, field);
-        let field_ty = self.classes[class.0 as usize].fields[field].ty;
+        let field_ty = self.substituted_field_ty(class, field, object.ty());
         let object = self.emit_expr(object);
         let read = self.read_inside(field_ty, &format!("obj.{field_name}"));
         let unpack = self.unpack_expr(field_ty, "grf_raw");
@@ -2768,9 +3349,10 @@ impl Emitter<'_> {
         column: u32,
         end_column: u32,
     ) -> String {
-        let field_ty = self.classes[class.0 as usize].fields[field].ty;
+        let field_ty = self.substituted_field_ty(class, field, object.ty());
         let const_field = self.classes[class.0 as usize].fields[field].const_field;
         let is_static = self.classes[class.0 as usize].fields[field].is_static;
+        let object_ty = object.ty();
         let object = self.emit_expr(object);
         let value = self.emit_expr(value);
         if is_static {
@@ -2784,7 +3366,7 @@ impl Emitter<'_> {
                 "{{ let _grf_recv = {object}; let grf_stored = {value}; crate::{setter}(grf_stored.clone())?; {freeze} grf_stored }}"
             );
         }
-        let struct_name = self.object_struct(class);
+        let struct_name = self.specialized_struct(class, object_ty);
         let field_name = self.field_symbol(class, field);
         let packed = self.pack_expr(field_ty, "grf_stored");
         let site = self.locate(file, line, column, end_column);
@@ -2804,6 +3386,7 @@ impl Emitter<'_> {
         method: usize,
         object: &Option<Box<CheckedExpr>>,
         args: &[CheckedExpr],
+        type_args: &[CanonicalType],
         direct: bool,
         file: &str,
         line: u32,
@@ -2820,6 +3403,14 @@ impl Emitter<'_> {
             (class, method, false)
         };
         let path = format!("crate::{}", self.method_symbol(target, index, virt));
+        let mut all_type_args = Vec::new();
+        if !is_static {
+            if let Some(object) = object {
+                all_type_args.extend(self.type_args_of(object.ty()));
+            }
+        }
+        all_type_args.extend(type_args.iter().copied());
+        let turbofish = self.turbofish(&all_type_args);
         let args = args
             .iter()
             .map(|arg| self.emit_expr(arg))
@@ -2828,7 +3419,7 @@ impl Emitter<'_> {
         let site = self.locate(file, line, column, end_column);
         if is_static {
             let invoke = format!(
-                "match {path}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
+                "match {path}{turbofish}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
             );
             if let Some(object) = object {
                 let object = self.emit_expr(object);
@@ -2847,7 +3438,7 @@ impl Emitter<'_> {
                 format!("{object}, {args}")
             };
             format!(
-                "match {path}({call_args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
+                "match {path}{turbofish}({call_args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{method_name}\", {site})) }}"
             )
         }
     }
@@ -2863,7 +3454,9 @@ impl Emitter<'_> {
         column: u32,
         end_column: u32,
     ) -> String {
-        let name = self.interfaces[interface.0 as usize].methods[method].name.clone();
+        let name = self.interfaces[interface.0 as usize].methods[method]
+            .name
+            .clone();
         let path = format!("crate::{}", self.iface_symbol(interface, method));
         let object = self.emit_expr(object);
         let args = args
@@ -2911,6 +3504,166 @@ impl Emitter<'_> {
         class_struct(&self.classes[root.0 as usize].name)
     }
 
+    fn type_mentions_param(&self, ty: CanonicalType) -> bool {
+        match ty {
+            CanonicalType::Param(_) => true,
+            CanonicalType::Optional(kind) => self.type_mentions_param(kind.canonical()),
+            CanonicalType::Array { leaf, .. } => match leaf {
+                Leaf::Param(_) => true,
+                Leaf::Generic(id) => self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.type_mentions_param(*arg))
+                }),
+                _ => false,
+            },
+            CanonicalType::Generic(id) => {
+                self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.type_mentions_param(*arg))
+                })
+            }
+            CanonicalType::Map(id) => self.maps.get(id.0 as usize).is_some_and(|shape| {
+                self.type_mentions_param(shape.key) || self.type_mentions_param(shape.value)
+            }),
+            CanonicalType::Callable(id) => {
+                self.callables.get(id.0 as usize).is_some_and(|signature| {
+                    signature
+                        .params
+                        .iter()
+                        .any(|param| self.type_mentions_param(*param))
+                        || self.type_mentions_param(signature.ret)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn generic_params(&self, names: &[String], with_default: bool) -> String {
+        if names.is_empty() {
+            return String::new();
+        }
+        let bound = if with_default {
+            "graphite_core::value::GrfValue + Default"
+        } else {
+            "graphite_core::value::GrfValue"
+        };
+        let params = names
+            .iter()
+            .map(|name| format!("{}: {bound}", rust_ident(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{params}>")
+    }
+
+    fn param_turbofish(&self, names: &[String]) -> String {
+        if names.is_empty() {
+            return String::new();
+        }
+        format!(
+            "::<{}>",
+            names
+                .iter()
+                .map(|name| rust_ident(name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn turbofish(&self, args: &[CanonicalType]) -> String {
+        if args.is_empty() {
+            return String::new();
+        }
+        format!(
+            "::<{}>",
+            args.iter()
+                .map(|ty| self.ty_name(*ty))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn struct_type_params(&self, class: ClassId) -> Vec<String> {
+        let fields = self.layout_fields(class);
+        if fields.iter().any(|(_, ty)| self.type_mentions_param(*ty)) {
+            self.classes[class.0 as usize].type_params.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn object_struct_with(&self, name: &str, params: &[String]) -> String {
+        let name = class_struct(name);
+        if params.is_empty() {
+            name
+        } else {
+            format!(
+                "{name}::<{}>",
+                params
+                    .iter()
+                    .map(|param| rust_ident(param))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn object_struct_params(&self, class: ClassId) -> String {
+        let root = self.root_of(class);
+        let name = self.classes[root.0 as usize].name.clone();
+        let params = self.struct_type_params(root);
+        self.object_struct_with(&name, &params)
+    }
+
+    fn type_args_of(&self, ty: CanonicalType) -> Vec<CanonicalType> {
+        match ty {
+            CanonicalType::Generic(id) => self
+                .generics
+                .get(id.0 as usize)
+                .map(|instance| instance.args.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn specialized_struct(&self, class: ClassId, ty: CanonicalType) -> String {
+        let name = self.object_struct(class);
+        let args = self.type_args_of(ty);
+        if args.is_empty() {
+            if self.classes[class.0 as usize].type_params.is_empty() {
+                name
+            } else {
+                self.object_struct_params(class)
+            }
+        } else {
+            format!(
+                "{name}::<{}>",
+                args.iter()
+                    .map(|arg| self.ty_name(*arg))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+
+    fn substituted_field_ty(
+        &self,
+        class: ClassId,
+        field: usize,
+        object_ty: CanonicalType,
+    ) -> CanonicalType {
+        let declared = self.classes[class.0 as usize].fields[field].ty;
+        let args = self.type_args_of(object_ty);
+        if args.is_empty() {
+            return declared;
+        }
+        let params = &self.classes[class.0 as usize].type_params;
+        substitute_named(declared, params, &args, self.type_param_names)
+    }
+
     fn field_symbol(&self, class: ClassId, field: usize) -> String {
         let info = &self.classes[class.0 as usize];
         if self.shared(class) {
@@ -2952,7 +3705,12 @@ impl Emitter<'_> {
     fn method_symbol(&self, class: ClassId, method: usize, virt: bool) -> String {
         let info = &self.classes[class.0 as usize];
         let name = &info.methods[method].name;
-        let overloaded = info.methods.iter().filter(|item| item.name == *name).count() > 1;
+        let overloaded = info
+            .methods
+            .iter()
+            .filter(|item| item.name == *name)
+            .count()
+            > 1;
         let prefix = if virt { "grf_virt" } else { "grf_method" };
         if overloaded {
             format!("{prefix}_{}_{name}_{method}", info.name)
@@ -2963,10 +3721,7 @@ impl Emitter<'_> {
 
     fn static_slot(&self, class: ClassId, field: usize) -> String {
         let info = &self.classes[class.0 as usize];
-        rust_ident(&format!(
-            "GRF_SF_{}_{}",
-            info.name, info.fields[field].name
-        ))
+        rust_ident(&format!("GRF_SF_{}_{}", info.name, info.fields[field].name))
     }
 
     fn static_getter(&self, class: ClassId, field: usize) -> String {
@@ -2987,7 +3742,13 @@ impl Emitter<'_> {
         )
     }
 
-    fn same_signature(&self, class: ClassId, method: usize, name: &str, params: &[(String, CanonicalType)]) -> bool {
+    fn same_signature(
+        &self,
+        class: ClassId,
+        method: usize,
+        name: &str,
+        params: &[(String, CanonicalType)],
+    ) -> bool {
         let info = &self.classes[class.0 as usize].methods[method];
         info.name == name
             && !info.is_static
@@ -3004,7 +3765,9 @@ impl Emitter<'_> {
             return true;
         };
         let name = self.classes[class.0 as usize].methods[method].name.clone();
-        let params = self.classes[class.0 as usize].methods[method].params.clone();
+        let params = self.classes[class.0 as usize].methods[method]
+            .params
+            .clone();
         !self.classes[parent.0 as usize]
             .methods
             .iter()
@@ -3014,7 +3777,9 @@ impl Emitter<'_> {
 
     fn origin_method(&self, mut class: ClassId, mut method: usize) -> (ClassId, usize) {
         let name = self.classes[class.0 as usize].methods[method].name.clone();
-        let params = self.classes[class.0 as usize].methods[method].params.clone();
+        let params = self.classes[class.0 as usize].methods[method]
+            .params
+            .clone();
         while let Some(parent) = self.classes[class.0 as usize].parent {
             let Some(index) = self.classes[parent.0 as usize]
                 .methods
@@ -3031,20 +3796,29 @@ impl Emitter<'_> {
         (class, method)
     }
 
-    fn find_implementation(&self, class: ClassId, name: &str, params: &[CanonicalType]) -> Option<(ClassId, usize)> {
+    fn find_implementation(
+        &self,
+        class: ClassId,
+        name: &str,
+        params: &[CanonicalType],
+    ) -> Option<(ClassId, usize)> {
         let mut current = Some(class);
         while let Some(id) = current {
-            if let Some(index) = self.classes[id.0 as usize].methods.iter().position(|method| {
-                !method.is_static
-                    && !method.is_abstract
-                    && method.name == name
-                    && method.params.len() == params.len()
-                    && method
-                        .params
-                        .iter()
-                        .zip(params)
-                        .all(|((_, left), right)| left == right)
-            }) {
+            if let Some(index) = self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .position(|method| {
+                    !method.is_static
+                        && !method.is_abstract
+                        && method.name == name
+                        && method.params.len() == params.len()
+                        && method
+                            .params
+                            .iter()
+                            .zip(params)
+                            .all(|((_, left), right)| left == right)
+                })
+            {
                 return Some((id, index));
             }
             current = self.classes[id.0 as usize].parent;
@@ -3177,6 +3951,7 @@ impl Emitter<'_> {
             CanonicalType::Array { .. } => "Vec::new()".to_string(),
             CanonicalType::Optional(_) => "None".to_string(),
             CanonicalType::Map(_) => "std::collections::HashMap::new()".to_string(),
+            CanonicalType::Iter(_) => "graphite_core::iter::Iter::from_vec(Vec::new())".to_string(),
             other if other.is_integer() => "0".to_string(),
             _ => "Default::default()".to_string(),
         }
@@ -3184,7 +3959,9 @@ impl Emitter<'_> {
 
     fn emit_virtual(&mut self, origin: ClassId, method: usize) {
         let name = self.classes[origin.0 as usize].methods[method].name.clone();
-        let params = self.classes[origin.0 as usize].methods[method].params.clone();
+        let params = self.classes[origin.0 as usize].methods[method]
+            .params
+            .clone();
         let ret = self.classes[origin.0 as usize].methods[method].ret;
         let rust_ret = if ret == CanonicalType::Void {
             "()".to_string()
@@ -3327,7 +4104,9 @@ impl Emitter<'_> {
 
     fn contains_class_seen(&self, ty: CanonicalType, seen: &mut Vec<u32>) -> bool {
         match ty {
-            CanonicalType::Class(_) | CanonicalType::Interface(_) => true,
+            CanonicalType::Class(_) | CanonicalType::Interface(_) | CanonicalType::Generic(_) => {
+                true
+            }
             CanonicalType::Optional(kind) => self.contains_class_seen(kind.canonical(), seen),
             CanonicalType::Record(id) => {
                 if !seen.contains(&id.0) {
@@ -3362,7 +4141,9 @@ impl Emitter<'_> {
             CanonicalType::Optional(kind) => {
                 format!("Option<{}>", self.heap_ty(kind.canonical()))
             }
-            CanonicalType::Class(_) => "graphite_core::heap::Handle".to_string(),
+            CanonicalType::Class(_) | CanonicalType::Generic(_) | CanonicalType::Interface(_) => {
+                "graphite_core::heap::Handle".to_string()
+            }
             CanonicalType::Array { .. } => {
                 format!(
                     "Vec<{}>",
@@ -3384,7 +4165,9 @@ impl Emitter<'_> {
     fn heap_default(&self, ty: CanonicalType) -> String {
         match ty {
             CanonicalType::Optional(_) => "None".to_string(),
-            CanonicalType::Class(_) => "graphite_core::heap::Handle::invalid()".to_string(),
+            CanonicalType::Class(_) | CanonicalType::Generic(_) | CanonicalType::Interface(_) => {
+                "graphite_core::heap::Handle::invalid()".to_string()
+            }
             CanonicalType::Array { .. } => "Vec::new()".to_string(),
             CanonicalType::Map(_) => "std::collections::HashMap::new()".to_string(),
             CanonicalType::Record(_) => format!("{}::default()", self.ty_name(ty)),
@@ -3439,13 +4222,22 @@ impl Emitter<'_> {
                 let packed = self.pack_expr(inner, "grf_item");
                 format!("{access}.as_ref().map(|grf_item| {packed})")
             }
-            CanonicalType::Class(_) => format!("{access}.handle()"),
+            CanonicalType::Class(_) | CanonicalType::Generic(_) | CanonicalType::Interface(_) => {
+                format!("{access}.handle()")
+            }
+            CanonicalType::Param(_) => {
+                format!("graphite_core::value::GrfValue::grf_to_heap(&{access})")
+            }
             CanonicalType::Record(_) if self.contains_class(ty) => {
                 format!("{access}.grf_copy_raw()")
             }
             CanonicalType::Array { .. } => {
                 let element = ty.element().expect("array element");
-                if !self.contains_class(element) {
+                if matches!(element, CanonicalType::Param(_)) {
+                    format!(
+                        "{access}.iter().map(|grf_item| graphite_core::value::GrfValue::grf_to_heap(grf_item)).collect::<Vec<_>>()"
+                    )
+                } else if !self.contains_class(element) {
                     format!("{access}.clone()")
                 } else {
                     let inner = self.pack_expr(element, "grf_item");
@@ -3454,7 +4246,11 @@ impl Emitter<'_> {
             }
             CanonicalType::Map(id) => {
                 let value = self.maps[id.0 as usize].value;
-                if !self.contains_class(value) {
+                if matches!(value, CanonicalType::Param(_)) {
+                    format!(
+                        "{{ let mut grf_out = std::collections::HashMap::new(); for (grf_key, grf_val) in {access}.iter() {{ grf_out.insert(grf_key.clone(), graphite_core::value::GrfValue::grf_to_heap(grf_val)); }} grf_out }}"
+                    )
+                } else if !self.contains_class(value) {
                     format!("{access}.clone()")
                 } else {
                     let inner = self.pack_expr(value, "grf_val");
@@ -3468,6 +4264,9 @@ impl Emitter<'_> {
     }
 
     fn unpack_expr(&self, ty: CanonicalType, access: &str) -> String {
+        if matches!(ty, CanonicalType::Param(_)) {
+            return format!("graphite_core::value::GrfValue::grf_from_heap({access})");
+        }
         if !self.contains_class(ty) {
             return access.to_string();
         }
@@ -3476,7 +4275,12 @@ impl Emitter<'_> {
 
     fn unpack_result(&self, ty: CanonicalType, access: &str) -> String {
         match ty {
-            CanonicalType::Class(_) => format!("graphite_core::heap::root({access})"),
+            CanonicalType::Param(_) => {
+                format!("Ok(graphite_core::value::GrfValue::grf_from_heap({access}))")
+            }
+            CanonicalType::Class(_) | CanonicalType::Generic(_) | CanonicalType::Interface(_) => {
+                format!("graphite_core::heap::root({access})")
+            }
             CanonicalType::Record(_) if self.contains_class(ty) => {
                 format!("Ok({access}.grf_promote())")
             }
@@ -3547,6 +4351,12 @@ impl Emitter<'_> {
     }
 
     fn emit_trace_heap(&mut self, ty: CanonicalType, access: &str) {
+        if matches!(ty, CanonicalType::Param(_)) {
+            self.line(&format!(
+                "graphite_core::value::GrfValue::grf_trace(&{access}, visit);"
+            ));
+            return;
+        }
         if !self.contains_class(ty) {
             return;
         }
@@ -3555,7 +4365,7 @@ impl Emitter<'_> {
                 let inner = kind.canonical();
                 self.line(&format!("if let Some(grf_edge) = {access}.as_ref() {{"));
                 self.indent += 1;
-                if inner.is_class() {
+                if inner.is_class() || inner.is_generic() {
                     self.line("visit(*grf_edge);");
                 } else {
                     self.emit_trace_heap(inner, "grf_edge");
@@ -3563,7 +4373,9 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
-            CanonicalType::Class(_) => self.line(&format!("visit({access});")),
+            CanonicalType::Class(_) | CanonicalType::Generic(_) | CanonicalType::Interface(_) => {
+                self.line(&format!("visit({access});"))
+            }
             CanonicalType::Record(_) => self.line(&format!("{access}.grf_trace(visit);")),
             CanonicalType::Array { .. } => {
                 let element = ty.element().expect("array element");
@@ -3858,6 +4670,14 @@ impl Emitter<'_> {
             return self.callable_fn_type(id.0 as usize);
         }
         match ty {
+            CanonicalType::Param(id) => self
+                .type_param_names
+                .get(id.0 as usize)
+                .map(|name| rust_ident(name))
+                .unwrap_or_else(|| "T".to_string()),
+            CanonicalType::Generic(_) | CanonicalType::Class(_) | CanonicalType::Interface(_) => {
+                "graphite_core::heap::Rooted".to_string()
+            }
             CanonicalType::Record(id) => self
                 .records
                 .get(id.0 as usize)
@@ -3873,6 +4693,14 @@ impl Emitter<'_> {
                     self.ty_name(shape.key),
                     self.ty_name(shape.value)
                 )
+            }
+            CanonicalType::Iter(id) => {
+                let element = self
+                    .iters
+                    .get(id.0 as usize)
+                    .map(|shape| shape.element)
+                    .unwrap_or(CanonicalType::Int64);
+                format!("graphite_core::iter::Iter<{}>", self.ty_name(element))
             }
             CanonicalType::Array {
                 leaf: Leaf::Map(id),
@@ -3891,6 +4719,17 @@ impl Emitter<'_> {
                 ..
             } => {
                 let mut name = self.ty_name(CanonicalType::Record(id));
+                for _ in 0..depth {
+                    name = format!("Vec<{name}>");
+                }
+                name
+            }
+            CanonicalType::Array {
+                leaf: Leaf::Param(id),
+                depth,
+                ..
+            } => {
+                let mut name = self.ty_name(CanonicalType::Param(id));
                 for _ in 0..depth {
                     name = format!("Vec<{name}>");
                 }
@@ -3990,6 +4829,46 @@ fn vec_turbofish(ty_name: &str) -> String {
         .and_then(|rest| rest.strip_suffix('>'))
         .map(|inner| format!("Vec::<{inner}>"))
         .unwrap_or_else(|| ty_name.to_string())
+}
+
+fn substitute_named(
+    ty: CanonicalType,
+    params: &[String],
+    args: &[CanonicalType],
+    type_param_names: &[String],
+) -> CanonicalType {
+    match ty {
+        CanonicalType::Param(id) => {
+            let Some(name) = type_param_names.get(id.0 as usize) else {
+                return ty;
+            };
+            params
+                .iter()
+                .position(|param| param == name)
+                .and_then(|index| args.get(index).copied())
+                .unwrap_or(ty)
+        }
+        CanonicalType::Optional(kind) => {
+            let inner = substitute_named(kind.canonical(), params, args, type_param_names);
+            inner.optional().unwrap_or(inner)
+        }
+        CanonicalType::Array {
+            leaf,
+            depth,
+            limits,
+        } => CanonicalType::Array {
+            leaf: match leaf {
+                Leaf::Param(id) => {
+                    substitute_named(CanonicalType::Param(id), params, args, type_param_names)
+                        .leaf()
+                }
+                other => other,
+            },
+            depth,
+            limits,
+        },
+        other => other,
+    }
 }
 
 fn record_struct(name: &str) -> String {
@@ -4560,6 +5439,138 @@ pub(crate) struct GrfType {
 }
 
 "#;
+
+fn collect_generator_locals(body: &[CheckedStmt]) -> Vec<(String, CanonicalType)> {
+    let mut locals = Vec::new();
+    for stmt in body {
+        collect_generator_locals_stmt(stmt, &mut locals);
+    }
+    locals
+}
+
+fn collect_generator_locals_stmt(stmt: &CheckedStmt, locals: &mut Vec<(String, CanonicalType)>) {
+    match stmt {
+        CheckedStmt::Let { name, ty, .. } => {
+            if !locals.iter().any(|(n, _)| n == name) {
+                locals.push((name.clone(), *ty));
+            }
+        }
+        CheckedStmt::Destructure { bindings, .. } => {
+            for (name, ty, _) in bindings {
+                if !locals.iter().any(|(n, _)| n == name) {
+                    locals.push((name.clone(), *ty));
+                }
+            }
+        }
+        CheckedStmt::Block { body }
+        | CheckedStmt::While { body, .. }
+        | CheckedStmt::Loop { body } => {
+            for stmt in body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+        }
+        CheckedStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for stmt in then_body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+            if let Some(else_body) = else_body {
+                for stmt in else_body {
+                    collect_generator_locals_stmt(stmt, locals);
+                }
+            }
+        }
+        CheckedStmt::CStyle {
+            initializer, body, ..
+        } => {
+            if let Some(initializer) = initializer {
+                collect_generator_locals_stmt(initializer, locals);
+            }
+            for stmt in body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+        }
+        CheckedStmt::Iterate { bindings, body, .. } => {
+            for (name, ty, _) in bindings {
+                if !locals.iter().any(|(n, _)| n == name) {
+                    locals.push((name.clone(), *ty));
+                }
+            }
+            for stmt in body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+        }
+        CheckedStmt::Try {
+            body,
+            catches,
+            finally_body,
+        } => {
+            for stmt in body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+            for clause in catches {
+                for stmt in &clause.body {
+                    collect_generator_locals_stmt(stmt, locals);
+                }
+            }
+            if let Some(finally_body) = finally_body {
+                for stmt in finally_body {
+                    collect_generator_locals_stmt(stmt, locals);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn checked_contains_emit(body: &[CheckedStmt]) -> bool {
+    body.iter().any(checked_stmt_contains_emit)
+}
+
+fn checked_stmt_contains_emit(stmt: &CheckedStmt) -> bool {
+    match stmt {
+        CheckedStmt::Emit { .. } => true,
+        CheckedStmt::Block { body }
+        | CheckedStmt::While { body, .. }
+        | CheckedStmt::Loop { body }
+        | CheckedStmt::Iterate { body, .. } => checked_contains_emit(body),
+        CheckedStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            checked_contains_emit(then_body)
+                || else_body
+                    .as_ref()
+                    .is_some_and(|body| checked_contains_emit(body))
+        }
+        CheckedStmt::CStyle {
+            initializer, body, ..
+        } => {
+            initializer
+                .as_ref()
+                .is_some_and(|stmt| checked_stmt_contains_emit(stmt))
+                || checked_contains_emit(body)
+        }
+        CheckedStmt::Try {
+            body,
+            catches,
+            finally_body,
+        } => {
+            checked_contains_emit(body)
+                || catches
+                    .iter()
+                    .any(|clause| checked_contains_emit(&clause.body))
+                || finally_body
+                    .as_ref()
+                    .is_some_and(|body| checked_contains_emit(body))
+        }
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {

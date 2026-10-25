@@ -1019,7 +1019,10 @@ void main() {
 ",
     );
     assert_eq!(
-        child.classes[0].parent.as_ref().map(|name| name.name.as_str()),
+        child.classes[0]
+            .parent
+            .as_ref()
+            .map(|name| name.name.as_str()),
         Some("Animal")
     );
     assert_rejected(
@@ -1124,7 +1127,13 @@ void main() {
     let nested = operation.callable.as_ref().expect("callable parameter");
     assert_eq!(nested.len(), 1);
     assert_eq!(nested[0].name.name, "x");
-    assert!(program.functions[2].parameters[0].callable.as_ref().unwrap().is_empty());
+    assert!(
+        program.functions[2].parameters[0]
+            .callable
+            .as_ref()
+            .unwrap()
+            .is_empty()
+    );
 
     let main = &program.functions[3].body.statements;
     let Stmt::VariableDecl(square) = &main[0] else {

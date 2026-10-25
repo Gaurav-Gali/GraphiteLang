@@ -119,6 +119,7 @@ pub enum TokenKind {
     GreaterGreaterEqual,
     KwAnd,
     KwOr,
+    KwEmit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,7 @@ fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
         TokenKind::KwSuper => "super",
         TokenKind::KwAnd => "and",
         TokenKind::KwOr => "or",
+        TokenKind::KwEmit => "emit",
         _ => return None,
     })
 }
@@ -259,6 +261,7 @@ pub fn keyword(ident: &str) -> Option<TokenKind> {
         "super" => TokenKind::KwSuper,
         "and" => TokenKind::KwAnd,
         "or" => TokenKind::KwOr,
+        "emit" => TokenKind::KwEmit,
         _ => return None,
     })
 }

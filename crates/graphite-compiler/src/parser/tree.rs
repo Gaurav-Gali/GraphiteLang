@@ -130,6 +130,15 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 write_expression(out, &child_prefix(prefix, last), true, value);
             }
         }
+        Stmt::Emit(emit_statement) => {
+            write_line(out, prefix, last, "Emit");
+            write_expression(
+                out,
+                &child_prefix(prefix, last),
+                true,
+                &emit_statement.value,
+            );
+        }
         Stmt::If(if_statement) => {
             write_line(out, prefix, last, "If");
             let child = child_prefix(prefix, last);

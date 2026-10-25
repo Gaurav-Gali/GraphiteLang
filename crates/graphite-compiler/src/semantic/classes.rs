@@ -147,6 +147,9 @@ fn scan_stmt(stmt: &Stmt, tainted: &mut HashSet<String>, scan: &mut Scan) {
                 }
             }
         }
+        Stmt::Emit(stmt) => {
+            let _ = scan_expr(&stmt.value, tainted, scan);
+        }
         Stmt::If(stmt) => {
             let _ = scan_expr(&stmt.condition, tainted, scan);
             let mut then_taint = tainted.clone();
@@ -439,6 +442,9 @@ fn walk_stmt(
                 }
             }
             flow.diverges = true;
+        }
+        Stmt::Emit(stmt) => {
+            let _ = walk_expr(&stmt.value, class, leaks, checking, flow, issues);
         }
         Stmt::If(stmt) => {
             let _ = walk_expr(&stmt.condition, class, leaks, checking, flow, issues);

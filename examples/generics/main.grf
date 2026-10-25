@@ -1,0 +1,78 @@
+import grf.io;
+
+T identity<T>(T value) {
+    return value;
+}
+
+class Box<T> {
+    T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    T get() {
+        return this.value;
+    }
+
+    void set(T value) {
+        this.value = value;
+    }
+}
+
+class Pair<T, U> {
+    T first;
+    U second;
+
+    Pair(T first, U second) {
+        this.first = first;
+        this.second = second;
+    }
+}
+
+class Converter {
+    @static
+    T identity<T>(T value) {
+        return value;
+    }
+}
+
+class Container<T> {
+    T value;
+
+    Container(T value) {
+        this.value = value;
+    }
+
+    U transform<U>(U replacement) {
+        return replacement;
+    }
+}
+
+void main() {
+    int n = identity<int>(10);
+    io.println(str(n));
+
+    Box<int> box = Box<int>(10);
+    io.println(str(box.get()));
+    box.set(20);
+    io.println(str(box.get()));
+
+    Box<int> other = new Box<int>(30);
+    io.println(str(other.get()));
+
+    Pair<int, str> pair = Pair<int, str>(10, "Graphite");
+    io.println(str(pair.first));
+    io.println(pair.second);
+
+    Box<Pair<int, str>> nested = Box<Pair<int, str>>(pair);
+    io.println(str(nested.get().first));
+    io.println(nested.get().second);
+
+    int m = Converter.identity<int>(40);
+    io.println(str(m));
+
+    Container<int> container = Container<int>(50);
+    str text = container.transform<str>("ok");
+    io.println(text);
+}

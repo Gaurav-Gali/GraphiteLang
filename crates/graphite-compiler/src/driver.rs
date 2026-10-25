@@ -231,10 +231,7 @@ fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, Ru
     }
     let mut compiler_stderr = String::new();
     for warning in &analysis.warnings {
-        compiler_stderr.push_str(&format!(
-            "warning[{}]: {}\n",
-            warning.code, warning.message
-        ));
+        compiler_stderr.push_str(&format!("warning[{}]: {}\n", warning.code, warning.message));
     }
     let checked = analysis.program.expect("checked program");
     let rust = generate_with_source(&checked, &source_name, &source);
@@ -629,6 +626,18 @@ void main() {
     }
 
     #[test]
+    fn generics_example_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/generics/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "10\n10\n20\n30\n10\nGraphite\n10\nGraphite\n40\nok\n"
+        );
+    }
+
+    #[test]
     fn lambdas_run() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/lambdas/main.grf");
@@ -698,7 +707,7 @@ void main() {
     int a, const int b = [4, 5];
     io.println(a);
     io.println(b);
-    loop (uint64 idx, int value = [8].enumerate()) {
+    loop (uint64 idx, int value : [8].enumerate()) {
         io.println(idx);
         io.println(value);
     }
@@ -718,7 +727,7 @@ void main() {
     }
 
     #[test]
-    fn array_iteration_allows_modification() {
+    fn array_iteration_rejects_modification() {
         let _guard = BUILD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("grf-iter-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -731,26 +740,241 @@ import grf.io;
 void main() {
     int[] arr = [1, 2, 3];
     int i = 0;
-    loop (int a = arr.iter()) {
+    loop (int a : arr) {
         arr[i] = i * i;
         i++;
     }
-    io.println(arr);
-
-    int[] extra = [1];
-    loop (int value = extra.iter()) {
-        if (extra.length() < 3) {
-            extra.push(value + 1);
-        }
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "expected compile failure");
+        assert!(
+            output.stderr.contains("while it is being iterated"),
+            "{}",
+            output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
-    io.println(extra);
+
+    #[test]
+    fn iterators_and_generators_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-iters-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+void main() {
+    int[] numbers = [10, 20];
+    iter<int> it = numbers.iter();
+    loop (it.hasNext()) {
+        io.println(it.next());
+    }
+    loop (int value : range(1, 4)) {
+        io.println(value);
+    }
+    loop (int value : numbers) {
+        io.println(value);
+    }
 }
 "#,
         )
         .unwrap();
         let output = run_captured(&path);
         assert_eq!(output.status, 0, "{}", output.stderr);
-        assert_eq!(output.stdout, "[0, 1, 4]\n[1, 2, 3]\n");
+        assert_eq!(output.stdout, "10\n20\n1\n2\n3\n10\n20\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generic_generators_strings_and_range_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-gen-iter-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+import grf.io;
+
+iter<T> repeat<T>(T value, int count) {
+    loop (int i = 0; i < count; i++) {
+        emit value;
+    }
+}
+
+iter<int> countdown(int start) {
+    loop (int i = start; i >= 0; i--) {
+        if (i == 1) {
+            return;
+        }
+        emit i;
+    }
+}
+
+iter<int> sideEffect(int n) {
+    io.println("body");
+    emit n;
+}
+
+void main() {
+    loop (str w : repeat<str>("hi", 2)) {
+        io.println(w);
+    }
+    loop (int n : repeat<int>(7, 2)) {
+        io.println(n);
+    }
+
+    io.println("lazy");
+    iter<int> pending = sideEffect(9);
+    io.println("created");
+    io.println(pending.next());
+
+    io.println("early");
+    loop (int v : countdown(3)) {
+        io.println(v);
+    }
+
+    io.println("chars");
+    loop (chr c : "a😀b") {
+        io.println(c);
+    }
+
+    io.println("range");
+    loop (int i : range(10)) {
+        io.println(i);
+    }
+    loop (int i : range(1, 10, 2)) {
+        io.println(i);
+    }
+    loop (int i : range(5, 0, -1)) {
+        io.println(i);
+    }
+
+    io.println("alias");
+    int[] nums = [1, 2, 3];
+    iter<int> a = nums.iter();
+    iter<int> b = a.iter();
+    io.println(a.next());
+    io.println(b.next());
+    io.println(nums[1:3]);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            "\
+hi
+hi
+7
+7
+lazy
+created
+body
+9
+early
+3
+2
+chars
+a
+😀
+b
+range
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+1
+3
+5
+7
+9
+5
+4
+3
+2
+1
+alias
+1
+2
+[2, 3]
+"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generic_generator_requires_type_arguments() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-gen-args-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+iter<T> repeat<T>(T value, int count) {
+    loop (int i = 0; i < count; i++) {
+        emit value;
+    }
+}
+
+void main() {
+    iter<str> words = repeat("hello", 3);
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "expected compile failure");
+        assert!(
+            output.stderr.contains("requires type arguments")
+                || output.stderr.contains("GRF-SEM-034"),
+            "{}",
+            output.stderr
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generator_rejects_valued_return_and_bad_emit() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-gen-diag-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"
+iter<int> bad() {
+    emit "nope";
+    return 1;
+}
+
+void main() {}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_ne!(output.status, 0, "expected compile failure");
+        assert!(
+            output.stderr.contains("expected 'int64'")
+                || output.stderr.contains("cannot return a value"),
+            "{}",
+            output.stderr
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2094,7 +2318,7 @@ void main() {
     scores["Zoe"] = 1;
     io.println(lengthOf(names));
     int seen = 0;
-    loop (str name = names.iter()) {
+    loop (str name : names) {
         if (name == "Ada") { seen = seen + 1; }
         if (name == "Grace") { seen = seen + 1; }
         if (name == "Bob") { seen = seen + 1; }
@@ -2103,7 +2327,7 @@ void main() {
     io.println(scores.containsKey("Zoe"));
 
     int rounds = 0;
-    loop (str key, int value = scores.entries()) {
+    loop (str key, int value : scores.entries()) {
         scores.set("Later", 9);
         rounds = rounds + 1;
         io.println(lengthOf(key) > 0);

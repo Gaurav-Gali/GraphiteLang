@@ -865,7 +865,10 @@ mod tests {
             char_to_signed('1', i64::MIN as i128, i64::MAX as i128, "int64", here).unwrap(),
             1
         );
-        assert_eq!(char_to_unsigned('4', u64::MAX as u128, "uint64", here).unwrap(), 4);
+        assert_eq!(
+            char_to_unsigned('4', u64::MAX as u128, "uint64", here).unwrap(),
+            4
+        );
         assert_eq!(char_to_f64('3', here).unwrap(), 3.0);
         let failed = char_to_signed('A', i64::MIN as i128, i64::MAX as i128, "int64", here);
         assert!(failed.is_err());

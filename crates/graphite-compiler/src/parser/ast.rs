@@ -20,6 +20,7 @@ pub struct TypeDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassDecl {
     pub name: Identifier,
+    pub type_params: Vec<Identifier>,
     pub parent: Option<Identifier>,
     pub interfaces: Vec<Identifier>,
     pub abstract_class: bool,
@@ -81,6 +82,7 @@ pub struct ClassMethod {
     pub deprecated: bool,
     pub return_type: TypeSyntax,
     pub name: Identifier,
+    pub type_params: Vec<Identifier>,
     pub parameters: Vec<Parameter>,
     pub body: BlockStmt,
     pub span: Span,
@@ -105,6 +107,7 @@ pub struct ImportDecl {
 pub struct FunctionDecl {
     pub return_type: TypeSyntax,
     pub name: Identifier,
+    pub type_params: Vec<Identifier>,
     pub parameters: Vec<Parameter>,
     pub body: BlockStmt,
     pub span: Span,
@@ -118,6 +121,8 @@ pub struct Parameter {
     /// Nested parameters when this parameter is callable, as in `int op(int x)`.
     /// `Some` with an empty list is a zero-argument callable.
     pub callable: Option<Vec<Parameter>>,
+    /// Optional default value, as in `int b = 10` or `int? e = null`.
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
@@ -183,6 +188,7 @@ pub enum Stmt {
     VariableDecl(VariableDecl),
     Destructure(DestructureDecl),
     Return(ReturnStmt),
+    Emit(EmitStmt),
     If(IfStmt),
     Loop(LoopStmt),
     Break(Span),
@@ -191,6 +197,12 @@ pub enum Stmt {
     Expression(ExpressionStmt),
     Conditional(ConditionalStmt),
     Super(SuperStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmitStmt {
+    pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +484,7 @@ pub struct AssignmentExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewExpr {
     pub name: Identifier,
+    pub type_arguments: Vec<TypeSyntax>,
     pub arguments: Vec<Expr>,
     pub span: Span,
 }
@@ -479,6 +492,7 @@ pub struct NewExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallExpr {
     pub callee: Box<Expr>,
+    pub type_arguments: Vec<TypeSyntax>,
     pub arguments: Vec<Expr>,
     pub span: Span,
 }

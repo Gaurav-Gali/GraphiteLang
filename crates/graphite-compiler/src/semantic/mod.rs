@@ -21,7 +21,7 @@
 //! the frozen overflow policy. Floating-point arithmetic uses Rust's IEEE-754
 //! operators.
 //!
-//! `lengthOf` and `typeOf` are reserved built-ins. `lengthOf` takes one `str`,
+//! `lengthOf`, `typeOf`, and `range` are reserved built-ins. `lengthOf` takes one `str`,
 //! array, record, or map and yields `uint64`. Strings count Unicode scalar
 //! values, arrays and maps count elements, and records count the fields
 //! declared directly by their named type. `typeOf` takes one value and yields
@@ -43,6 +43,7 @@ use crate::span::Span;
 
 pub(crate) mod classes;
 pub(crate) mod convert;
+pub(crate) mod generics;
 pub(crate) mod numeric;
 
 use convert::{ConvOp, conversion};
@@ -55,6 +56,9 @@ pub struct RecordId(pub u32);
 pub struct MapId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IterId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClassId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,6 +66,18 @@ pub struct InterfaceId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallableId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeParamId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GenericId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericInstance {
+    pub class: ClassId,
+    pub args: Vec<CanonicalType>,
+}
 
 /// Parameter types and return type of a callable value.
 ///
@@ -105,6 +121,12 @@ pub enum CanonicalType {
     Callable(CallableId),
     /// A reference whose static type is an interface.
     Interface(InterfaceId),
+    /// A type parameter declared on a function, method, or class.
+    Param(TypeParamId),
+    /// A constructed generic class. The arguments live in the program table.
+    Generic(GenericId),
+    /// Built-in `iter<T>`. The element type lives in the program table.
+    Iter(IterId),
 }
 
 /// The type inside `T?`. One level of nullability.
@@ -131,6 +153,8 @@ pub enum OptionalKind {
         depth: u8,
         limits: [Option<u64>; MAX_ARRAY_RANK],
     },
+    Param(TypeParamId),
+    Generic(GenericId),
 }
 
 impl OptionalKind {
@@ -161,6 +185,8 @@ impl OptionalKind {
                 depth,
                 limits,
             },
+            OptionalKind::Param(id) => CanonicalType::Param(id),
+            OptionalKind::Generic(id) => CanonicalType::Generic(id),
         }
     }
 }
@@ -176,15 +202,23 @@ impl PartialEq for OptionalKind {
                     ..
                 },
             ) => leaf == other_leaf && depth == other_depth,
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other) && match (self, other)
-            {
-                (OptionalKind::Record(left), OptionalKind::Record(right)) => left == right,
-                (OptionalKind::Class(left), OptionalKind::Class(right)) => left == right,
-                (OptionalKind::Interface(left), OptionalKind::Interface(right)) => left == right,
-                (OptionalKind::Map(left), OptionalKind::Map(right)) => left == right,
-                (OptionalKind::Array { .. }, _) | (_, OptionalKind::Array { .. }) => false,
-                _ => true,
-            },
+            _ => {
+                std::mem::discriminant(self) == std::mem::discriminant(other)
+                    && match (self, other) {
+                        (OptionalKind::Record(left), OptionalKind::Record(right)) => left == right,
+                        (OptionalKind::Class(left), OptionalKind::Class(right)) => left == right,
+                        (OptionalKind::Interface(left), OptionalKind::Interface(right)) => {
+                            left == right
+                        }
+                        (OptionalKind::Map(left), OptionalKind::Map(right)) => left == right,
+                        (OptionalKind::Param(left), OptionalKind::Param(right)) => left == right,
+                        (OptionalKind::Generic(left), OptionalKind::Generic(right)) => {
+                            left == right
+                        }
+                        (OptionalKind::Array { .. }, _) | (_, OptionalKind::Array { .. }) => false,
+                        _ => true,
+                    }
+            }
         }
     }
 }
@@ -205,13 +239,13 @@ fn limits_need_check(source: CanonicalType, target: CanonicalType) -> bool {
                 depth: target_depth,
                 limits: target_limits,
             },
-        ) if leaf == target_leaf && depth == target_depth => (0..depth as usize).any(|index| {
-            match (source_limits[index], target_limits[index]) {
+        ) if leaf == target_leaf && depth == target_depth => {
+            (0..depth as usize).any(|index| match (source_limits[index], target_limits[index]) {
                 (_, None) => false,
                 (Some(source_limit), Some(target_limit)) => source_limit > target_limit,
                 (None, Some(_)) => true,
-            }
-        }),
+            })
+        }
         _ => false,
     }
 }
@@ -233,6 +267,9 @@ impl PartialEq for CanonicalType {
             (CanonicalType::Interface(left), CanonicalType::Interface(right)) => left == right,
             (CanonicalType::Map(left), CanonicalType::Map(right)) => left == right,
             (CanonicalType::Callable(left), CanonicalType::Callable(right)) => left == right,
+            (CanonicalType::Param(left), CanonicalType::Param(right)) => left == right,
+            (CanonicalType::Generic(left), CanonicalType::Generic(right)) => left == right,
+            (CanonicalType::Iter(left), CanonicalType::Iter(right)) => left == right,
             _ => {
                 std::mem::discriminant(self) == std::mem::discriminant(other)
                     && !matches!(
@@ -244,6 +281,9 @@ impl PartialEq for CanonicalType {
                             | CanonicalType::Interface(_)
                             | CanonicalType::Map(_)
                             | CanonicalType::Callable(_)
+                            | CanonicalType::Param(_)
+                            | CanonicalType::Generic(_)
+                            | CanonicalType::Iter(_)
                     )
             }
         }
@@ -270,6 +310,8 @@ pub enum Leaf {
     Class(ClassId),
     Interface(InterfaceId),
     Map(MapId),
+    Param(TypeParamId),
+    Generic(GenericId),
 }
 
 impl CanonicalType {
@@ -289,7 +331,7 @@ impl CanonicalType {
             CanonicalType::Str => "String".to_string(),
             CanonicalType::Type => "GrfType".to_string(),
             CanonicalType::ErrorHandle => "graphite_core::diagnostic::RuntimeError".to_string(),
-            CanonicalType::Class(_) | CanonicalType::Interface(_) => {
+            CanonicalType::Class(_) | CanonicalType::Interface(_) | CanonicalType::Generic(_) => {
                 "graphite_core::heap::Rooted".to_string()
             }
             CanonicalType::Record(_) => "GrfRecord".to_string(),
@@ -303,6 +345,8 @@ impl CanonicalType {
             }
             CanonicalType::Optional(kind) => format!("Option<{}>", kind.canonical().rust_name()),
             CanonicalType::Callable(_) => "fn()".to_string(),
+            CanonicalType::Param(_) => "T".to_string(),
+            CanonicalType::Iter(_) => "graphite_core::iter::Iter<()>".to_string(),
         }
     }
 
@@ -311,7 +355,8 @@ impl CanonicalType {
             CanonicalType::Optional(_)
             | CanonicalType::Void
             | CanonicalType::ErrorHandle
-            | CanonicalType::Callable(_) => {
+            | CanonicalType::Callable(_)
+            | CanonicalType::Iter(_) => {
                 return None;
             }
             CanonicalType::Int16 => OptionalKind::Int16,
@@ -339,6 +384,8 @@ impl CanonicalType {
                 depth,
                 limits,
             },
+            CanonicalType::Param(id) => OptionalKind::Param(id),
+            CanonicalType::Generic(id) => OptionalKind::Generic(id),
         };
         Some(CanonicalType::Optional(kind))
     }
@@ -381,6 +428,9 @@ impl CanonicalType {
             }
             CanonicalType::Optional(kind) => format!("{}?", kind.canonical().spelling()),
             CanonicalType::Callable(_) => "callable".to_string(),
+            CanonicalType::Param(_) => "param".to_string(),
+            CanonicalType::Generic(_) => "generic".to_string(),
+            CanonicalType::Iter(_) => "iter".to_string(),
         }
     }
 
@@ -439,10 +489,16 @@ impl CanonicalType {
                 | CanonicalType::Record(_)
                 | CanonicalType::Class(_)
                 | CanonicalType::Interface(_)
+                | CanonicalType::Generic(_)
                 | CanonicalType::Map(_)
                 | CanonicalType::Array { .. }
                 | CanonicalType::Optional(_)
+                | CanonicalType::Iter(_)
         )
+    }
+
+    pub fn is_iter(self) -> bool {
+        matches!(self, CanonicalType::Iter(_))
     }
 
     pub fn is_record(self) -> bool {
@@ -457,8 +513,16 @@ impl CanonicalType {
         matches!(self, CanonicalType::Interface(_))
     }
 
+    pub fn is_generic(self) -> bool {
+        matches!(self, CanonicalType::Generic(_))
+    }
+
+    pub fn is_param(self) -> bool {
+        matches!(self, CanonicalType::Param(_))
+    }
+
     pub fn is_object(self) -> bool {
-        self.is_class() || self.is_interface()
+        self.is_class() || self.is_interface() || self.is_generic()
     }
 
     pub fn is_map(self) -> bool {
@@ -508,7 +572,7 @@ impl CanonicalType {
         }
     }
 
-    fn leaf(self) -> Leaf {
+    pub(crate) fn leaf(self) -> Leaf {
         match self {
             CanonicalType::Void => Leaf::Void,
             CanonicalType::Int16 => Leaf::Int16,
@@ -529,7 +593,11 @@ impl CanonicalType {
             CanonicalType::Interface(id) => Leaf::Interface(id),
             CanonicalType::Map(id) => Leaf::Map(id),
             CanonicalType::Array { leaf, .. } => leaf,
-            CanonicalType::Optional(_) | CanonicalType::Callable(_) => Leaf::Void,
+            CanonicalType::Param(id) => Leaf::Param(id),
+            CanonicalType::Generic(id) => Leaf::Generic(id),
+            CanonicalType::Optional(_) | CanonicalType::Callable(_) | CanonicalType::Iter(_) => {
+                Leaf::Void
+            }
         }
     }
 
@@ -575,6 +643,8 @@ impl Leaf {
             Leaf::Class(id) => CanonicalType::Class(id),
             Leaf::Interface(id) => CanonicalType::Interface(id),
             Leaf::Map(id) => CanonicalType::Map(id),
+            Leaf::Param(id) => CanonicalType::Param(id),
+            Leaf::Generic(id) => CanonicalType::Generic(id),
         }
     }
 
@@ -598,6 +668,8 @@ impl Leaf {
             Leaf::Class(_) => "class",
             Leaf::Interface(_) => "interface",
             Leaf::Map(_) => "map",
+            Leaf::Param(_) => "param",
+            Leaf::Generic(_) => "generic",
         }
     }
 
@@ -689,8 +761,13 @@ pub struct CheckedProgram {
     pub classes: Vec<CheckedClass>,
     pub interfaces: Vec<CheckedInterface>,
     pub maps: Vec<MapShape>,
+    pub iters: Vec<IterShape>,
     pub callables: Vec<CallableSignature>,
     pub functions: Vec<CheckedFn>,
+    /// Concrete copies of generic functions, keyed by call-site type arguments.
+    pub specializations: Vec<CheckedFn>,
+    pub generics: Vec<GenericInstance>,
+    pub type_param_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,6 +792,7 @@ pub struct CheckedClass {
     pub fields: Vec<CheckedClassField>,
     pub init: Option<CheckedInit>,
     pub methods: Vec<CheckedMethod>,
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -743,12 +821,19 @@ pub struct CheckedMethod {
     pub is_static: bool,
     pub is_abstract: bool,
     pub is_virtual: bool,
+    pub type_params: Vec<String>,
+    pub is_generator: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapShape {
     pub key: CanonicalType,
     pub value: CanonicalType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IterShape {
+    pub element: CanonicalType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,6 +848,9 @@ pub struct CheckedFn {
     pub params: Vec<(String, CanonicalType)>,
     pub ret: CanonicalType,
     pub body: Vec<CheckedStmt>,
+    pub type_params: Vec<String>,
+    /// True when the function returns `iter<T>` and uses `emit`.
+    pub is_generator: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -821,6 +909,9 @@ pub enum CheckedStmt {
     Super {
         class: ClassId,
         args: Vec<CheckedExpr>,
+    },
+    Emit {
+        value: CheckedExpr,
     },
 }
 
@@ -1007,6 +1098,7 @@ pub enum CheckedExpr {
     Call {
         path: String,
         args: Vec<CheckedExpr>,
+        type_args: Vec<CanonicalType>,
         ty: CanonicalType,
         callee: String,
         file: String,
@@ -1200,6 +1292,7 @@ pub enum CheckedExpr {
     ClassNew {
         class: ClassId,
         args: Vec<CheckedExpr>,
+        type_args: Vec<CanonicalType>,
         ty: CanonicalType,
         file: String,
         line: u32,
@@ -1228,6 +1321,7 @@ pub enum CheckedExpr {
         method: usize,
         object: Option<Box<CheckedExpr>>,
         args: Vec<CheckedExpr>,
+        type_args: Vec<CanonicalType>,
         ty: CanonicalType,
         direct: bool,
         file: String,
@@ -1280,6 +1374,38 @@ pub enum CheckedExpr {
     Unready {
         ty: CanonicalType,
     },
+    /// `array.iter()` / `iter.iter()` producing or aliasing an `iter<T>`.
+    MakeIter {
+        object: Box<CheckedExpr>,
+        ty: CanonicalType,
+    },
+    IterCall {
+        object: Box<CheckedExpr>,
+        method: IterMethod,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+    /// Built-in `range(end)`, `range(start, end)`, or `range(start, end, step)`.
+    Range {
+        start: Box<CheckedExpr>,
+        end: Box<CheckedExpr>,
+        step: Box<CheckedExpr>,
+        ty: CanonicalType,
+        file: String,
+        line: u32,
+        column: u32,
+        end_column: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterMethod {
+    HasNext,
+    Next,
+    Iter,
 }
 
 impl CheckedExpr {
@@ -1320,6 +1446,9 @@ impl CheckedExpr {
             | CheckedExpr::IfaceCall { ty, .. }
             | CheckedExpr::Upcast { ty, .. }
             | CheckedExpr::EnsureLimit { ty, .. }
+            | CheckedExpr::MakeIter { ty, .. }
+            | CheckedExpr::IterCall { ty, .. }
+            | CheckedExpr::Range { ty, .. }
             | CheckedExpr::Null { ty }
             | CheckedExpr::Wrap { ty, .. }
             | CheckedExpr::Unwrap { ty, .. }
@@ -1345,6 +1474,7 @@ struct Signature {
     params: Vec<ParamInfo>,
     ret: CanonicalType,
     span: Span,
+    type_params: Vec<TypeParamId>,
 }
 
 #[derive(Clone)]
@@ -1352,6 +1482,7 @@ struct ParamInfo {
     name: String,
     ty: CanonicalType,
     auto: bool,
+    default: Option<Expr>,
 }
 
 #[derive(Clone)]
@@ -1384,6 +1515,8 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         warnings: Vec::new(),
         at_super_slot: false,
         maps: Vec::new(),
+        iters: Vec::new(),
+        generator_element: None,
         resolve_stack: Vec::new(),
         scopes: Vec::new(),
         loop_depth: 0,
@@ -1398,6 +1531,13 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         callables: Vec::new(),
         lambda_floor: None,
         lambda_var: None,
+        type_params: Vec::new(),
+        type_param_scopes: Vec::new(),
+        generics: Vec::new(),
+        function_asts: HashMap::new(),
+        specializations: Vec::new(),
+        specialized_keys: HashMap::new(),
+        instantiation: None,
     };
     checker.collect_imports(program);
     checker.collect_interfaces(program);
@@ -1460,8 +1600,16 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
                     })
                     .collect(),
                 maps: checker.maps,
+                iters: checker.iters,
                 callables: checker.callables,
                 functions,
+                specializations: checker.specializations,
+                generics: checker.generics,
+                type_param_names: checker
+                    .type_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
             })
         } else {
             None
@@ -1518,6 +1666,7 @@ struct ClassMethodInfo {
     mutating: bool,
     leaks: bool,
     span: Span,
+    type_params: Vec<TypeParamId>,
 }
 
 struct ClassInitInfo {
@@ -1553,6 +1702,7 @@ struct RawParam {
     span: Span,
     name_span: Span,
     callable: Option<Vec<Parameter>>,
+    default: Option<Expr>,
 }
 
 struct ClassInfo {
@@ -1567,6 +1717,13 @@ struct ClassInfo {
     fields: Vec<ClassFieldInfo>,
     methods: Vec<ClassMethodInfo>,
     init: Option<ClassInitInfo>,
+    type_params: Vec<TypeParamId>,
+}
+
+struct TypeParamInfo {
+    name: String,
+    #[allow(dead_code)]
+    span: Span,
 }
 
 struct Checker<'a> {
@@ -1584,6 +1741,9 @@ struct Checker<'a> {
     warnings: Vec<SemanticDiagnostic>,
     at_super_slot: bool,
     maps: Vec<MapShape>,
+    iters: Vec<IterShape>,
+    /// When checking a generator, the element type for `emit`.
+    generator_element: Option<CanonicalType>,
     resolve_stack: Vec<RecordId>,
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
@@ -1600,6 +1760,18 @@ struct Checker<'a> {
     lambda_floor: Option<usize>,
     /// Name of the callable variable currently being initialized.
     lambda_var: Option<String>,
+    type_params: Vec<TypeParamInfo>,
+    /// Active type-parameter scopes, innermost last.
+    type_param_scopes: Vec<Vec<TypeParamId>>,
+    generics: Vec<GenericInstance>,
+    /// Original generic function declarations for instantiation.
+    function_asts: HashMap<String, FunctionDecl>,
+    /// Monomorphized generic functions produced at call sites.
+    specializations: Vec<CheckedFn>,
+    /// Keys already specialized: `"name<arg, arg>"`.
+    specialized_keys: HashMap<String, String>,
+    /// When set, diagnostics are attributed to a generic instantiation.
+    instantiation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1665,7 +1837,7 @@ impl<'a> Checker<'a> {
     }
 
     fn reject_reserved_name(&mut self, name: &str, span: Span) -> bool {
-        if name == "lengthOf" || name == "typeOf" {
+        if name == "lengthOf" || name == "typeOf" || name == "range" {
             self.error(span, format!("'{name}' is a reserved built-in name"));
             return true;
         }
@@ -1812,14 +1984,51 @@ impl<'a> Checker<'a> {
                 syntax,
             );
         }
+        if syntax.kind == TypeKind::Named && syntax.name == "iter" {
+            if syntax.arguments.len() != 1 {
+                self.error(syntax.span, "iter type requires exactly one type argument");
+            }
+            let element = syntax
+                .arguments
+                .first()
+                .map(|argument| self.resolve_type(argument))
+                .unwrap_or(CanonicalType::Int64);
+            if !syntax.bounds.is_empty() {
+                self.error(syntax.span, "iter types cannot be arrays");
+            }
+            let id = self.intern_iter(element);
+            return self.finish_optional(CanonicalType::Iter(id), syntax);
+        }
         if syntax.kind == TypeKind::Named {
-            if let Some(id) = self.class_names.get(&syntax.name).copied() {
+            if let Some(param) = self.lookup_type_param(&syntax.name) {
+                if !syntax.arguments.is_empty() {
+                    self.error(
+                        syntax.span,
+                        format!(
+                            "type parameter '{}' cannot take type arguments",
+                            syntax.name
+                        ),
+                    );
+                }
                 return self.finish_optional(
-                    self.with_bounds(CanonicalType::Class(id), &syntax.bounds),
+                    self.with_bounds(CanonicalType::Param(param), &syntax.bounds),
                     syntax,
                 );
             }
+            if let Some(id) = self.class_names.get(&syntax.name).copied() {
+                let ty = if !syntax.arguments.is_empty()
+                    || !self.classes[id.0 as usize].type_params.is_empty()
+                {
+                    self.resolve_constructed_class(id, &syntax.arguments, syntax.span)
+                } else {
+                    CanonicalType::Class(id)
+                };
+                return self.finish_optional(self.with_bounds(ty, &syntax.bounds), syntax);
+            }
             if let Some(id) = self.interface_names.get(&syntax.name).copied() {
+                if !syntax.arguments.is_empty() {
+                    self.error(syntax.span, "generic interfaces are not supported");
+                }
                 return self.finish_optional(
                     self.with_bounds(CanonicalType::Interface(id), &syntax.bounds),
                     syntax,
@@ -1899,6 +2108,23 @@ impl<'a> Checker<'a> {
             CanonicalType::Record(id) => self.record_name(id),
             CanonicalType::Class(id) => self.class_name(id),
             CanonicalType::Interface(id) => self.interface_name(id),
+            CanonicalType::Param(id) => self
+                .type_params
+                .get(id.0 as usize)
+                .map(|param| param.name.clone())
+                .unwrap_or_else(|| "T".to_string()),
+            CanonicalType::Generic(id) => {
+                let Some(instance) = self.generics.get(id.0 as usize) else {
+                    return "generic".to_string();
+                };
+                let args = instance
+                    .args
+                    .iter()
+                    .map(|arg| self.spell(*arg))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}<{args}>", self.class_name(instance.class))
+            }
             CanonicalType::Map(id) => {
                 let shape = self.maps.get(id.0 as usize).cloned().unwrap_or(MapShape {
                     key: CanonicalType::Void,
@@ -1910,11 +2136,37 @@ impl<'a> Checker<'a> {
                     self.spell(shape.value)
                 )
             }
+            CanonicalType::Iter(id) => {
+                let element = self
+                    .iters
+                    .get(id.0 as usize)
+                    .map(|shape| shape.element)
+                    .unwrap_or(CanonicalType::Int64);
+                format!("iter<{}>", self.spell(element))
+            }
             CanonicalType::Array {
                 leaf: Leaf::Class(id),
                 depth,
                 ..
             } => format!("{}{}", self.class_name(id), "[]".repeat(depth as usize)),
+            CanonicalType::Array {
+                leaf: Leaf::Generic(id),
+                depth,
+                ..
+            } => format!(
+                "{}{}",
+                self.spell(CanonicalType::Generic(id)),
+                "[]".repeat(depth as usize)
+            ),
+            CanonicalType::Array {
+                leaf: Leaf::Param(id),
+                depth,
+                ..
+            } => format!(
+                "{}{}",
+                self.spell(CanonicalType::Param(id)),
+                "[]".repeat(depth as usize)
+            ),
             CanonicalType::Array {
                 leaf: Leaf::Record(id),
                 depth,
@@ -1943,6 +2195,22 @@ impl<'a> Checker<'a> {
                 .unwrap_or((CanonicalType::Int64, CanonicalType::Int64))
         } else {
             (CanonicalType::Int64, CanonicalType::Int64)
+        }
+    }
+
+    fn intern_iter(&mut self, element: CanonicalType) -> IterId {
+        if let Some(index) = self.iters.iter().position(|shape| shape.element == element) {
+            return IterId(index as u32);
+        }
+        let id = IterId(self.iters.len() as u32);
+        self.iters.push(IterShape { element });
+        id
+    }
+
+    fn iter_element(&self, ty: CanonicalType) -> Option<CanonicalType> {
+        match ty {
+            CanonicalType::Iter(id) => self.iters.get(id.0 as usize).map(|shape| shape.element),
+            _ => None,
         }
     }
 
@@ -2027,8 +2295,11 @@ impl<'a> Checker<'a> {
 
     fn collect_functions(&mut self, program: &Program) {
         for function in &program.functions {
+            let type_params = self.register_type_params(&function.type_params);
+            self.push_type_params(&type_params);
             let ret = self.resolve_type(&function.return_type);
             let params = self.resolve_parameters(&function.parameters);
+            self.pop_type_params();
             self.reject_unspecified_type(ret, function.return_type.span);
             if ret.is_void_array() {
                 self.error(
@@ -2038,6 +2309,9 @@ impl<'a> Checker<'a> {
             }
             if self.reject_reserved_name(&function.name.name, function.name.span) {
                 continue;
+            }
+            if function.name.name == "main" && !type_params.is_empty() {
+                self.error(function.name.span, "'main' cannot be generic");
             }
             if let Some(previous) = self.functions.get(&function.name.name) {
                 if function.name.name == "main" {
@@ -2065,9 +2339,413 @@ impl<'a> Checker<'a> {
                     params,
                     ret,
                     span: function.name.span,
+                    type_params,
                 },
             );
+            if !function.type_params.is_empty() {
+                self.function_asts
+                    .insert(function.name.name.clone(), function.clone());
+            }
         }
+    }
+
+    fn register_type_params(&mut self, names: &[Identifier]) -> Vec<TypeParamId> {
+        let mut ids = Vec::new();
+        let mut seen = HashMap::new();
+        for name in names {
+            if !generics::is_upper_camel(&name.name) {
+                self.error(
+                    name.span,
+                    format!("type parameter '{}' must be UpperCamelCase", name.name),
+                );
+            }
+            if seen.insert(name.name.clone(), name.span).is_some() {
+                self.error(
+                    name.span,
+                    format!("duplicate type parameter '{}'", name.name),
+                );
+                continue;
+            }
+            let id = TypeParamId(self.type_params.len() as u32);
+            self.type_params.push(TypeParamInfo {
+                name: name.name.clone(),
+                span: name.span,
+            });
+            ids.push(id);
+        }
+        ids
+    }
+
+    fn push_type_params(&mut self, params: &[TypeParamId]) {
+        self.type_param_scopes.push(params.to_vec());
+    }
+
+    fn pop_type_params(&mut self) {
+        self.type_param_scopes.pop();
+    }
+
+    fn lookup_type_param(&self, name: &str) -> Option<TypeParamId> {
+        for scope in self.type_param_scopes.iter().rev() {
+            for id in scope {
+                if self.type_params[id.0 as usize].name == name {
+                    return Some(*id);
+                }
+            }
+        }
+        None
+    }
+
+    fn type_param_names(&self, ids: &[TypeParamId]) -> Vec<String> {
+        ids.iter()
+            .map(|id| self.type_params[id.0 as usize].name.clone())
+            .collect()
+    }
+
+    fn uses_class_params(&self, ty: CanonicalType, class_params: &[TypeParamId]) -> bool {
+        match ty {
+            CanonicalType::Param(id) => class_params.contains(&id),
+            CanonicalType::Optional(kind) => self.uses_class_params(kind.canonical(), class_params),
+            CanonicalType::Array { leaf, .. } => match leaf {
+                Leaf::Param(id) => class_params.contains(&id),
+                Leaf::Generic(id) => self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.uses_class_params(*arg, class_params))
+                }),
+                _ => false,
+            },
+            CanonicalType::Generic(id) => {
+                self.generics.get(id.0 as usize).is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|arg| self.uses_class_params(*arg, class_params))
+                })
+            }
+            CanonicalType::Map(id) => self.maps.get(id.0 as usize).is_some_and(|shape| {
+                self.uses_class_params(shape.key, class_params)
+                    || self.uses_class_params(shape.value, class_params)
+            }),
+            CanonicalType::Callable(id) => {
+                self.callables.get(id.0 as usize).is_some_and(|signature| {
+                    signature
+                        .params
+                        .iter()
+                        .any(|param| self.uses_class_params(*param, class_params))
+                        || self.uses_class_params(signature.ret, class_params)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn resolve_constructed_class(
+        &mut self,
+        id: ClassId,
+        args: &[TypeSyntax],
+        span: Span,
+    ) -> CanonicalType {
+        let params = self.classes[id.0 as usize].type_params.clone();
+        if params.is_empty() {
+            self.error(
+                span,
+                format!("class '{}' is not generic", self.class_name(id)),
+            );
+            return CanonicalType::Class(id);
+        }
+        if args.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "generic class '{}' requires type arguments",
+                    self.class_name(id)
+                ),
+            );
+            return CanonicalType::Class(id);
+        }
+        let Some(map) = self.substitution_map(&params, args, span) else {
+            return CanonicalType::Class(id);
+        };
+        let concrete: Vec<_> = map.iter().map(|(_, ty)| *ty).collect();
+        self.intern_generic(id, concrete)
+    }
+
+    fn intern_generic(&mut self, class: ClassId, args: Vec<CanonicalType>) -> CanonicalType {
+        if let Some(index) = self
+            .generics
+            .iter()
+            .position(|instance| instance.class == class && instance.args == args)
+        {
+            return CanonicalType::Generic(GenericId(index as u32));
+        }
+        let id = GenericId(self.generics.len() as u32);
+        self.generics.push(GenericInstance { class, args });
+        CanonicalType::Generic(id)
+    }
+
+    fn generic_map(&self, id: GenericId) -> Vec<(TypeParamId, CanonicalType)> {
+        let Some(instance) = self.generics.get(id.0 as usize) else {
+            return Vec::new();
+        };
+        self.classes[instance.class.0 as usize]
+            .type_params
+            .iter()
+            .copied()
+            .zip(instance.args.iter().copied())
+            .collect()
+    }
+
+    fn generic_class(
+        &self,
+        ty: CanonicalType,
+    ) -> Option<(ClassId, Vec<(TypeParamId, CanonicalType)>)> {
+        match ty {
+            CanonicalType::Class(id) => Some((id, Vec::new())),
+            CanonicalType::Generic(id) => {
+                let instance = self.generics.get(id.0 as usize)?;
+                Some((instance.class, self.generic_map(id)))
+            }
+            _ => None,
+        }
+    }
+
+    fn substitute_type(
+        &mut self,
+        ty: CanonicalType,
+        map: &[(TypeParamId, CanonicalType)],
+    ) -> CanonicalType {
+        if map.is_empty() {
+            return ty;
+        }
+        match ty {
+            CanonicalType::Param(id) => map
+                .iter()
+                .find(|(param, _)| *param == id)
+                .map(|(_, concrete)| *concrete)
+                .unwrap_or(ty),
+            CanonicalType::Optional(kind) => {
+                let inner = self.substitute_type(kind.canonical(), map);
+                inner.optional().unwrap_or(inner)
+            }
+            CanonicalType::Array {
+                leaf,
+                depth,
+                limits,
+            } => CanonicalType::Array {
+                leaf: self.substitute_leaf(leaf, map),
+                depth,
+                limits,
+            },
+            CanonicalType::Generic(id) => {
+                let Some(instance) = self.generics.get(id.0 as usize).cloned() else {
+                    return ty;
+                };
+                let args = instance
+                    .args
+                    .iter()
+                    .map(|arg| self.substitute_type(*arg, map))
+                    .collect();
+                self.intern_generic(instance.class, args)
+            }
+            CanonicalType::Map(id) => {
+                let Some(shape) = self.maps.get(id.0 as usize).cloned() else {
+                    return ty;
+                };
+                let key = self.substitute_type(shape.key, map);
+                let value = self.substitute_type(shape.value, map);
+                CanonicalType::Map(self.intern_map(key, value))
+            }
+            CanonicalType::Iter(id) => {
+                let Some(shape) = self.iters.get(id.0 as usize).cloned() else {
+                    return ty;
+                };
+                let element = self.substitute_type(shape.element, map);
+                CanonicalType::Iter(self.intern_iter(element))
+            }
+            CanonicalType::Callable(id) => {
+                let Some(signature) = self.callables.get(id.0 as usize).cloned() else {
+                    return ty;
+                };
+                let params: Vec<ParamInfo> = signature
+                    .params
+                    .iter()
+                    .zip(signature.autos.iter())
+                    .map(|(param, auto)| ParamInfo {
+                        name: String::new(),
+                        ty: self.substitute_type(*param, map),
+                        auto: *auto,
+                        default: None,
+                    })
+                    .collect();
+                let ret = self.substitute_type(signature.ret, map);
+                CanonicalType::Callable(self.intern_callable(&params, ret))
+            }
+            other => other,
+        }
+    }
+
+    fn substitute_leaf(&mut self, leaf: Leaf, map: &[(TypeParamId, CanonicalType)]) -> Leaf {
+        match leaf {
+            Leaf::Param(id) => self.substitute_type(CanonicalType::Param(id), map).leaf(),
+            Leaf::Generic(id) => self.substitute_type(CanonicalType::Generic(id), map).leaf(),
+            other => other,
+        }
+    }
+
+    fn deferred_param_pair(left: CanonicalType, right: CanonicalType) -> Option<CanonicalType> {
+        match (left, right) {
+            (CanonicalType::Param(a), CanonicalType::Param(b)) if a == b => Some(left),
+            _ => None,
+        }
+    }
+
+    fn specialization_key(name: &str, args: &[CanonicalType]) -> String {
+        let rendered = args
+            .iter()
+            .map(|ty| ty.rust_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{name}<{rendered}>")
+    }
+
+    fn mangle_specialization(name: &str, args: &[CanonicalType]) -> String {
+        let mut mangled = rust_ident_simple(name);
+        for arg in args {
+            mangled.push('_');
+            mangled.push_str(&mangle_type_name(*arg));
+        }
+        mangled
+    }
+
+    fn instantiate_function(
+        &mut self,
+        name: &str,
+        map: &[(TypeParamId, CanonicalType)],
+        type_args: &[CanonicalType],
+        call_span: Span,
+    ) -> String {
+        let key = Self::specialization_key(name, type_args);
+        if let Some(existing) = self.specialized_keys.get(&key) {
+            return existing.clone();
+        }
+        let mangled = Self::mangle_specialization(name, type_args);
+        let Some(decl) = self.function_asts.get(name).cloned() else {
+            return name.to_string();
+        };
+        let signature = self.functions.get(name).cloned();
+        let Some(signature) = signature else {
+            return name.to_string();
+        };
+        let display = {
+            let args = type_args
+                .iter()
+                .map(|ty| self.spell(*ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}<{args}>")
+        };
+        let saved_return = self.current_return;
+        let saved_instantiation = self.instantiation.clone();
+        self.instantiation = Some(display);
+        let params: Vec<(String, CanonicalType, bool)> = signature
+            .params
+            .iter()
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    self.substitute_type(param.ty, map),
+                    param.auto,
+                )
+            })
+            .collect();
+        let ret = self.substitute_type(signature.ret, map);
+        self.current_return = ret;
+        self.scopes.push(HashMap::new());
+        for (param_name, ty, auto) in &params {
+            if *ty != CanonicalType::Void {
+                self.scopes.last_mut().unwrap().insert(
+                    param_name.clone(),
+                    Binding {
+                        ty: *ty,
+                        mutable: true,
+                        auto: *auto,
+                        ready: true,
+                    },
+                );
+            }
+        }
+        let has_emit = contains_emit(&decl.body.statements);
+        let is_generator = ret.is_iter() && has_emit;
+        if has_emit && !ret.is_iter() {
+            self.error(
+                decl.span,
+                "emit is only allowed in functions that return iter<T>",
+            );
+        }
+        let saved_generator = self.generator_element;
+        self.generator_element = if is_generator {
+            self.iter_element(ret)
+        } else {
+            None
+        };
+        let mut body = Vec::new();
+        for statement in &decl.body.statements {
+            if let Some(checked) = self.check_stmt(statement) {
+                body.push(checked);
+            }
+        }
+        // Generators finish by falling off the end or bare `return;`.
+        if !is_generator && ret != CanonicalType::Void && !guaranteed_return(&decl.body.statements)
+        {
+            self.error(
+                call_span,
+                format!("function '{name}' must return a value on every path"),
+            );
+        }
+        self.scopes.pop();
+        self.generator_element = saved_generator;
+        self.current_return = saved_return;
+        self.instantiation = saved_instantiation;
+        self.specializations.push(CheckedFn {
+            name: mangled.clone(),
+            params: params.into_iter().map(|(n, ty, _)| (n, ty)).collect(),
+            ret,
+            body,
+            type_params: Vec::new(),
+            is_generator,
+        });
+        self.specialized_keys.insert(key, mangled.clone());
+        mangled
+    }
+
+    fn substitution_map(
+        &mut self,
+        params: &[TypeParamId],
+        args: &[TypeSyntax],
+        span: Span,
+    ) -> Option<Vec<(TypeParamId, CanonicalType)>> {
+        if params.len() != args.len() {
+            self.error(
+                span,
+                format!(
+                    "expected {} type argument{}, found {}",
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            );
+            return None;
+        }
+        let mut map = Vec::new();
+        for (param, arg) in params.iter().zip(args) {
+            let ty = self.resolve_type(arg);
+            if ty == CanonicalType::Void || ty.is_void_array() {
+                self.error(arg.span, "void is not a valid type argument");
+            }
+            map.push((*param, ty));
+        }
+        Some(map)
     }
 
     fn check_entry_point(&mut self, program: &Program) {
@@ -2102,7 +2780,22 @@ impl<'a> Checker<'a> {
             .map(|param| (param.name.clone(), param.ty, param.auto))
             .collect::<Vec<_>>();
         let ret = signature.ret;
+        let type_params = signature.type_params.clone();
+        let has_emit = contains_emit(&function.body.statements);
+        let is_generator = ret.is_iter() && has_emit;
+        if has_emit && !ret.is_iter() {
+            self.error(
+                function.span,
+                "emit is only allowed in functions that return iter<T>",
+            );
+        }
+        self.push_type_params(&type_params);
         self.current_return = ret;
+        self.generator_element = if is_generator {
+            self.iter_element(ret)
+        } else {
+            None
+        };
         self.scopes.push(HashMap::new());
         for (name, ty, auto) in &params {
             if name == "lengthOf" || name == "typeOf" {
@@ -2130,7 +2823,11 @@ impl<'a> Checker<'a> {
                 body.push(checked);
             }
         }
-        if ret != CanonicalType::Void && !guaranteed_return(&function.body.statements) {
+        // Generators finish by falling off the end or bare `return;`.
+        if !is_generator
+            && ret != CanonicalType::Void
+            && !guaranteed_return(&function.body.statements)
+        {
             self.error(
                 function.span,
                 format!(
@@ -2140,11 +2837,16 @@ impl<'a> Checker<'a> {
             );
         }
         self.scopes.pop();
+        self.generator_element = None;
+        let type_param_names = self.type_param_names(&type_params);
+        self.pop_type_params();
         Some(CheckedFn {
             name: function.name.name.clone(),
             params,
             ret,
             body,
+            type_params: type_param_names,
+            is_generator,
         })
     }
 
@@ -2158,6 +2860,15 @@ impl<'a> Checker<'a> {
             Stmt::Return(stmt) => {
                 if self.finally_depth > 0 {
                     self.error(stmt.span, "return is not allowed inside finally");
+                }
+                if self.generator_element.is_some() {
+                    if stmt.value.is_some() {
+                        self.error(
+                            stmt.span,
+                            "a generator cannot return a value; use emit for elements",
+                        );
+                    }
+                    return Some(CheckedStmt::Return(None));
                 }
                 if self.current_return == CanonicalType::Void {
                     if stmt.value.is_some() {
@@ -2176,6 +2887,18 @@ impl<'a> Checker<'a> {
                     );
                     Some(CheckedStmt::Return(None))
                 }
+            }
+            Stmt::Emit(stmt) => {
+                let Some(element) = self.generator_element else {
+                    self.error(stmt.span, "emit is only allowed inside a generator");
+                    let _ = self.check_expr(&stmt.value, None, false);
+                    return Some(CheckedStmt::Emit {
+                        value: self.dummy(None),
+                    });
+                };
+                let checked = self.check_expr(&stmt.value, Some(element), false);
+                let converted = self.apply_conversion(checked, element, false, stmt.value.span());
+                Some(CheckedStmt::Emit { value: converted })
             }
             Stmt::If(stmt) => {
                 let condition = self.check_expr(&stmt.condition, Some(CanonicalType::Bln), false);
@@ -2283,7 +3006,12 @@ impl<'a> Checker<'a> {
         };
         let saved = self.current_class;
         self.current_class = Some(class);
-        let constructed = self.check_construct(parent, &stmt.arguments, stmt.span);
+        let constructed = self.check_construct(
+            parent,
+            &stmt.arguments,
+            stmt.span,
+            CanonicalType::Class(parent),
+        );
         self.current_class = saved;
         let CheckedExpr::ClassNew { args, .. } = constructed else {
             return None;
@@ -2523,17 +3251,23 @@ impl<'a> Checker<'a> {
             CanonicalType::Optional(_) => Some(CheckedExpr::Null { ty }),
             CanonicalType::Class(_)
             | CanonicalType::Interface(_)
+            | CanonicalType::Generic(_)
+            | CanonicalType::Param(_)
             | CanonicalType::Type
             | CanonicalType::Void
             | CanonicalType::ErrorHandle
-            | CanonicalType::Callable(_) => None,
+            | CanonicalType::Callable(_)
+            | CanonicalType::Iter(_) => None,
         }
     }
 
     fn can_delay(&self, ty: CanonicalType) -> bool {
         matches!(
             ty,
-            CanonicalType::Class(_) | CanonicalType::Interface(_) | CanonicalType::Record(_)
+            CanonicalType::Class(_)
+                | CanonicalType::Interface(_)
+                | CanonicalType::Generic(_)
+                | CanonicalType::Record(_)
         )
     }
 
@@ -2921,7 +3655,7 @@ impl<'a> Checker<'a> {
                 }
             }
             UnaryOperator::Negate => {
-                if !operand.ty().is_numeric() {
+                if !operand.ty().is_numeric() && !operand.ty().is_param() {
                     self.error(expr.span, "unary '-' requires a numeric operand");
                 }
                 CheckedExpr::Unary {
@@ -2932,7 +3666,7 @@ impl<'a> Checker<'a> {
                 }
             }
             UnaryOperator::BitNot => {
-                if !operand.ty().is_integer() {
+                if !operand.ty().is_integer() && !operand.ty().is_param() {
                     self.error(expr.span, "operator '~' requires an integer operand");
                 }
                 CheckedExpr::Unary {
@@ -3168,6 +3902,16 @@ impl<'a> Checker<'a> {
         left: CheckedExpr,
         right: CheckedExpr,
     ) -> CheckedExpr {
+        if let Some(_) = Self::deferred_param_pair(left.ty(), right.ty()) {
+            return CheckedExpr::Binary {
+                op: expr.operator,
+                ty: CanonicalType::Bln,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: Some(CompareMode::Same),
+                span: expr.span,
+            };
+        }
         let compare = if left.ty() == right.ty()
             && (left.ty().is_numeric()
                 || left.ty() == CanonicalType::Bln
@@ -3222,6 +3966,16 @@ impl<'a> Checker<'a> {
         span: Span,
         shift: bool,
     ) -> CheckedExpr {
+        if let Some(ty) = Self::deferred_param_pair(left.ty(), right.ty()) {
+            return CheckedExpr::Binary {
+                op,
+                ty,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span,
+            };
+        }
         if !left.ty().is_integer() || !right.ty().is_integer() {
             self.error(
                 span,
@@ -3288,6 +4042,16 @@ impl<'a> Checker<'a> {
         left: CheckedExpr,
         right: CheckedExpr,
     ) -> CheckedExpr {
+        if let Some(ty) = Self::deferred_param_pair(left.ty(), right.ty()) {
+            return CheckedExpr::Binary {
+                op: expr.operator,
+                ty,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span: expr.span,
+            };
+        }
         let remainder = expr.operator == BinaryOperator::Remainder;
         match numeric::arithmetic(left.ty(), right.ty(), remainder) {
             Ok(ty) => {
@@ -3459,6 +4223,33 @@ impl<'a> Checker<'a> {
         right: CheckedExpr,
         span: Span,
     ) -> CheckedExpr {
+        if let Some(ty) = Self::deferred_param_pair(left.ty(), right.ty()) {
+            return CheckedExpr::Binary {
+                op,
+                ty,
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span,
+            };
+        }
+        if left.ty().is_param() || right.ty().is_param() {
+            self.error(
+                span,
+                format!(
+                    "operator '{}' requires matching type-parameter operands",
+                    operator_token(op)
+                ),
+            );
+            return CheckedExpr::Binary {
+                op,
+                ty: left.ty(),
+                left: Box::new(left),
+                right: Box::new(right),
+                compare: None,
+                span,
+            };
+        }
         let remainder = op == BinaryOperator::Remainder;
         match numeric::arithmetic(left.ty(), right.ty(), remainder) {
             Ok(ty) => {
@@ -3547,19 +4338,35 @@ impl<'a> Checker<'a> {
     fn check_call(&mut self, expr: &CallExpr, allow_void: bool) -> CheckedExpr {
         if let Expr::Member(member) = &*expr.callee {
             if matches!(&*member.object, Expr::Super { .. }) {
+                if !expr.type_arguments.is_empty() {
+                    self.error(expr.span, "super calls cannot take type arguments");
+                }
                 return self.check_super_call(member, &expr.arguments, expr.span);
             }
             if let Expr::Identifier(object) = &*member.object {
                 if self.imports.contains_key(&object.name) {
+                    if !expr.type_arguments.is_empty() {
+                        self.error(expr.span, "library calls cannot take type arguments");
+                    }
                     return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
                 }
                 if self.lookup(&object.name).is_none()
                     && self.class_names.contains_key(&object.name)
                 {
-                    return self.check_static_call(member, &expr.arguments, expr.span);
+                    return self.check_static_call(
+                        member,
+                        &expr.type_arguments,
+                        &expr.arguments,
+                        expr.span,
+                    );
                 }
             }
-            return self.check_array_method(member, &expr.arguments, expr.span);
+            return self.check_array_method(
+                member,
+                &expr.type_arguments,
+                &expr.arguments,
+                expr.span,
+            );
         }
         if let Expr::Identifier(ident) = &*expr.callee {
             if ident.name == "lengthOf" {
@@ -3568,7 +4375,16 @@ impl<'a> Checker<'a> {
             if ident.name == "typeOf" {
                 return self.check_type_of(&expr.arguments, expr.span);
             }
-            return self.check_user_call(ident, &expr.arguments, expr.span);
+            if ident.name == "range" {
+                return self.check_range(&expr.arguments, expr.span);
+            }
+            return self.check_user_call(ident, &expr.type_arguments, &expr.arguments, expr.span);
+        }
+        if !expr.type_arguments.is_empty() {
+            self.error(
+                expr.span,
+                "type arguments require a generic function or class",
+            );
         }
         let callee = self.check_expr(&expr.callee, None, false);
         if let CanonicalType::Callable(id) = callee.ty() {
@@ -3639,11 +4455,86 @@ impl<'a> Checker<'a> {
             path,
             callee: member.member.name.clone(),
             args,
+            type_args: Vec::new(),
             ty: ret,
             file: self.source_name.to_string(),
             line: span.start.line,
             column: span.start.column,
             end_column: span.end.column,
+        }
+    }
+
+    fn check_range(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+        let ty = CanonicalType::Iter(self.intern_iter(CanonicalType::Int64));
+        let (file, line, column, end_column) = self.located(span);
+        let zero = || CheckedExpr::Int {
+            value: 0,
+            ty: CanonicalType::Int64,
+        };
+        let one = || CheckedExpr::Int {
+            value: 1,
+            ty: CanonicalType::Int64,
+        };
+        let check_int = |checker: &mut Self, expr: &Expr| {
+            let checked = checker.check_expr(expr, Some(CanonicalType::Int64), false);
+            checker.apply_conversion(checked, CanonicalType::Int64, false, expr.span())
+        };
+        match arguments.len() {
+            1 => {
+                let end = check_int(self, &arguments[0]);
+                CheckedExpr::Range {
+                    start: Box::new(zero()),
+                    end: Box::new(end),
+                    step: Box::new(one()),
+                    ty,
+                    file,
+                    line,
+                    column,
+                    end_column,
+                }
+            }
+            2 => {
+                let start = check_int(self, &arguments[0]);
+                let end = check_int(self, &arguments[1]);
+                CheckedExpr::Range {
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    step: Box::new(one()),
+                    ty,
+                    file,
+                    line,
+                    column,
+                    end_column,
+                }
+            }
+            3 => {
+                let start = check_int(self, &arguments[0]);
+                let end = check_int(self, &arguments[1]);
+                let step = check_int(self, &arguments[2]);
+                if let CheckedExpr::Int { value: 0, .. } = step {
+                    self.error(arguments[2].span(), "range step cannot be zero");
+                }
+                CheckedExpr::Range {
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    step: Box::new(step),
+                    ty,
+                    file,
+                    line,
+                    column,
+                    end_column,
+                }
+            }
+            count => {
+                self.error(
+                    span,
+                    format!("range expects 1, 2, or 3 arguments, found {count}"),
+                );
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                self.dummy(Some(ty))
+            }
         }
     }
 
@@ -3711,6 +4602,24 @@ impl<'a> Checker<'a> {
             return self.dummy(Some(CanonicalType::Type));
         }
         let described = value.ty();
+        if described.is_generic()
+            || matches!(
+                described,
+                CanonicalType::Array {
+                    leaf: Leaf::Generic(_),
+                    ..
+                }
+            )
+            || described
+                .optional_inner()
+                .is_some_and(|inner| inner.is_generic())
+        {
+            self.error(
+                argument.span(),
+                "typeOf is not supported for generic class values",
+            );
+            return self.dummy(Some(CanonicalType::Type));
+        }
         CheckedExpr::TypeOf {
             name: self.spell(described),
             record: described.is_record(),
@@ -3721,6 +4630,7 @@ impl<'a> Checker<'a> {
     fn check_user_call(
         &mut self,
         ident: &Identifier,
+        type_arguments: &[TypeSyntax],
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
@@ -3733,6 +4643,9 @@ impl<'a> Checker<'a> {
             }
             if let Some(binding) = self.lookup(&ident.name) {
                 if let CanonicalType::Callable(id) = binding.ty {
+                    if !type_arguments.is_empty() {
+                        self.error(span, "a function value cannot take type arguments");
+                    }
                     let callee = CheckedExpr::Load {
                         name: ident.name.clone(),
                         ty: binding.ty,
@@ -3742,10 +4655,7 @@ impl<'a> Checker<'a> {
                 if !self.functions.contains_key(&ident.name) {
                     self.error(
                         ident.span,
-                        format!(
-                            "cannot call a value of type '{}'",
-                            self.spell(binding.ty)
-                        ),
+                        format!("cannot call a value of type '{}'", self.spell(binding.ty)),
                     );
                     for argument in arguments {
                         let _ = self.check_expr(argument, None, false);
@@ -3764,20 +4674,34 @@ impl<'a> Checker<'a> {
             }
             return self.dummy(None);
         }
-        if self.class_names.contains_key(&ident.name) && !self.functions.contains_key(&ident.name) {
-            let id = self.class_names[&ident.name];
-            if self.classes[id.0 as usize].abstract_class {
-                self.error(
-                    ident.span,
-                    format!("cannot construct abstract class '{}'", ident.name),
-                );
+        if self.class_names.contains_key(&ident.name) {
+            let origin = self.class_names[&ident.name];
+            let is_generic = !self.classes[origin.0 as usize].type_params.is_empty();
+            if is_generic || !type_arguments.is_empty() {
+                let constructed =
+                    self.resolve_constructed_class(origin, type_arguments, ident.span);
+                if self.classes[origin.0 as usize].abstract_class {
+                    self.error(
+                        ident.span,
+                        format!("cannot construct abstract class '{}'", ident.name),
+                    );
+                }
+                return self.check_construct(origin, arguments, span, constructed);
             }
-            let deprecated = self.classes[id.0 as usize]
-                .init
-                .as_ref()
-                .is_some_and(|init| init.deprecated);
-            self.note_deprecated(deprecated, ident.span, &ident.name);
-            return self.check_construct(id, arguments, span);
+            if !self.functions.contains_key(&ident.name) {
+                if self.classes[origin.0 as usize].abstract_class {
+                    self.error(
+                        ident.span,
+                        format!("cannot construct abstract class '{}'", ident.name),
+                    );
+                }
+                let deprecated = self.classes[origin.0 as usize]
+                    .init
+                    .as_ref()
+                    .is_some_and(|init| init.deprecated);
+                self.note_deprecated(deprecated, ident.span, &ident.name);
+                return self.check_construct(origin, arguments, span, CanonicalType::Class(origin));
+            }
         }
         if self.interface_names.contains_key(&ident.name)
             && !self.functions.contains_key(&ident.name)
@@ -3791,26 +4715,56 @@ impl<'a> Checker<'a> {
             }
             return self.dummy(None);
         }
-        let Some(resolved) = self.functions.get(&ident.name).map(|signature| {
-            (
-                signature.ret,
-                signature
-                    .params
-                    .iter()
-                    .map(|param| (param.ty, param.auto))
-                    .collect::<Vec<_>>(),
-            )
-        }) else {
+        let Some(signature) = self.functions.get(&ident.name).cloned() else {
             self.error(ident.span, format!("unknown function '{}'", ident.name));
             return self.dummy(None);
         };
-        let (ret, params) = resolved;
-        let path = ident.name.clone();
-        let args = self.check_arguments(arguments, &params, span);
+        if !signature.type_params.is_empty() && type_arguments.is_empty() {
+            self.error(
+                span,
+                format!("generic function '{}' requires type arguments", ident.name),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+            return self.dummy(Some(signature.ret));
+        }
+        if signature.type_params.is_empty() && !type_arguments.is_empty() {
+            self.error(span, format!("function '{}' is not generic", ident.name));
+        }
+        let (ret, params, path) = if signature.type_params.is_empty() {
+            (signature.ret, signature.params.clone(), ident.name.clone())
+        } else {
+            let Some(map) = self.substitution_map(&signature.type_params, type_arguments, span)
+            else {
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(Some(signature.ret));
+            };
+            let type_args: Vec<_> = map.iter().map(|(_, ty)| *ty).collect();
+            let path = self.instantiate_function(&ident.name, &map, &type_args, span);
+            (
+                self.substitute_type(signature.ret, &map),
+                signature
+                    .params
+                    .iter()
+                    .map(|param| ParamInfo {
+                        name: param.name.clone(),
+                        ty: self.substitute_type(param.ty, &map),
+                        auto: param.auto,
+                        default: param.default.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                path,
+            )
+        };
+        let args = self.check_call_args(arguments, &params, span);
         CheckedExpr::Call {
             path,
             callee: ident.name.clone(),
             args,
+            type_args: Vec::new(),
             ty: ret,
             file: self.source_name.to_string(),
             line: span.start.line,
@@ -3819,42 +4773,75 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_call_args(
+        &mut self,
+        arguments: &[Expr],
+        params: &[ParamInfo],
+        span: Span,
+    ) -> Vec<CheckedExpr> {
+        let min_args = params
+            .iter()
+            .position(|param| param.default.is_some())
+            .unwrap_or(params.len());
+        let max_args = params.len();
+        if arguments.len() < min_args || arguments.len() > max_args {
+            let expected = if min_args == max_args {
+                format!("{max_args}")
+            } else {
+                format!("{min_args}..={max_args}")
+            };
+            self.error(
+                span,
+                format!(
+                    "expected {expected} argument{}, found {}",
+                    if max_args == 1 { "" } else { "s" },
+                    arguments.len()
+                ),
+            );
+        }
+        let mut checked = Vec::new();
+        for (index, param) in params.iter().enumerate() {
+            if let Some(argument) = arguments.get(index) {
+                let record_shape = self.accepts_brace(param.ty);
+                let expected = if param.auto && !record_shape && !is_ternary_expr(argument) {
+                    None
+                } else {
+                    Some(param.ty)
+                };
+                let saved = self.allow_convert;
+                self.allow_convert = param.auto;
+                let value = self.check_expr(argument, expected, false);
+                self.allow_convert = saved;
+                checked.push(self.apply_conversion(value, param.ty, param.auto, argument.span()));
+            } else if let Some(default) = &param.default {
+                let value = self.check_expr(default, Some(param.ty), false);
+                checked.push(self.apply_conversion(value, param.ty, param.auto, default.span()));
+            } else {
+                // Missing required argument — already diagnosed above.
+            }
+        }
+        for argument in arguments.iter().skip(params.len()) {
+            let _ = self.check_expr(argument, None, false);
+        }
+        checked
+    }
+
     fn check_arguments(
         &mut self,
         arguments: &[Expr],
         params: &[(CanonicalType, bool)],
         span: Span,
     ) -> Vec<CheckedExpr> {
-        if arguments.len() != params.len() {
-            self.error(
-                span,
-                format!(
-                    "expected {} argument{}, found {}",
-                    params.len(),
-                    if params.len() == 1 { "" } else { "s" },
-                    arguments.len()
-                ),
-            );
-        }
-        let mut checked = Vec::new();
-        for (index, argument) in arguments.iter().enumerate() {
-            if let Some((ty, auto)) = params.get(index) {
-                let record_shape = self.accepts_brace(*ty);
-                let expected = if *auto && !record_shape && !is_ternary_expr(argument) {
-                    None
-                } else {
-                    Some(*ty)
-                };
-                let saved = self.allow_convert;
-                self.allow_convert = *auto;
-                let value = self.check_expr(argument, expected, false);
-                self.allow_convert = saved;
-                checked.push(self.apply_conversion(value, *ty, *auto, argument.span()));
-            } else {
-                let _ = self.check_expr(argument, None, false);
-            }
-        }
-        checked
+        let infos: Vec<ParamInfo> = params
+            .iter()
+            .map(|(ty, auto)| ParamInfo {
+                name: String::new(),
+                ty: *ty,
+                auto: *auto,
+                default: None,
+            })
+            .collect();
+        self.check_call_args(arguments, &infos, span)
     }
 
     fn check_conversion(&mut self, expr: &ConversionExpr) -> CheckedExpr {
@@ -4231,9 +5218,7 @@ impl<'a> Checker<'a> {
             return self.finish_super_field(expr);
         }
         if let Expr::Identifier(object) = &*expr.object {
-            if self.lookup(&object.name).is_none()
-                && self.class_names.contains_key(&object.name)
-            {
+            if self.lookup(&object.name).is_none() && self.class_names.contains_key(&object.name) {
                 let id = self.class_names[&object.name];
                 return self.finish_named_static_field(id, expr);
             }
@@ -4256,7 +5241,7 @@ impl<'a> Checker<'a> {
             );
             return self.dummy(None);
         }
-        if let CanonicalType::Class(id) = object.ty() {
+        if let Some((id, _)) = self.generic_class(object.ty()) {
             return self.finish_class_get(object, id, expr);
         }
         if let CanonicalType::Interface(id) = object.ty() {
@@ -4295,8 +5280,7 @@ impl<'a> Checker<'a> {
         op: Option<BinaryOperator>,
     ) -> CheckedExpr {
         if let Expr::Identifier(object) = &*member.object {
-            if self.lookup(&object.name).is_none() && self.class_names.contains_key(&object.name)
-            {
+            if self.lookup(&object.name).is_none() && self.class_names.contains_key(&object.name) {
                 let id = self.class_names[&object.name];
                 if self
                     .locate_field(id, &member.member.name)
@@ -4320,7 +5304,7 @@ impl<'a> Checker<'a> {
         }) {
             let object = self.check_expr(&member.object, None, false);
             let object = self.adopt_object(object, member.object.span());
-            if let CanonicalType::Class(id) = object.ty() {
+            if let Some((id, _)) = self.generic_class(object.ty()) {
                 return self.finish_class_set(object, id, member, value, op);
             }
         }
@@ -4735,9 +5719,7 @@ impl<'a> Checker<'a> {
 
     fn class_field_place(&mut self, member: &MemberExpr, mutating: bool) -> Option<ArrayPlace> {
         let object = self.check_expr(&member.object, None, false);
-        let CanonicalType::Class(id) = object.ty() else {
-            return None;
-        };
+        let (id, map) = self.generic_class(object.ty())?;
         let Some((owner, index)) = self.locate_field(id, &member.member.name) else {
             if self.has_method_name(id, &member.member.name) {
                 self.error(
@@ -4755,7 +5737,7 @@ impl<'a> Checker<'a> {
         let public = self.classes[owner.0 as usize].fields[index].public;
         let protected = self.classes[owner.0 as usize].fields[index].protected;
         let const_field = self.classes[owner.0 as usize].fields[index].const_field;
-        let ty = self.classes[owner.0 as usize].fields[index].ty;
+        let ty = self.substitute_type(self.classes[owner.0 as usize].fields[index].ty, &map);
         let name = self.classes[owner.0 as usize].fields[index].name.clone();
         if !self.member_visible(public, protected, owner) {
             self.error(
@@ -4813,7 +5795,7 @@ impl<'a> Checker<'a> {
             Expr::Member(member) => {
                 if self
                     .peek_type(&member.object)
-                    .is_some_and(|ty| ty.is_class())
+                    .is_some_and(|ty| ty.is_object())
                 {
                     return self.class_field_place(member, mutating);
                 }
@@ -4895,9 +5877,105 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_array_iter(
+        &mut self,
+        member: &MemberExpr,
+        type_arguments: &[TypeSyntax],
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        if !type_arguments.is_empty() {
+            self.error(span, "iter() cannot take type arguments");
+        }
+        if !arguments.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "method 'iter' expects 0 arguments, found {}",
+                    arguments.len()
+                ),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+        }
+        let object = self.check_expr(&member.object, None, false);
+        let element = if object.ty() == CanonicalType::Str {
+            CanonicalType::Chr
+        } else {
+            object.ty().element().unwrap_or(CanonicalType::Int64)
+        };
+        let ty = CanonicalType::Iter(self.intern_iter(element));
+        CheckedExpr::MakeIter {
+            object: Box::new(object),
+            ty,
+        }
+    }
+
+    fn check_iter_method(
+        &mut self,
+        member: &MemberExpr,
+        type_arguments: &[TypeSyntax],
+        arguments: &[Expr],
+        span: Span,
+    ) -> CheckedExpr {
+        if !type_arguments.is_empty() {
+            self.error(span, "iterator methods cannot take type arguments");
+        }
+        let name = member.member.name.as_str();
+        let method = match name {
+            "hasNext" => IterMethod::HasNext,
+            "next" => IterMethod::Next,
+            "iter" => IterMethod::Iter,
+            other => {
+                self.error(
+                    member.member.span,
+                    format!("unknown iterator method '{other}'"),
+                );
+                let _ = self.check_expr(&member.object, None, false);
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            }
+        };
+        if !arguments.is_empty() {
+            self.error(
+                span,
+                format!(
+                    "method '{name}' expects 0 arguments, found {}",
+                    arguments.len()
+                ),
+            );
+            for argument in arguments {
+                let _ = self.check_expr(argument, None, false);
+            }
+        }
+        let object = self.check_expr(&member.object, None, false);
+        let element = self
+            .iter_element(object.ty())
+            .unwrap_or(CanonicalType::Int64);
+        let ty = match method {
+            IterMethod::HasNext => CanonicalType::Bln,
+            IterMethod::Next => element,
+            IterMethod::Iter => object.ty(),
+        };
+        let (file, line, column, end_column) = self.located(span);
+        CheckedExpr::IterCall {
+            object: Box::new(object),
+            method,
+            ty,
+            file,
+            line,
+            column,
+            end_column,
+        }
+    }
+
     fn check_array_method(
         &mut self,
         member: &MemberExpr,
+        type_arguments: &[TypeSyntax],
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
@@ -4907,13 +5985,24 @@ impl<'a> Checker<'a> {
                 .lookup(&ident.name)
                 .is_some_and(|binding| binding.ty == CanonicalType::ErrorHandle)
             {
+                if !type_arguments.is_empty() {
+                    self.error(span, "runtime error methods cannot take type arguments");
+                }
                 return self.finish_handle_call(&ident.name, name, arguments, span);
             }
         }
-        if matches!(name, "iter" | "enumerate" | "entries") {
+        if matches!(name, "enumerate" | "entries") {
             self.error(span, format!("{name}() can only be used as a loop source"));
             let _ = self.check_expr(&member.object, None, false);
             return self.dummy(None);
+        }
+        if let Some(object_ty) = self.peek_type(&member.object) {
+            if object_ty.is_iter() {
+                return self.check_iter_method(member, type_arguments, arguments, span);
+            }
+            if name == "iter" && (object_ty.is_array() || object_ty == CanonicalType::Str) {
+                return self.check_array_iter(member, type_arguments, arguments, span);
+            }
         }
         let mutating = matches!(
             name,
@@ -4933,19 +6022,29 @@ impl<'a> Checker<'a> {
         }) {
             let object = self.check_expr(&member.object, None, false);
             let object = self.adopt_object(object, member.object.span());
-            if let CanonicalType::Class(id) = object.ty() {
-                return self.finish_class_call(object, id, member, arguments, span);
+            if let Some((id, _)) = self.generic_class(object.ty()) {
+                return self.finish_class_call(object, id, member, type_arguments, arguments, span);
             }
             if let CanonicalType::Interface(id) = object.ty() {
+                if !type_arguments.is_empty() {
+                    self.error(span, "interface methods cannot take type arguments");
+                }
                 return self.finish_interface_call(object, id, member, arguments, span);
             }
         }
         if let Some(place) = self.check_place(&member.object, mutating) {
             let ty = self.place_type(&place);
-            if ty.is_class() {
+            if ty.is_object() {
                 let object = self.check_expr(&member.object, None, false);
-                if let CanonicalType::Class(id) = object.ty() {
-                    return self.finish_class_call(object, id, member, arguments, span);
+                if let Some((id, _)) = self.generic_class(object.ty()) {
+                    return self.finish_class_call(
+                        object,
+                        id,
+                        member,
+                        type_arguments,
+                        arguments,
+                        span,
+                    );
                 }
             }
             if ty.is_map() {
@@ -4979,8 +6078,11 @@ impl<'a> Checker<'a> {
         if ty.is_record() {
             return self.reject_record_call(member, arguments, ty);
         }
-        if let CanonicalType::Class(id) = ty {
-            return self.finish_class_call(object, id, member, arguments, span);
+        if let Some((id, _)) = self.generic_class(ty) {
+            return self.finish_class_call(object, id, member, type_arguments, arguments, span);
+        }
+        if !type_arguments.is_empty() {
+            self.error(span, "type arguments require a generic method");
         }
         if ty == CanonicalType::Str {
             return self.finish_text_call(name, None, Some(object), arguments, span, member);
@@ -5802,15 +6904,15 @@ impl<'a> Checker<'a> {
             let ty = self.resolve_type(&binding.ty);
             checked_bindings.push((binding.name.name.clone(), ty, binding.mutable));
         }
-        let lock = if let CheckedExpr::Load { name, ty } = &source {
-            if ty.is_array() {
-                None
-            } else {
-                self.binding_at(name).map(|(scope, _)| IterLock {
-                    name: name.clone(),
-                    scope,
-                })
-            }
+        let lock_target = match &source {
+            CheckedExpr::MakeIter { object, .. } => object.as_ref(),
+            other => other,
+        };
+        let lock = if let CheckedExpr::Load { name, .. } = lock_target {
+            self.binding_at(name).map(|(scope, _)| IterLock {
+                name: name.clone(),
+                scope,
+            })
         } else {
             None
         };
@@ -5857,61 +6959,123 @@ impl<'a> Checker<'a> {
             CanonicalType::Int64,
             CanonicalType::Int64,
         );
-        let call = match unwrap_parens(expr) {
-            Expr::Call(call) => call,
-            _ => {
+        // Specialized multi-binding helpers remain available via method calls.
+        if let Expr::Call(call) = unwrap_parens(expr) {
+            if let Expr::Member(member) = &*call.callee {
+                let name = member.member.name.as_str();
+                if matches!(name, "keys" | "values" | "entries") {
+                    if !call.arguments.is_empty() {
+                        self.error(
+                            call.span,
+                            format!(
+                                "method '{name}' expects 0 arguments, found {}",
+                                call.arguments.len()
+                            ),
+                        );
+                    }
+                    return self.map_loop_source(member, name, call.span);
+                }
+                if name == "enumerate" {
+                    if !call.arguments.is_empty() {
+                        self.error(
+                            call.span,
+                            format!(
+                                "method 'enumerate' expects 0 arguments, found {}",
+                                call.arguments.len()
+                            ),
+                        );
+                    }
+                    let object = self.check_expr(&member.object, None, false);
+                    if !object.ty().is_array() {
+                        self.error(
+                            member.object.span(),
+                            format!("'{}' is not an array", self.spell(object.ty())),
+                        );
+                    }
+                    let element = object.ty().element().unwrap_or(CanonicalType::Int64);
+                    return (object, LoopSourceKind::Enumerate, element, element);
+                }
+            }
+        }
+        let source = self.check_expr(expr, None, false);
+        if let Some(element) = self.iter_element(source.ty()) {
+            // Already an iterator — do not call .iter() again.
+            return (source, LoopSourceKind::Values, element, element);
+        }
+        if source.ty().is_array() {
+            let element = source.ty().element().unwrap_or(CanonicalType::Int64);
+            let ty = CanonicalType::Iter(self.intern_iter(element));
+            return (
+                CheckedExpr::MakeIter {
+                    object: Box::new(source),
+                    ty,
+                },
+                LoopSourceKind::Values,
+                element,
+                element,
+            );
+        }
+        if source.ty() == CanonicalType::Str {
+            let element = CanonicalType::Chr;
+            let ty = CanonicalType::Iter(self.intern_iter(element));
+            return (
+                CheckedExpr::MakeIter {
+                    object: Box::new(source),
+                    ty,
+                },
+                LoopSourceKind::Values,
+                element,
+                element,
+            );
+        }
+        if let Some((id, _)) = self.generic_class(source.ty()) {
+            if let Some(method) = self.classes[id.0 as usize]
+                .methods
+                .iter()
+                .position(|method| method.name == "iter" && !method.is_static)
+            {
+                let ret = self.classes[id.0 as usize].methods[method].ret;
+                if let Some(element) = self.iter_element(ret) {
+                    let (file, line, column, end_column) = self.located(expr.span());
+                    return (
+                        CheckedExpr::ClassCall {
+                            class: id,
+                            method,
+                            object: Some(Box::new(source)),
+                            args: Vec::new(),
+                            type_args: Vec::new(),
+                            ty: ret,
+                            direct: false,
+                            file,
+                            line,
+                            column,
+                            end_column,
+                        },
+                        LoopSourceKind::Values,
+                        element,
+                        element,
+                    );
+                }
                 self.error(
                     expr.span(),
-                    "a loop iterable must be iter(), enumerate(), keys(), values(), or entries()",
+                    format!("iter() must return iter<T>, found '{}'", self.spell(ret)),
                 );
                 return (
-                    self.check_expr(expr, None, false),
+                    source,
                     LoopSourceKind::Values,
                     CanonicalType::Int64,
                     CanonicalType::Int64,
                 );
             }
-        };
-        let Expr::Member(member) = &*call.callee else {
-            self.error(
-                expr.span(),
-                "a loop iterable must be iter(), enumerate(), keys(), values(), or entries()",
-            );
-            return fallback;
-        };
-        let name = member.member.name.as_str();
-        if !call.arguments.is_empty() {
-            self.error(
-                call.span,
-                format!(
-                    "method '{name}' expects 0 arguments, found {}",
-                    call.arguments.len()
-                ),
-            );
         }
-        if matches!(name, "keys" | "values" | "entries") {
-            return self.map_loop_source(member, name, call.span);
-        }
-        let kind = match name {
-            "iter" => LoopSourceKind::Values,
-            "enumerate" => LoopSourceKind::Enumerate,
-            _ => {
-                self.error(
-                    member.member.span,
-                    "a loop iterable must be iter(), enumerate(), keys(), values(), or entries()",
-                );
-                LoopSourceKind::Values
-            }
-        };
-        let object = self.check_expr(&member.object, None, false);
-        if !object.ty().is_array() {
-            self.error(
-                member.object.span(),
-                format!("'{}' is not an array", self.spell(object.ty())),
-            );
-        }
-        let element = object.ty().element().unwrap_or(CanonicalType::Int64);
-        (object, kind, element, element)
+        self.error(
+            expr.span(),
+            format!(
+                "'{}' is not iterable; expected an array, str, iter<T>, generator, or type with iter()",
+                self.spell(source.ty())
+            ),
+        );
+        fallback
     }
 
     fn map_loop_source(
@@ -6048,6 +7212,16 @@ impl<'a> Checker<'a> {
             );
             return self.dummy(None);
         } else if let Some(signature) = self.functions.get(&ident.name).cloned() {
+            if !signature.type_params.is_empty() {
+                self.error(
+                    ident.span,
+                    format!(
+                        "generic function '{}' cannot be used as a value",
+                        ident.name
+                    ),
+                );
+                return self.dummy(None);
+            }
             let id = self.intern_callable(&signature.params, signature.ret);
             return CheckedExpr::FunctionRef {
                 name: ident.name.clone(),
@@ -6216,12 +7390,18 @@ impl<'a> Checker<'a> {
     }
 
     fn inherits(&self, child: ClassId, ancestor: ClassId) -> bool {
-        let mut current = self.classes.get(child.0 as usize).and_then(|class| class.parent);
+        let mut current = self
+            .classes
+            .get(child.0 as usize)
+            .and_then(|class| class.parent);
         while let Some(id) = current {
             if id == ancestor {
                 return true;
             }
-            current = self.classes.get(id.0 as usize).and_then(|class| class.parent);
+            current = self
+                .classes
+                .get(id.0 as usize)
+                .and_then(|class| class.parent);
         }
         false
     }
@@ -6299,7 +7479,12 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn collect_methods(&self, start: ClassId, name: &str, want_static: bool) -> Vec<(ClassId, usize)> {
+    fn collect_methods(
+        &self,
+        start: ClassId,
+        name: &str,
+        want_static: bool,
+    ) -> Vec<(ClassId, usize)> {
         let mut found = Vec::new();
         let mut current = Some(start);
         while let Some(id) = current {
@@ -6351,14 +7536,10 @@ impl<'a> Checker<'a> {
         }
         if found.len() == 1 {
             let (class, index) = found[0];
-            let params = self.classes[class.0 as usize].methods[index]
-                .params
-                .iter()
-                .map(|param| (param.ty, param.auto))
-                .collect::<Vec<_>>();
+            let params = self.classes[class.0 as usize].methods[index].params.clone();
             let deprecated = self.classes[class.0 as usize].methods[index].deprecated;
             self.note_deprecated(deprecated, span, name);
-            let args = self.check_arguments(arguments, &params, span);
+            let args = self.check_call_args(arguments, &params, span);
             return Some((class, index, args));
         }
         let prelim = arguments
@@ -6370,7 +7551,12 @@ impl<'a> Checker<'a> {
             .copied()
             .filter(|(class, index)| {
                 let params = &self.classes[class.0 as usize].methods[*index].params;
-                params.len() == prelim.len()
+                let min_args = params
+                    .iter()
+                    .position(|param| param.default.is_some())
+                    .unwrap_or(params.len());
+                prelim.len() >= min_args
+                    && prelim.len() <= params.len()
                     && params.iter().zip(&prelim).all(|(param, argument)| {
                         self.adaptable(argument.ty(), param.ty, param.auto)
                     })
@@ -6391,13 +7577,19 @@ impl<'a> Checker<'a> {
         let params = self.classes[class.0 as usize].methods[index].params.clone();
         let deprecated = self.classes[class.0 as usize].methods[index].deprecated;
         self.note_deprecated(deprecated, span, name);
-        let args = prelim
+        let mut args: Vec<CheckedExpr> = prelim
             .into_iter()
-            .zip(arguments.iter().zip(params))
+            .zip(arguments.iter().zip(params.iter()))
             .map(|(argument, (source, param))| {
                 self.apply_conversion(argument, param.ty, param.auto, source.span())
             })
             .collect();
+        for param in params.iter().skip(args.len()) {
+            if let Some(default) = &param.default {
+                let value = self.check_expr(default, Some(param.ty), false);
+                args.push(self.apply_conversion(value, param.ty, param.auto, default.span()));
+            }
+        }
         Some((class, index, args))
     }
 
@@ -6451,6 +7643,7 @@ impl<'a> Checker<'a> {
                     span: field.span,
                 });
             }
+            let type_params = self.register_type_params(&declaration.type_params);
             let mut methods = Vec::new();
             for method in &declaration.methods {
                 let _ = self.reject_reserved_name(&method.name.name, method.name.span);
@@ -6463,6 +7656,20 @@ impl<'a> Checker<'a> {
                     );
                 }
                 seen.insert(method.name.name.clone(), method.name.span);
+                let method_params = self.register_type_params(&method.type_params);
+                for method_param in &method_params {
+                    let method_name = self.type_params[method_param.0 as usize].name.clone();
+                    if type_params.iter().any(|class_param| {
+                        self.type_params[class_param.0 as usize].name == method_name
+                    }) {
+                        self.error(
+                            method.name.span,
+                            format!(
+                                "method type parameter '{method_name}' shadows a class type parameter"
+                            ),
+                        );
+                    }
+                }
                 methods.push(ClassMethodInfo {
                     name: method.name.name.clone(),
                     params: Vec::new(),
@@ -6480,6 +7687,7 @@ impl<'a> Checker<'a> {
                     mutating: false,
                     leaks: false,
                     span: method.span,
+                    type_params: method_params,
                 });
             }
             let init = declaration.init.as_ref().map(|init| ClassInitInfo {
@@ -6489,6 +7697,14 @@ impl<'a> Checker<'a> {
                 protected: init.protected,
                 deprecated: init.deprecated,
             });
+            if !type_params.is_empty() {
+                if declaration.parent.is_some() {
+                    self.error(declaration.span, "a generic class cannot use extends");
+                }
+                if !declaration.interfaces.is_empty() {
+                    self.error(declaration.span, "a generic class cannot use implements");
+                }
+            }
             let id = ClassId(self.classes.len() as u32);
             self.class_names.insert(declaration.name.name.clone(), id);
             self.classes.push(ClassInfo {
@@ -6510,6 +7726,7 @@ impl<'a> Checker<'a> {
                 fields,
                 methods,
                 init,
+                type_params,
             });
         }
     }
@@ -6559,6 +7776,7 @@ impl<'a> Checker<'a> {
                 span: parameter.span,
                 name_span: parameter.name.span,
                 callable: parameter.callable.clone(),
+                default: parameter.default.clone(),
             })
             .collect()
     }
@@ -6571,6 +7789,7 @@ impl<'a> Checker<'a> {
     fn resolve_raw_params(&mut self, raw: &[RawParam]) -> Vec<ParamInfo> {
         let mut names = HashMap::new();
         let mut params = Vec::new();
+        let mut saw_default = false;
         for parameter in raw {
             let ty = if let Some(nested) = &parameter.callable {
                 let nested_params = self.resolve_parameters(nested);
@@ -6607,13 +7826,38 @@ impl<'a> Checker<'a> {
                 );
             }
             let _ = self.reject_reserved_name(&parameter.name, parameter.name_span);
+            if parameter.default.is_some() {
+                saw_default = true;
+                if Self::expr_is_null(parameter.default.as_ref()) && !ty.is_optional() {
+                    self.error(
+                        parameter.span,
+                        format!(
+                            "null defaults require a nullable parameter type, found '{}'",
+                            self.spell(ty)
+                        ),
+                    );
+                }
+            } else if saw_default {
+                self.error(
+                    parameter.name_span,
+                    "a required parameter cannot follow a parameter with a default",
+                );
+            }
             params.push(ParamInfo {
                 name: parameter.name.clone(),
                 ty,
                 auto: parameter.auto,
+                default: parameter.default.clone(),
             });
         }
         params
+    }
+
+    fn expr_is_null(expr: Option<&Expr>) -> bool {
+        matches!(
+            expr,
+            Some(Expr::Literal(crate::parser::LiteralExpr::Null { .. }))
+        )
     }
 
     fn intern_callable(&mut self, params: &[ParamInfo], ret: CanonicalType) -> CallableId {
@@ -6659,12 +7903,21 @@ impl<'a> Checker<'a> {
     fn finish_class_types(&mut self) {
         let count = self.classes.len();
         for index in 0..count {
+            let class_params = self.classes[index].type_params.clone();
+            self.push_type_params(&class_params);
             let fields = self.classes[index]
                 .fields
                 .iter()
-                .map(|field| (field.syntax.clone(), field.span))
+                .map(|field| {
+                    (
+                        field.syntax.clone(),
+                        field.span,
+                        field.is_static,
+                        field.name.clone(),
+                    )
+                })
                 .collect::<Vec<_>>();
-            for (field_index, (syntax, span)) in fields.into_iter().enumerate() {
+            for (field_index, (syntax, span, is_static, name)) in fields.into_iter().enumerate() {
                 let ty = self.resolve_type(&syntax);
                 if ty == CanonicalType::Void {
                     self.error(span, "a field cannot have type void");
@@ -6672,10 +7925,20 @@ impl<'a> Checker<'a> {
                 if ty.is_void_array() {
                     self.error(span, "void is not a valid array element type");
                 }
+                if is_static && self.uses_class_params(ty, &class_params) {
+                    self.error(
+                        span,
+                        format!("static field '{name}' cannot use a class type parameter"),
+                    );
+                }
                 self.classes[index].fields[field_index].ty = ty;
             }
             let method_count = self.classes[index].methods.len();
             for method_index in 0..method_count {
+                let method_params = self.classes[index].methods[method_index]
+                    .type_params
+                    .clone();
+                self.push_type_params(&method_params);
                 let syntax = self.classes[index].methods[method_index].ret_syntax.clone();
                 let span = self.classes[index].methods[method_index].span;
                 let ret = self.resolve_type(&syntax);
@@ -6688,6 +7951,7 @@ impl<'a> Checker<'a> {
                 let params = self.resolve_raw_params(&raw);
                 self.classes[index].methods[method_index].ret = ret;
                 self.classes[index].methods[method_index].params = params;
+                self.pop_type_params();
             }
             if self.classes[index].init.is_some() {
                 let raw = self.classes[index]
@@ -6700,6 +7964,7 @@ impl<'a> Checker<'a> {
                     init.params = params;
                 }
             }
+            self.pop_type_params();
         }
         let interface_count = self.interfaces.len();
         for index in 0..interface_count {
@@ -6744,10 +8009,7 @@ impl<'a> Checker<'a> {
                 if seen.contains(&id) {
                     self.error(
                         self.classes[index].span,
-                        format!(
-                            "inheritance cycle involving '{}'",
-                            self.classes[index].name
-                        ),
+                        format!("inheritance cycle involving '{}'", self.classes[index].name),
                     );
                     self.classes[index].parent = None;
                     break;
@@ -6857,12 +8119,14 @@ impl<'a> Checker<'a> {
                     let class_name = self.classes[index].name.clone();
                     self.error(
                         span,
-                        format!("concrete class '{class_name}' cannot declare abstract method '{name}'"),
+                        format!(
+                            "concrete class '{class_name}' cannot declare abstract method '{name}'"
+                        ),
                     );
                 }
-                let parent_method = self.classes[index].parent.and_then(|parent| {
-                    self.find_method(parent, &name, &params, is_static)
-                });
+                let parent_method = self.classes[index]
+                    .parent
+                    .and_then(|parent| self.find_method(parent, &name, &params, is_static));
                 let interface_method = !is_static
                     && self.matches_interface_method(ClassId(index as u32), &name, &params, ret);
                 if is_override {
@@ -6913,16 +8177,20 @@ impl<'a> Checker<'a> {
         let mut current = Some(class);
         while let Some(id) = current {
             for iface in &self.classes[id.0 as usize].implements {
-                if self.interfaces[iface.0 as usize].methods.iter().any(|method| {
-                    method.name == name
-                        && method.ret == ret
-                        && method.params.len() == params.len()
-                        && method
-                            .params
-                            .iter()
-                            .zip(params)
-                            .all(|(left, right)| left.ty == right.ty)
-                }) {
+                if self.interfaces[iface.0 as usize]
+                    .methods
+                    .iter()
+                    .any(|method| {
+                        method.name == name
+                            && method.ret == ret
+                            && method.params.len() == params.len()
+                            && method
+                                .params
+                                .iter()
+                                .zip(params)
+                                .all(|(left, right)| left.ty == right.ty)
+                    })
+                {
                     return true;
                 }
             }
@@ -7043,9 +8311,7 @@ impl<'a> Checker<'a> {
                 let found = self.find_method(class, &name, &params, false);
                 let ok = found.is_some_and(|(owner, index)| {
                     let method = &self.classes[owner.0 as usize].methods[index];
-                    method.ret == ret
-                        && method.public
-                        && (!concrete || !method.is_abstract)
+                    method.ret == ret && method.public && (!concrete || !method.is_abstract)
                 });
                 if !ok {
                     let class_name = self.classes[class.0 as usize].name.clone();
@@ -7103,6 +8369,8 @@ impl<'a> Checker<'a> {
             self.error(span, message);
         }
         self.current_class = Some(id);
+        let class_params = self.classes[id.0 as usize].type_params.clone();
+        self.push_type_params(&class_params);
         let mut checked_fields = Vec::new();
         for (index, field) in declaration.fields.iter().enumerate() {
             let ty = self.classes[id.0 as usize].fields[index].ty;
@@ -7137,7 +8405,8 @@ impl<'a> Checker<'a> {
                 .map(|info| info.params.clone())
                 .unwrap_or_default();
             self.in_init = true;
-            let body = self.check_member_body(
+            self.current_class = Some(id);
+            let (body, _) = self.check_member_body(
                 id,
                 &params,
                 CanonicalType::Void,
@@ -7147,6 +8416,7 @@ impl<'a> Checker<'a> {
                 false,
                 false,
             );
+            self.current_class = None;
             self.in_init = false;
             let saw_super = init
                 .body
@@ -7177,19 +8447,28 @@ impl<'a> Checker<'a> {
             let is_abstract = self.classes[id.0 as usize].methods[index].is_abstract;
             let is_virtual = self.classes[id.0 as usize].methods[index].is_virtual;
             let name = self.classes[id.0 as usize].methods[index].name.clone();
-            let body = if is_abstract {
-                Vec::new()
+            let method_params = self.classes[id.0 as usize].methods[index]
+                .type_params
+                .clone();
+            let type_param_names = self.type_param_names(&method_params);
+            let (body, is_generator) = if is_abstract {
+                (Vec::new(), false)
             } else {
-                self.check_member_body(
-                id,
-                &params,
-                ret,
-                &method.body,
-                method.span,
-                &name,
-                true,
-                is_static,
-            )
+                self.push_type_params(&method_params);
+                self.current_class = Some(id);
+                let result = self.check_member_body(
+                    id,
+                    &params,
+                    ret,
+                    &method.body,
+                    method.span,
+                    &name,
+                    true,
+                    is_static,
+                );
+                self.current_class = None;
+                self.pop_type_params();
+                result
             };
             methods.push(CheckedMethod {
                 name,
@@ -7203,8 +8482,11 @@ impl<'a> Checker<'a> {
                 is_static,
                 is_abstract,
                 is_virtual,
+                type_params: type_param_names,
+                is_generator,
             });
         }
+        self.pop_type_params();
         Some(CheckedClass {
             name: declaration.name.name.clone(),
             parent: self.classes[id.0 as usize].parent,
@@ -7213,6 +8495,7 @@ impl<'a> Checker<'a> {
             fields: checked_fields,
             init,
             methods,
+            type_params: self.type_param_names(&class_params),
         })
     }
 
@@ -7271,13 +8554,27 @@ impl<'a> Checker<'a> {
         name: &str,
         require_return: bool,
         is_static: bool,
-    ) -> Vec<CheckedStmt> {
+    ) -> (Vec<CheckedStmt>, bool) {
         let saved_return = self.current_return;
         let saved_class = self.current_class;
         let saved_static = self.current_static;
+        let saved_generator = self.generator_element;
+        let has_emit = contains_emit(&body.statements);
+        let is_generator = ret.is_iter() && has_emit;
+        if has_emit && !ret.is_iter() {
+            self.error(
+                span,
+                "emit is only allowed in functions that return iter<T>",
+            );
+        }
         self.current_return = ret;
         self.current_class = Some(id);
         self.current_static = is_static;
+        self.generator_element = if is_generator {
+            self.iter_element(ret)
+        } else {
+            None
+        };
         self.scopes.push(HashMap::new());
         if !is_static {
             self.scopes.last_mut().unwrap().insert(
@@ -7313,7 +8610,11 @@ impl<'a> Checker<'a> {
             super_slot = false;
         }
         self.at_super_slot = false;
-        if require_return && ret != CanonicalType::Void && !guaranteed_return(&body.statements) {
+        if require_return
+            && !is_generator
+            && ret != CanonicalType::Void
+            && !guaranteed_return(&body.statements)
+        {
             self.error(
                 span,
                 format!("function '{name}' must return a value on every path"),
@@ -7323,11 +8624,12 @@ impl<'a> Checker<'a> {
         self.current_return = saved_return;
         self.current_class = saved_class;
         self.current_static = saved_static;
-        checked
+        self.generator_element = saved_generator;
+        (checked, is_generator)
     }
 
     fn check_new(&mut self, expr: &NewExpr) -> CheckedExpr {
-        let Some(id) = self.class_names.get(&expr.name.name).copied() else {
+        let Some(origin) = self.class_names.get(&expr.name.name).copied() else {
             self.error(
                 expr.name.span,
                 format!("unknown class '{}'", expr.name.name),
@@ -7337,23 +8639,31 @@ impl<'a> Checker<'a> {
             }
             return self.dummy(None);
         };
-        if self.classes[id.0 as usize].abstract_class {
+        let result_ty = if !self.classes[origin.0 as usize].type_params.is_empty()
+            || !expr.type_arguments.is_empty()
+        {
+            self.resolve_constructed_class(origin, &expr.type_arguments, expr.name.span)
+        } else {
+            CanonicalType::Class(origin)
+        };
+        if self.classes[origin.0 as usize].abstract_class {
             self.error(
                 expr.name.span,
                 format!("cannot construct abstract class '{}'", expr.name.name),
             );
         }
-        let deprecated = self.classes[id.0 as usize]
+        let deprecated = self.classes[origin.0 as usize]
             .init
             .as_ref()
             .is_some_and(|init| init.deprecated);
         self.note_deprecated(deprecated, expr.name.span, &expr.name.name);
-        self.check_construct(id, &expr.arguments, expr.span)
+        self.check_construct(origin, &expr.arguments, expr.span, result_ty)
     }
 
     fn check_static_call(
         &mut self,
         member: &MemberExpr,
+        type_arguments: &[TypeSyntax],
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
@@ -7364,72 +8674,82 @@ impl<'a> Checker<'a> {
             self.error(object.span, format!("unknown class '{}'", object.name));
             return self.dummy(None);
         };
-        let Some((owner, index, args)) =
-            self.resolve_methods(id, &member.member.name, true, arguments, span)
-        else {
-            if self.has_method_name(id, &member.member.name) {
-                let name = member.member.name.clone();
-                let class_name = self.class_name(id);
-                self.error(
-                    member.member.span,
-                    format!("method '{name}' requires an instance of '{class_name}'"),
-                );
-            } else if !self.diagnostics.iter().any(|diagnostic| {
-                diagnostic.span.start.offset == span.start.offset
-                    && (diagnostic.message.contains("ambiguous call")
-                        || diagnostic.message.contains("no overload"))
-            }) {
-                self.error(
-                    member.member.span,
-                    format!("unknown method '{}'", member.member.name),
-                );
-            }
-            return self.dummy(None);
+        let dummy = CheckedExpr::Null {
+            ty: CanonicalType::Class(id),
         };
-        let public = self.classes[owner.0 as usize].methods[index].public;
-        let protected = self.classes[owner.0 as usize].methods[index].protected;
-        let ret = self.classes[owner.0 as usize].methods[index].ret;
-        let name = self.classes[owner.0 as usize].methods[index].name.clone();
-        if !self.member_visible(public, protected, owner) {
-            self.error(
-                member.member.span,
-                format!("method '{name}' is not accessible"),
-            );
-        }
-        let (file, line, column, end_column) = self.located(span);
-        CheckedExpr::ClassCall {
-            class: owner,
-            method: index,
-            object: None,
-            args,
-            ty: ret,
-            direct: false,
-            file,
-            line,
-            column,
-            end_column,
+        let call = self.finish_class_call(dummy, id, member, type_arguments, arguments, span);
+        match call {
+            CheckedExpr::ClassCall {
+                class,
+                method,
+                args,
+                type_args,
+                ty,
+                direct,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                if !self.classes[class.0 as usize].methods[method].is_static {
+                    let name = member.member.name.clone();
+                    let class_name = self.class_name(id);
+                    self.error(
+                        member.member.span,
+                        format!("method '{name}' requires an instance of '{class_name}'"),
+                    );
+                    return self.dummy(None);
+                }
+                CheckedExpr::ClassCall {
+                    class,
+                    method,
+                    object: None,
+                    args,
+                    type_args,
+                    ty,
+                    direct,
+                    file,
+                    line,
+                    column,
+                    end_column,
+                }
+            }
+            other => other,
         }
     }
 
-    fn check_construct(&mut self, id: ClassId, arguments: &[Expr], span: Span) -> CheckedExpr {
+    fn check_construct(
+        &mut self,
+        id: ClassId,
+        arguments: &[Expr],
+        span: Span,
+        result_ty: CanonicalType,
+    ) -> CheckedExpr {
         let name = self.class_name(id);
-        let init = self.classes[id.0 as usize].init.as_ref().map(|init| {
-            (
-                init.public,
-                init.protected,
-                init.params.clone(),
-            )
-        });
+        let map = match result_ty {
+            CanonicalType::Generic(generic) => self.generic_map(generic),
+            _ => Vec::new(),
+        };
+        let init = self.classes[id.0 as usize]
+            .init
+            .as_ref()
+            .map(|init| (init.public, init.protected, init.params.clone()));
         let (file, line, column, end_column) = self.located(span);
         let args = if let Some((public, protected, params)) = init {
             if !self.member_visible(public, protected, id) {
                 self.error(span, format!("constructor of '{name}' is not accessible"));
             }
-            let pairs = params
+            let infos = params
                 .iter()
-                .map(|param| (param.ty, param.auto))
+                .map(|param| ParamInfo {
+                    name: param.name.clone(),
+                    ty: self.substitute_type(param.ty, &map),
+                    auto: param.auto,
+                    default: param.default.clone(),
+                })
                 .collect::<Vec<_>>();
-            self.check_arguments(arguments, &pairs, span)
+            self.check_call_args(arguments, &infos, span)
         } else if arguments.is_empty() {
             Vec::new()
         } else {
@@ -7442,10 +8762,19 @@ impl<'a> Checker<'a> {
             }
             Vec::new()
         };
+        let type_args = match result_ty {
+            CanonicalType::Generic(generic) => self
+                .generics
+                .get(generic.0 as usize)
+                .map(|instance| instance.args.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         CheckedExpr::ClassNew {
             class: id,
             args,
-            ty: CanonicalType::Class(id),
+            type_args,
+            ty: result_ty,
             file,
             line,
             column,
@@ -7459,10 +8788,14 @@ impl<'a> Checker<'a> {
         id: ClassId,
         expr: &MemberExpr,
     ) -> CheckedExpr {
+        let map = match object.ty() {
+            CanonicalType::Generic(generic) => self.generic_map(generic),
+            _ => Vec::new(),
+        };
         if let Some((owner, index)) = self.locate_field(id, &expr.member.name) {
             let public = self.classes[owner.0 as usize].fields[index].public;
             let protected = self.classes[owner.0 as usize].fields[index].protected;
-            let ty = self.classes[owner.0 as usize].fields[index].ty;
+            let ty = self.substitute_type(self.classes[owner.0 as usize].fields[index].ty, &map);
             let name = self.classes[owner.0 as usize].fields[index].name.clone();
             let deprecated = self.classes[owner.0 as usize].fields[index].deprecated;
             if !self.member_visible(public, protected, owner) {
@@ -7501,6 +8834,10 @@ impl<'a> Checker<'a> {
         value: &Expr,
         op: Option<BinaryOperator>,
     ) -> CheckedExpr {
+        let map = match object.ty() {
+            CanonicalType::Generic(generic) => self.generic_map(generic),
+            _ => Vec::new(),
+        };
         let Some((owner, index)) = self.locate_field(id, &member.member.name) else {
             if self.has_method_name(id, &member.member.name) {
                 self.error(
@@ -7520,7 +8857,7 @@ impl<'a> Checker<'a> {
         let protected = self.classes[owner.0 as usize].fields[index].protected;
         let const_field = self.classes[owner.0 as usize].fields[index].const_field;
         let is_static = self.classes[owner.0 as usize].fields[index].is_static;
-        let ty = self.classes[owner.0 as usize].fields[index].ty;
+        let ty = self.substitute_type(self.classes[owner.0 as usize].fields[index].ty, &map);
         let auto = self.classes[owner.0 as usize].fields[index].auto;
         let name = self.classes[owner.0 as usize].fields[index].name.clone();
         let deprecated = self.classes[owner.0 as usize].fields[index].deprecated;
@@ -7561,11 +8898,129 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn infer_type_args(
+        &mut self,
+        type_params: &[TypeParamId],
+        params: &[ParamInfo],
+        arguments: &[Expr],
+        span: Span,
+    ) -> Option<Vec<(TypeParamId, CanonicalType)>> {
+        if type_params.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut map = Vec::new();
+        for (param, argument) in params.iter().zip(arguments.iter()) {
+            if !self.uses_class_params(param.ty, type_params) {
+                continue;
+            }
+            let concrete = if let Some(ty) = self.peek_type(argument) {
+                ty
+            } else {
+                self.check_expr(argument, None, false).ty()
+            };
+            if !self.unify_type(param.ty, concrete, &mut map) {
+                self.error(
+                    argument.span(),
+                    format!(
+                        "type mismatch: expected '{}', found '{}'",
+                        self.spell(param.ty),
+                        self.spell(concrete)
+                    ),
+                );
+                return None;
+            }
+        }
+        for param in type_params {
+            if !map.iter().any(|(id, _)| id == param) {
+                self.error(
+                    span,
+                    format!(
+                        "cannot infer type parameter '{}'",
+                        self.type_params[param.0 as usize].name
+                    ),
+                );
+                return None;
+            }
+        }
+        let ordered = type_params
+            .iter()
+            .filter_map(|param| {
+                map.iter()
+                    .find(|(id, _)| id == param)
+                    .map(|(_, ty)| (*param, *ty))
+            })
+            .collect::<Vec<_>>();
+        if ordered.len() == type_params.len() {
+            Some(ordered)
+        } else {
+            None
+        }
+    }
+
+    fn unify_type(
+        &self,
+        pattern: CanonicalType,
+        concrete: CanonicalType,
+        map: &mut Vec<(TypeParamId, CanonicalType)>,
+    ) -> bool {
+        match (pattern, concrete) {
+            (CanonicalType::Param(id), concrete) => {
+                if let Some((_, existing)) = map.iter().find(|(param, _)| *param == id) {
+                    return *existing == concrete || self.assignable(concrete, *existing);
+                }
+                map.push((id, concrete));
+                true
+            }
+            (CanonicalType::Optional(pattern), CanonicalType::Optional(concrete)) => {
+                self.unify_type(pattern.canonical(), concrete.canonical(), map)
+            }
+            (
+                CanonicalType::Array {
+                    leaf: pattern_leaf,
+                    depth: pattern_depth,
+                    ..
+                },
+                CanonicalType::Array {
+                    leaf: concrete_leaf,
+                    depth: concrete_depth,
+                    ..
+                },
+            ) if pattern_depth == concrete_depth => {
+                self.unify_type(pattern_leaf.canonical(), concrete_leaf.canonical(), map)
+            }
+            (CanonicalType::Callable(pattern_id), CanonicalType::Callable(concrete_id)) => {
+                let Some(pattern_sig) = self.callables.get(pattern_id.0 as usize) else {
+                    return false;
+                };
+                let Some(concrete_sig) = self.callables.get(concrete_id.0 as usize) else {
+                    return false;
+                };
+                if pattern_sig.params.len() != concrete_sig.params.len() {
+                    return false;
+                }
+                pattern_sig
+                    .params
+                    .iter()
+                    .zip(concrete_sig.params.iter())
+                    .all(|(pattern_param, concrete_param)| {
+                        self.unify_type(*pattern_param, *concrete_param, map)
+                    })
+                    && self.unify_type(pattern_sig.ret, concrete_sig.ret, map)
+            }
+            (pattern, concrete) => {
+                pattern == concrete
+                    || self.assignable(concrete, pattern)
+                    || (pattern.is_numeric() && concrete.is_numeric() && pattern == concrete)
+            }
+        }
+    }
+
     fn finish_class_call(
         &mut self,
         object: CheckedExpr,
         id: ClassId,
         member: &MemberExpr,
+        type_arguments: &[TypeSyntax],
         arguments: &[Expr],
         span: Span,
     ) -> CheckedExpr {
@@ -7590,17 +9045,123 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         }
         let want_static = instance.is_empty();
-        let Some((owner, index, args)) =
-            self.resolve_methods(id, &member.member.name, want_static, arguments, span)
-        else {
-            return self.dummy(None);
+        let found = if want_static { statics } else { instance };
+        let (owner, index) = found[0];
+        if found.len() > 1 {
+            // Fall back to unsubstituted overload resolution for non-generic overloads.
+            let Some((owner, index, args)) =
+                self.resolve_methods(id, &member.member.name, want_static, arguments, span)
+            else {
+                return self.dummy(None);
+            };
+            let ret = self.classes[owner.0 as usize].methods[index].ret;
+            let (file, line, column, end_column) = self.located(span);
+            return CheckedExpr::ClassCall {
+                class: owner,
+                method: index,
+                object: Some(Box::new(object)),
+                args,
+                type_args: Vec::new(),
+                ty: ret,
+                direct: false,
+                file,
+                line,
+                column,
+                end_column,
+            };
+        }
+        let mut map = match object.ty() {
+            CanonicalType::Generic(generic) => self.generic_map(generic),
+            _ => Vec::new(),
         };
+        let class_params = self.classes[owner.0 as usize].type_params.clone();
+        let method_params = self.classes[owner.0 as usize].methods[index]
+            .type_params
+            .clone();
+        let is_static = self.classes[owner.0 as usize].methods[index].is_static;
+        let raw_params = self.classes[owner.0 as usize].methods[index].params.clone();
+        let raw_ret = self.classes[owner.0 as usize].methods[index].ret;
+        let mut type_args = Vec::new();
+        if !method_params.is_empty() {
+            if type_arguments.is_empty() {
+                self.error(
+                    span,
+                    format!(
+                        "generic method '{}' requires type arguments",
+                        member.member.name
+                    ),
+                );
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            }
+            let Some(method_map) = self.substitution_map(&method_params, type_arguments, span)
+            else {
+                for argument in arguments {
+                    let _ = self.check_expr(argument, None, false);
+                }
+                return self.dummy(None);
+            };
+            type_args = method_map.iter().map(|(_, ty)| *ty).collect();
+            map.extend(method_map);
+        } else if is_static && !class_params.is_empty() && map.is_empty() {
+            if !type_arguments.is_empty() {
+                let Some(class_map) = self.substitution_map(&class_params, type_arguments, span)
+                else {
+                    for argument in arguments {
+                        let _ = self.check_expr(argument, None, false);
+                    }
+                    return self.dummy(None);
+                };
+                type_args = class_map.iter().map(|(_, ty)| *ty).collect();
+                map.extend(class_map);
+            } else {
+                let before = self.diagnostics.len();
+                if let Some(inferred) =
+                    self.infer_type_args(&class_params, &raw_params, arguments, span)
+                {
+                    type_args = inferred.iter().map(|(_, ty)| *ty).collect();
+                    map.extend(inferred);
+                } else {
+                    if self.diagnostics.len() == before {
+                        self.error(
+                            span,
+                            format!(
+                                "generic class '{}' requires type arguments for static method '{}'",
+                                self.class_name(owner),
+                                member.member.name
+                            ),
+                        );
+                    }
+                    for argument in arguments {
+                        let _ = self.check_expr(argument, None, false);
+                    }
+                    return self.dummy(None);
+                }
+            }
+        } else if !type_arguments.is_empty() {
+            self.error(
+                span,
+                format!("method '{}' is not generic", member.member.name),
+            );
+        }
+        let params = raw_params
+            .iter()
+            .map(|param| ParamInfo {
+                name: param.name.clone(),
+                ty: self.substitute_type(param.ty, &map),
+                auto: param.auto,
+                default: param.default.clone(),
+            })
+            .collect::<Vec<_>>();
+        let ret = self.substitute_type(raw_ret, &map);
         let public = self.classes[owner.0 as usize].methods[index].public;
         let protected = self.classes[owner.0 as usize].methods[index].protected;
-        let is_static = self.classes[owner.0 as usize].methods[index].is_static;
         let mutating = self.classes[owner.0 as usize].methods[index].mutating;
-        let ret = self.classes[owner.0 as usize].methods[index].ret;
         let name = self.classes[owner.0 as usize].methods[index].name.clone();
+        let deprecated = self.classes[owner.0 as usize].methods[index].deprecated;
+        self.note_deprecated(deprecated, span, &name);
         if !self.member_visible(public, protected, owner) {
             self.error(
                 member.member.span,
@@ -7615,12 +9176,14 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        let args = self.check_call_args(arguments, &params, span);
         let (file, line, column, end_column) = self.located(span);
         CheckedExpr::ClassCall {
             class: owner,
             method: index,
             object: Some(Box::new(object)),
             args,
+            type_args,
             ty: ret,
             direct: false,
             file,
@@ -7685,6 +9248,11 @@ impl<'a> Checker<'a> {
 
     fn peek_call(&self, call: &CallExpr) -> Option<CanonicalType> {
         match call.callee.as_ref() {
+            Expr::Identifier(ident) if ident.name == "range" => {
+                // Element type is always int64; id 0 may be wrong before interning,
+                // so callers that need a concrete IterId go through check_range.
+                Some(CanonicalType::Iter(IterId(0)))
+            }
             Expr::Identifier(ident) => self
                 .functions
                 .get(&ident.name)
@@ -7940,7 +9508,10 @@ impl<'a> Checker<'a> {
     }
 
     fn error_help(&mut self, span: Span, message: impl Into<String>, help: Option<String>) {
-        let message = message.into();
+        let mut message = message.into();
+        if let Some(instantiation) = &self.instantiation {
+            message = format!("{message} (in {instantiation})");
+        }
         if self.diagnostics.last().is_some_and(|last| {
             last.span.start.offset == span.start.offset && last.message == message
         }) {
@@ -8068,10 +9639,7 @@ impl<'a> Checker<'a> {
         if self.classes[owner.0 as usize].methods[index].is_abstract {
             self.error(
                 member.member.span,
-                format!(
-                    "super cannot call abstract method '{}'",
-                    member.member.name
-                ),
+                format!("super cannot call abstract method '{}'", member.member.name),
             );
         }
         let ret = self.classes[owner.0 as usize].methods[index].ret;
@@ -8084,6 +9652,7 @@ impl<'a> Checker<'a> {
                 ty: CanonicalType::Class(class),
             })),
             args,
+            type_args: Vec::new(),
             ty: ret,
             direct: true,
             file,
@@ -8172,10 +9741,7 @@ impl<'a> Checker<'a> {
                 })
                 .collect::<Vec<_>>();
             if matches.len() != 1 {
-                self.error(
-                    span,
-                    format!("ambiguous call to '{}'", member.member.name),
-                );
+                self.error(span, format!("ambiguous call to '{}'", member.member.name));
                 None
             } else {
                 let index = matches[0];
@@ -8397,6 +9963,59 @@ fn guaranteed_return(statements: &[Stmt]) -> bool {
     statements.iter().any(stmt_returns)
 }
 
+fn rust_ident_simple(name: &str) -> String {
+    if name.is_empty() {
+        return "grf_".to_string();
+    }
+    let mut ident = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            if index == 0 && ch.is_ascii_digit() {
+                ident.push_str("grf_");
+            }
+            ident.push(ch);
+        } else {
+            ident.push('_');
+        }
+    }
+    if ident.is_empty() {
+        "grf_".to_string()
+    } else {
+        ident
+    }
+}
+
+fn mangle_type_name(ty: CanonicalType) -> String {
+    match ty {
+        CanonicalType::Void => "void".to_string(),
+        CanonicalType::Int16 => "i16".to_string(),
+        CanonicalType::Int32 => "i32".to_string(),
+        CanonicalType::Int64 => "i64".to_string(),
+        CanonicalType::UInt16 => "u16".to_string(),
+        CanonicalType::UInt32 => "u32".to_string(),
+        CanonicalType::UInt64 => "u64".to_string(),
+        CanonicalType::Flt32 => "f32".to_string(),
+        CanonicalType::Flt64 => "f64".to_string(),
+        CanonicalType::Bln => "bln".to_string(),
+        CanonicalType::Chr => "chr".to_string(),
+        CanonicalType::Str => "str".to_string(),
+        CanonicalType::Type => "Type".to_string(),
+        CanonicalType::Class(id) => format!("C{}", id.0),
+        CanonicalType::Interface(id) => format!("I{}", id.0),
+        CanonicalType::Record(id) => format!("R{}", id.0),
+        CanonicalType::Map(id) => format!("M{}", id.0),
+        CanonicalType::Iter(id) => format!("It{}", id.0),
+        CanonicalType::Generic(id) => format!("G{}", id.0),
+        CanonicalType::Param(id) => format!("P{}", id.0),
+        CanonicalType::Callable(id) => format!("Fn{}", id.0),
+        CanonicalType::ErrorHandle => "err".to_string(),
+        CanonicalType::Optional(kind) => format!("opt_{}", mangle_type_name(kind.canonical())),
+        CanonicalType::Array { leaf, depth, .. } => {
+            format!("arr{depth}_{}", mangle_type_name(leaf.canonical()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -8418,6 +10037,38 @@ fn stmt_returns(stmt: &Stmt) -> bool {
                     .iter()
                     .all(|clause| guaranteed_return(&clause.block.statements))
         }
+        _ => false,
+    }
+}
+
+fn contains_emit(statements: &[Stmt]) -> bool {
+    statements.iter().any(stmt_contains_emit)
+}
+
+fn stmt_contains_emit(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Emit(_) => true,
+        Stmt::Block(block) => contains_emit(&block.statements),
+        Stmt::If(stmt) => {
+            contains_emit(&stmt.then_branch.statements)
+                || stmt
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|branch| stmt_contains_emit(branch))
+        }
+        Stmt::Loop(stmt) => contains_emit(&stmt.body.statements),
+        Stmt::Try(stmt) => {
+            contains_emit(&stmt.body.statements)
+                || stmt
+                    .catches
+                    .iter()
+                    .any(|clause| contains_emit(&clause.block.statements))
+                || stmt
+                    .finally_block
+                    .as_ref()
+                    .is_some_and(|block| contains_emit(&block.statements))
+        }
+        Stmt::Conditional(stmt) => stmt_contains_emit(&stmt.action),
         _ => false,
     }
 }

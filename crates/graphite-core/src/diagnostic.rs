@@ -387,6 +387,16 @@ pub fn const_violation(site: Site<'_>) -> RuntimeError {
     )
 }
 
+pub fn iterator_exhausted(site: Site<'_>) -> RuntimeError {
+    RuntimeError::at(
+        site,
+        "IteratorExhaustedError",
+        "GRF-RUN-017",
+        "iterator has no more elements",
+        "iterator exhausted",
+    )
+}
+
 pub fn runtime_internal(detail: impl Into<String>) -> RuntimeError {
     RuntimeError {
         kind: "RuntimeInternalError",

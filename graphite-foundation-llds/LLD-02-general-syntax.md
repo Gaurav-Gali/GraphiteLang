@@ -57,7 +57,7 @@ Graphite identifiers are case-sensitive and follow a strict camel-casing policy.
 | Functions and methods           | lower camel case                         | `println`, `readFile`, `getUserName`      |
 | Variables and parameters        | lower camel case                         | `userName`, `filePath`                    |
 | Types and classes               | UpperCamelCase                           | `Person`, `NeuralNetwork`                 |
-| Generic type parameters         | Open decision; proposed UpperCamelCase   | `T`, `Element`                            |
+| Generic type parameters         | UpperCamelCase, enforced by the compiler | `T`, `Element`                            |
 | Constants                       | Open decision; proposed lower camel case | `maxRetries`, `defaultTimeout`            |
 | Reserved keyword `auto`         | Not an identifier                        | `auto int`, `auto str`                    |
 
