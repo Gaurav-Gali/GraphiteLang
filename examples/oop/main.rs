@@ -195,7 +195,7 @@ fn grf_method_Animal_introduce(this: graphite_core::heap::Rooted) -> Result<(), 
 }
 
 fn grf_new_Dog(mut name: String) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {
-    let this = graphite_core::heap::alloc(GrfClassDog {
+    let this = graphite_core::heap::alloc(GrfClassAnimal {
         grf_type: 1,
         Animal_name: String::new(),
     })?;
@@ -213,7 +213,7 @@ fn grf_method_Dog_speak(this: graphite_core::heap::Rooted) -> Result<(), graphit
 }
 
 fn grf_new_Cat(mut name: String) -> Result<graphite_core::heap::Rooted, graphite_core::diagnostic::RuntimeError> {
-    let this = graphite_core::heap::alloc(GrfClassCat {
+    let this = graphite_core::heap::alloc(GrfClassAnimal {
         grf_type: 2,
         Animal_name: String::new(),
     })?;

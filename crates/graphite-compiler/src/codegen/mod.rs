@@ -15,10 +15,10 @@ use crate::parser::{BinaryOperator, UnaryOperator};
 use crate::semantic::convert::{ConvOp, conversion};
 use crate::semantic::numeric::CompareMode;
 use crate::semantic::{
-    ArrayMethod, ArrayPlace, CallableSignature, CanonicalType, CheckedClass, CheckedExpr,
-    CheckedFn, CheckedInterface, CheckedPart, CheckedProgram, CheckedRecord, CheckedStmt, ClassId,
-    GenericInstance, InterfaceId, IterMethod, IterShape, Leaf, LoopSourceKind, MapEntry, MapMethod,
-    MapShape, RecordId, TextMethod,
+    ArrayMethod, ArrayPlace, AsyncShape, CallableSignature, CanonicalType, CheckedClass,
+    CheckedExpr, CheckedFn, CheckedInterface, CheckedPart, CheckedProgram, CheckedRecord,
+    CheckedStmt, ClassId, GenericInstance, InterfaceId, IterMethod, IterShape, Leaf, LoopSourceKind,
+    MapEntry, MapMethod, MapShape, RecordId, TextMethod,
 };
 
 pub fn runtime_crate_relative_path() -> PathBuf {
@@ -44,6 +44,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         interfaces: &program.interfaces,
         maps: &program.maps,
         iters: &program.iters,
+        asyncs: &program.asyncs,
         callables: &program.callables,
         generics: &program.generics,
         type_param_names: &program.type_param_names,
@@ -120,6 +121,7 @@ struct Emitter<'a> {
     interfaces: &'a [CheckedInterface],
     maps: &'a [MapShape],
     iters: &'a [IterShape],
+    asyncs: &'a [AsyncShape],
     callables: &'a [CallableSignature],
     generics: &'a [GenericInstance],
     type_param_names: &'a [String],
@@ -164,8 +166,9 @@ impl Emitter<'_> {
         };
         self.fn_ret = ret.clone();
         self.tries.clear();
+        let async_kw = if function.is_async { "async " } else { "" };
         self.line(&format!(
-            "{visibility}fn {rust_name}{generics}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
+            "{visibility}{async_kw}fn {rust_name}{generics}({params}) -> Result<{ret}, graphite_core::diagnostic::RuntimeError> {{"
         ));
         self.indent += 1;
         self.emit_param_limits(&function.params);
@@ -185,9 +188,16 @@ impl Emitter<'_> {
         self.line("}");
         self.out.push('\n');
         if function.name == "main" {
-            self.line("fn main() {");
-            self.indent += 1;
-            self.line("if let Err(error) = grf_user_main() {");
+            if function.is_async {
+                self.line("#[tokio::main(flavor = \"current_thread\")]");
+                self.line("async fn main() {");
+                self.indent += 1;
+                self.line("if let Err(error) = grf_user_main().await {");
+            } else {
+                self.line("fn main() {");
+                self.indent += 1;
+                self.line("if let Err(error) = grf_user_main() {");
+            }
             self.indent += 1;
             self.line("graphite_core::diagnostic::report(&error);");
             self.line("std::process::exit(1);");
@@ -230,6 +240,22 @@ impl Emitter<'_> {
                 }
             }
             CheckedStmt::Return(value) => self.emit_return(value),
+            CheckedStmt::Await {
+                name,
+                value,
+                result_ty,
+            } => {
+                let value = self.emit_expr(value);
+                if let Some(name) = name {
+                    self.line(&format!(
+                        "let mut {}: {} = ({value}).await?;",
+                        rust_ident(name),
+                        self.ty_name(*result_ty)
+                    ));
+                } else {
+                    self.line(&format!("({value}).await?;"));
+                }
+            }
             CheckedStmt::Emit { value } => {
                 let value = self.emit_expr(value);
                 self.line(&format!("__grf_emit.push({value});"));
@@ -571,6 +597,15 @@ impl Emitter<'_> {
                         format!("__st = {after};"),
                         "return Ok(Some(__grf_yield));".to_string(),
                     ],
+                );
+                s
+            }
+            CheckedStmt::Await { .. } => {
+                // Generators cannot contain await (rejected in semantic analysis).
+                let s = self.gen_alloc_state();
+                self.gen_set_state(
+                    s,
+                    vec![format!("__st = {after};"), "continue;".to_string()],
                 );
                 s
             }
@@ -1616,6 +1651,7 @@ impl Emitter<'_> {
                 line,
                 column,
                 end_column,
+                ty,
                 ..
             } => {
                 let path = if path.contains("::") {
@@ -1632,9 +1668,15 @@ impl Emitter<'_> {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let site = self.locate(file, *line, *column, *end_column);
-                format!(
-                    "match {path}{turbofish}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee}\", {site})) }}"
-                )
+                if ty.is_async() {
+                    format!(
+                        "graphite_core::async_rt::box_async(async move {{ match {path}{turbofish}({args}).await {{ Ok(value) => Ok(value), Err(error) => Err(error.enter_call(\"{callee}\", {site})) }} }})"
+                    )
+                } else {
+                    format!(
+                        "match {path}{turbofish}({args}) {{ Ok(value) => value, Err(error) => return Err(error.enter_call(\"{callee}\", {site})) }}"
+                    )
+                }
             }
             CheckedExpr::HandleCall { name, method, .. } => {
                 let name = rust_ident(name);
@@ -4701,6 +4743,19 @@ impl Emitter<'_> {
                     .map(|shape| shape.element)
                     .unwrap_or(CanonicalType::Int64);
                 format!("graphite_core::iter::Iter<{}>", self.ty_name(element))
+            }
+            CanonicalType::Async(id) => {
+                let result = self
+                    .asyncs
+                    .get(id.0 as usize)
+                    .map(|shape| shape.result)
+                    .unwrap_or(CanonicalType::Void);
+                let inner = if result == CanonicalType::Void {
+                    "()".to_string()
+                } else {
+                    self.ty_name(result)
+                };
+                format!("graphite_core::async_rt::Async<{inner}>")
             }
             CanonicalType::Array {
                 leaf: Leaf::Map(id),

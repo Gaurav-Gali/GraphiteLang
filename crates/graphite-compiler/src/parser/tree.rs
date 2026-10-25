@@ -130,6 +130,23 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                 write_expression(out, &child_prefix(prefix, last), true, value);
             }
         }
+        Stmt::Await(await_statement) => {
+            write_line(out, prefix, last, "Await");
+            let child = format!("{prefix}{}   ", if last { " " } else { "│" });
+            if let Some(binding) = &await_statement.binding {
+                write_line(
+                    out,
+                    &child,
+                    false,
+                    &format!(
+                        "Binding {} {}",
+                        format_type(&binding.ty),
+                        binding.name.name
+                    ),
+                );
+            }
+            write_expression(out, &child, true, &await_statement.value);
+        }
         Stmt::Emit(emit_statement) => {
             write_line(out, prefix, last, "Emit");
             write_expression(

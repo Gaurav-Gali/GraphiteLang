@@ -216,6 +216,8 @@ pub fn semantic_code(message: &str) -> &'static str {
         || message.contains("default")
     {
         "GRF-SEM-035"
+    } else if message.contains("async") || message.contains("await") {
+        "GRF-SEM-036"
     } else {
         "GRF-SEM-900"
     }

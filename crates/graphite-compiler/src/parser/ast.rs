@@ -189,6 +189,7 @@ pub enum Stmt {
     Destructure(DestructureDecl),
     Return(ReturnStmt),
     Emit(EmitStmt),
+    Await(AwaitStmt),
     If(IfStmt),
     Loop(LoopStmt),
     Break(Span),
@@ -203,6 +204,21 @@ pub enum Stmt {
 pub struct EmitStmt {
     pub value: Expr,
     pub span: Span,
+}
+
+/// `await<T> name = expression;` or bare `await expression;` (void only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitStmt {
+    /// Present for `await<T> name = …`. Absent for bare `await expr;`.
+    pub binding: Option<AwaitBinding>,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitBinding {
+    pub ty: TypeSyntax,
+    pub name: Identifier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

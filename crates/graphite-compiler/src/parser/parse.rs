@@ -969,6 +969,9 @@ impl<'a> Parser<'a> {
         if self.check(TokenKind::KwEmit) {
             return Some(self.parse_emit());
         }
+        if self.check(TokenKind::KwAwait) {
+            return Some(self.parse_await());
+        }
         if self.check(TokenKind::KwIf) {
             return Some(self.parse_if());
         }
@@ -1381,6 +1384,45 @@ impl<'a> Parser<'a> {
         let value = self.parse_expression();
         let end = self.finish_statement_end(value.span().end, "expected ';' after emit");
         Stmt::Emit(EmitStmt {
+            value,
+            span: Span { start, end },
+        })
+    }
+
+    fn parse_await(&mut self) -> Stmt {
+        let start = self.bump().span.start;
+        let binding = if self.check(TokenKind::Less) {
+            let (arguments, _) = self.parse_required_type_arguments();
+            if arguments.len() != 1 {
+                self.error(
+                    ParserDiagnosticKind::InvalidTypeSyntax,
+                    self.current().span,
+                    "await binding requires exactly one type argument",
+                );
+            }
+            let ty = arguments.into_iter().next().unwrap_or(TypeSyntax {
+                kind: TypeKind::Void,
+                name: String::new(),
+                bounds: Vec::new(),
+                arguments: Vec::new(),
+                optional: false,
+                span: self.current().span,
+            });
+            let name = self
+                .expect_identifier("expected a binding name after await<T>")
+                .unwrap_or(Identifier {
+                    name: "_".to_string(),
+                    span: self.current().span,
+                });
+            let _ = self.consume(TokenKind::Equal, "expected '=' after await binding name");
+            Some(AwaitBinding { ty, name })
+        } else {
+            None
+        };
+        let value = self.parse_expression();
+        let end = self.finish_statement_end(value.span().end, "expected ';' after await");
+        Stmt::Await(AwaitStmt {
+            binding,
             value,
             span: Span { start, end },
         })
@@ -2670,7 +2712,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Option<TypeSyntax> {
-        let (kind, name, token) = if let Some(kind) = type_kind(self.current().kind) {
+        let (kind, name, token) = if self.check(TokenKind::KwAsync) {
+            let token = self.bump();
+            (TypeKind::Named, "async".to_string(), token)
+        } else if let Some(kind) = type_kind(self.current().kind) {
             let token = self.bump();
             (kind, String::new(), token)
         } else if self.check(TokenKind::Identifier) {
@@ -2691,6 +2736,12 @@ impl<'a> Parser<'a> {
             let (parsed, parsed_end) = self.parse_required_type_arguments();
             arguments = parsed;
             end = parsed_end;
+        } else if kind == TypeKind::Named && name == "async" {
+            self.error(
+                ParserDiagnosticKind::InvalidTypeSyntax,
+                token.span,
+                "async type requires a type argument: async<T>",
+            );
         }
         if kind == TypeKind::Map {
             if self.consume(TokenKind::Less, "expected '<' after map") {
@@ -2896,10 +2947,15 @@ impl<'a> Parser<'a> {
     }
 
     fn starts_type(&self) -> bool {
-        type_kind(self.current().kind).is_some() || self.check(TokenKind::Identifier)
+        type_kind(self.current().kind).is_some()
+            || self.check(TokenKind::Identifier)
+            || self.check(TokenKind::KwAsync)
     }
 
     fn starts_function(&self) -> bool {
+        if self.check(TokenKind::KwAsync) {
+            return true;
+        }
         if type_kind(self.current().kind).is_some() {
             // `map` is a type keyword that always begins a typed declaration;
             // incomplete forms such as `map scores;` are diagnosed in type
@@ -2924,6 +2980,9 @@ impl<'a> Parser<'a> {
 
     fn starts_declaration(&self) -> bool {
         if self.check(TokenKind::KwConst) || self.check(TokenKind::KwAuto) {
+            return true;
+        }
+        if self.check(TokenKind::KwAsync) {
             return true;
         }
         if type_kind(self.current().kind).is_some() && self.peek_kind() != TokenKind::LeftParen {
@@ -3298,6 +3357,7 @@ fn statement_span(statement: &Stmt) -> Span {
         Stmt::Destructure(declaration) => declaration.span,
         Stmt::Return(return_statement) => return_statement.span,
         Stmt::Emit(emit_statement) => emit_statement.span,
+        Stmt::Await(await_statement) => await_statement.span,
         Stmt::If(if_statement) => if_statement.span,
         Stmt::Loop(loop_statement) => loop_statement.span,
         Stmt::Break(span) | Stmt::Continue(span) => *span,

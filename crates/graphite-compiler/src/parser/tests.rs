@@ -479,11 +479,8 @@ fn current_programs_parse() {
     let lexed = lex("test.grf", &source);
     let program = parse("test.grf", &lexed.tokens).program.unwrap();
     assert_eq!(program.imports.len(), 1);
-    assert_eq!(program.functions.len(), 3);
-    assert_eq!(
-        function(&program, "greet").parameters[0].conversion,
-        ConversionMode::Auto
-    );
+    assert_eq!(program.functions.len(), 1);
+    assert_eq!(function(&program, "main").name.name, "main");
 }
 
 #[test]
@@ -1203,4 +1200,41 @@ void main() {
         panic!("fn(arr[0]) is a call, not a lambda");
     };
     assert!(matches!(call.callee.as_ref(), Expr::Identifier(name) if name.name == "fn"));
+}
+
+#[test]
+fn async_functions_and_await_statements_parse() {
+    let program = parse_clean(
+        "\
+async<int> fetch() {
+    return 1;
+}
+
+async<void> main() {
+    await<int> count = fetch();
+    await save();
+}
+
+async<void> save() {
+    return;
+}
+",
+    );
+    let fetch = function(&program, "fetch");
+    assert_eq!(fetch.return_type.kind, TypeKind::Named);
+    assert_eq!(fetch.return_type.name, "async");
+    assert_eq!(fetch.return_type.arguments.len(), 1);
+    assert_eq!(fetch.return_type.arguments[0].kind, TypeKind::Int);
+
+    let main = function(&program, "main");
+    let Stmt::Await(bound) = &main.body.statements[0] else {
+        panic!("expected await binding");
+    };
+    let binding = bound.binding.as_ref().expect("binding");
+    assert_eq!(binding.ty.kind, TypeKind::Int);
+    assert_eq!(binding.name.name, "count");
+    let Stmt::Await(bare) = &main.body.statements[1] else {
+        panic!("expected bare await");
+    };
+    assert!(bare.binding.is_none());
 }

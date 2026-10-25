@@ -254,6 +254,13 @@ fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, Ru
         )));
     }
     let package = format!("grf-{entry_key}");
+    let needs_tokio = checked.functions.iter().any(|f| f.is_async)
+        || checked.specializations.iter().any(|f| f.is_async);
+    let tokio_dep = if needs_tokio {
+        "tokio = { version = \"1\", features = [\"rt\", \"macros\"] }\n"
+    } else {
+        ""
+    };
     let manifest_text = format!(
         r#"[package]
 name = "{package}"
@@ -267,7 +274,7 @@ path = "src/main.rs"
 
 [dependencies]
 graphite-core = {{ path = "../../../../crates/graphite-core" }}
-
+{tokio_dep}
 [workspace]
 resolver = "3"
 "#
@@ -655,7 +662,25 @@ void main() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.grf");
         let output = run_captured(&path);
         assert_eq!(output.status, 0, "{}", output.stderr);
-        assert_eq!(output.stdout, "25\nHello 123\n");
+        assert_eq!(output.stdout, "uint64\n");
+    }
+
+    #[test]
+    fn async_await_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/async/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "42\n");
+        let rust = fs::read_to_string(
+            discover_workspace()
+                .unwrap()
+                .join("target/grf/builds")
+                .join(build_key(&path))
+                .join("Cargo.toml"),
+        )
+        .unwrap();
+        assert!(rust.contains("tokio"), "{rust}");
     }
 
     #[test]

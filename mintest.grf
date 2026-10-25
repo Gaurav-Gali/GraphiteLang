@@ -1,32 +1,15 @@
 import grf.io;
 
-void main() {
-  int? b = a<int>();
-  io.println(b);
+async<void> main() {
+  io.println("start");
+  await<str> a = wait<str>("abc");
+  io.println(a);
+}
 
-  iter<int>? missing = maybe<int>(false, 1);
-  io.println(missing == null);
-
-  iter<int>? present = maybe<int>(true, 42);
-  if (present != null) {
-    iter<int> it = present;
-    loop (int n : it) {
-      io.println(n);
-    }
+async<T> wait<T>(T a) {
+  int k = 0;
+  loop(int i : range(10000000)) {
+    k++;
   }
-}
-
-T? a<T>() {
-  return null;
-}
-
-iter<T> one<T>(T value) {
-  emit value;
-}
-
-iter<T>? maybe<T>(bln give, T value) {
-  if (!give) {
-    return null;
-  }
-  return one<T>(value);
+  return a;
 }

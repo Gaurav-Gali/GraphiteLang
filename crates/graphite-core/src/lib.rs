@@ -1,4 +1,5 @@
 pub mod array;
+pub mod async_rt;
 pub mod convert;
 pub mod diagnostic;
 pub mod heap;

@@ -120,6 +120,8 @@ pub enum TokenKind {
     KwAnd,
     KwOr,
     KwEmit,
+    KwAsync,
+    KwAwait,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +209,8 @@ fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
         TokenKind::KwAnd => "and",
         TokenKind::KwOr => "or",
         TokenKind::KwEmit => "emit",
+        TokenKind::KwAsync => "async",
+        TokenKind::KwAwait => "await",
         _ => return None,
     })
 }
@@ -262,6 +266,8 @@ pub fn keyword(ident: &str) -> Option<TokenKind> {
         "and" => TokenKind::KwAnd,
         "or" => TokenKind::KwOr,
         "emit" => TokenKind::KwEmit,
+        "async" => TokenKind::KwAsync,
+        "await" => TokenKind::KwAwait,
         _ => return None,
     })
 }

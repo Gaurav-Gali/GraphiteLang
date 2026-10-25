@@ -1,0 +1,20 @@
+import grf.io;
+
+async<int> fetchCount() {
+    return 21;
+}
+
+async<int> calculate() {
+    await<int> count = fetchCount();
+    return count * 2;
+}
+
+async<void> main() {
+    await<int> result = calculate();
+    io.println(result);
+    await save();
+}
+
+async<void> save() {
+    return;
+}

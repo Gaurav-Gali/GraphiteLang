@@ -2497,3 +2497,129 @@ void main() {
     );
     assert!(optional_generics.is_empty(), "{optional_generics}");
 }
+
+#[test]
+fn async_await_typechecks_and_enforces_moves() {
+    let accepted = analyze_source(
+        "\
+async<int> fetch() {
+    return 21;
+}
+
+async<int> calculate() {
+    await<int> count = fetch();
+    return count * 2;
+}
+
+async<void> main() {
+    await<int> result = calculate();
+    await save();
+}
+
+async<void> save() {
+    return;
+}
+",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    let program = accepted.program.as_ref().unwrap();
+    assert!(program.functions.iter().any(|f| f.name == "main" && f.is_async));
+    let rust = generate(program);
+    assert!(rust.contains("#[tokio::main"), "{rust}");
+    assert!(rust.contains(".await?"), "{rust}");
+    assert!(rust.contains("box_async"), "{rust}");
+
+    let moved = messages(
+        "\
+async<int> fetch() { return 1; }
+async<void> main() {
+    async<int> a = fetch();
+    async<int> b = a;
+    await<int> x = a;
+}
+",
+    );
+    assert!(moved.contains("use of moved async operation"), "{moved}");
+
+    let call_move = messages(
+        "\
+async<int> fetch() { return 1; }
+async<int> consume(async<int> pending) {
+    await<int> x = pending;
+    return x;
+}
+async<void> main() {
+    async<int> a = fetch();
+    await<int> y = consume(a);
+    await<int> z = a;
+}
+",
+    );
+    assert!(
+        call_move.contains("use of moved async operation"),
+        "{call_move}"
+    );
+
+    let sync_await = messages(
+        "\
+async<int> fetch() { return 1; }
+void main() {
+    await<int> x = fetch();
+}
+",
+    );
+    assert!(
+        sync_await.contains("await can only be used inside an async function"),
+        "{sync_await}"
+    );
+
+    let bare_non_void = messages(
+        "\
+async<int> fetch() { return 1; }
+async<void> main() {
+    await fetch();
+}
+",
+    );
+    assert!(
+        bare_non_void.contains("await without a binding is only allowed for async<void>"),
+        "{bare_non_void}"
+    );
+
+    let nullable = messages(
+        "\
+async<int>? bad() { return null; }
+void main() {}
+",
+    );
+    assert!(
+        nullable.contains("async operations cannot be nullable"),
+        "{nullable}"
+    );
+
+    let discarded = analyze_source(
+        "\
+async<int> fetch() { return 1; }
+async<void> main() {
+    fetch();
+}
+",
+    );
+    assert!(
+        discarded.diagnostics.is_empty(),
+        "{:?}",
+        discarded.diagnostics
+    );
+    assert!(
+        discarded
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("discarded without await")),
+        "{:?}",
+        discarded.warnings
+    );
+}
