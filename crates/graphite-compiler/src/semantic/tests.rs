@@ -2573,7 +2573,7 @@ void main() {
 ",
     );
     assert!(
-        sync_await.contains("await can only be used inside an async function"),
+        sync_await.contains("await can only be used inside an async or asyncIter function"),
         "{sync_await}"
     );
 
@@ -2622,4 +2622,115 @@ async<void> main() {
         "{:?}",
         discarded.warnings
     );
+
+    let async_iter_value = analyze_source(
+        "\
+async<iter<int>> getNumbers() {
+    return range(3);
+}
+async<int[]> fetchNumbers() {
+    return [1, 2];
+}
+async<void> main() {
+    await<iter<int>> numbers = getNumbers();
+    loop(int n : numbers) {}
+    await<int[]> values = fetchNumbers();
+    loop(int n : values) {}
+}
+",
+    );
+    assert!(
+        async_iter_value.diagnostics.is_empty(),
+        "{:?}",
+        async_iter_value.diagnostics
+    );
+
+    let async_stream = analyze_source(
+        "\
+asyncIter<int> getNumbers() {
+    emit 1;
+    emit 2;
+}
+async<void> main() {
+    loop(await<int> n : getNumbers()) {}
+}
+",
+    );
+    assert!(
+        async_stream.diagnostics.is_empty(),
+        "{:?}",
+        async_stream.diagnostics
+    );
+    assert!(
+        async_stream
+            .program
+            .as_ref()
+            .is_some_and(|p| p.functions.iter().any(|f| f.is_async_iter)),
+        "expected asyncIter function"
+    );
+    let stream_rust = generate(
+        async_stream
+            .program
+            .as_ref()
+            .expect("checked program"),
+    );
+    assert!(stream_rust.contains("AsyncIter::spawn"), "{stream_rust}");
+    assert!(stream_rust.contains("try_next().await"), "{stream_rust}");
+
+    let emit_in_async = messages(
+        "\
+async<int> bad() {
+    emit 1;
+    return 0;
+}
+async<void> main() {}
+",
+    );
+    assert!(
+        emit_in_async.contains("emit is not allowed inside an async function"),
+        "{emit_in_async}"
+    );
+
+    let await_loop_sync = messages(
+        "\
+asyncIter<int> getNumbers() { emit 1; }
+void main() {
+    loop(await<int> n : getNumbers()) {}
+}
+",
+    );
+    assert!(
+        await_loop_sync.contains("async iteration (loop await) is only allowed inside an async or asyncIter function"),
+        "{await_loop_sync}"
+    );
+
+    let async_iter_protocol = analyze_source(
+        "\
+asyncIter<int> getNumbers() {
+    emit 1;
+    emit 2;
+}
+async<void> main() {
+    asyncIter<int> it = getNumbers().iter();
+    loop (it.hasNext()) {
+        int n = it.next();
+        int peek = it.value();
+    }
+}
+",
+    );
+    assert!(
+        async_iter_protocol.diagnostics.is_empty(),
+        "{:?}",
+        async_iter_protocol.diagnostics
+    );
+    let protocol_rust = generate(
+        async_iter_protocol
+            .program
+            .as_ref()
+            .expect("checked program"),
+    );
+    assert!(protocol_rust.contains("has_next().await"), "{protocol_rust}");
+    assert!(protocol_rust.contains("next("), "{protocol_rust}");
+    assert!(protocol_rust.contains(".await?"), "{protocol_rust}");
 }

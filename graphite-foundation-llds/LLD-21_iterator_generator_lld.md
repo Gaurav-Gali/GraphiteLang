@@ -48,6 +48,13 @@ next element
 next element; runtime  
 error if exhausted
 
+`value()` `T value()` Return the current  
+element without  
+consuming; prefetches  
+like `hasNext` when  
+needed; runtime error if  
+exhausted
+
 ---
 
 `hasNext()` must not logically consume an element. For lazy sources, it  

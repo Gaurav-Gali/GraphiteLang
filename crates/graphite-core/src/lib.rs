@@ -1,4 +1,5 @@
 pub mod array;
+pub mod async_iter;
 pub mod async_rt;
 pub mod convert;
 pub mod diagnostic;
@@ -8,4 +9,5 @@ pub mod iter;
 pub mod map;
 pub mod numeric;
 pub mod text;
+pub mod time;
 pub mod value;

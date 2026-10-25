@@ -44,6 +44,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         interfaces: &program.interfaces,
         maps: &program.maps,
         iters: &program.iters,
+        async_iters: &program.async_iters,
         asyncs: &program.asyncs,
         callables: &program.callables,
         generics: &program.generics,
@@ -52,6 +53,7 @@ pub fn generate_with_source(program: &CheckedProgram, source_name: &str, source:
         source,
         constructor_return: false,
         in_generator: false,
+        in_async_iter: false,
         gen_states: Vec::new(),
         gen_next_id: 0,
         gen_loops: Vec::new(),
@@ -121,6 +123,7 @@ struct Emitter<'a> {
     interfaces: &'a [CheckedInterface],
     maps: &'a [MapShape],
     iters: &'a [IterShape],
+    async_iters: &'a [IterShape],
     asyncs: &'a [AsyncShape],
     callables: &'a [CallableSignature],
     generics: &'a [GenericInstance],
@@ -129,6 +132,8 @@ struct Emitter<'a> {
     source: &'a str,
     constructor_return: bool,
     in_generator: bool,
+    /// True while emitting an `asyncIter` producer body (`emit` → channel send).
+    in_async_iter: bool,
     /// State-machine arms for the generator currently being lowered.
     gen_states: Vec<(u32, Vec<String>)>,
     gen_next_id: u32,
@@ -174,6 +179,8 @@ impl Emitter<'_> {
         self.emit_param_limits(&function.params);
         if function.is_generator {
             self.emit_generator_from_fn(&function.body);
+        } else if function.is_async_iter {
+            self.emit_async_iter_from_fn(&function.body);
         } else {
             for statement in &function.body {
                 self.emit_stmt(statement);
@@ -258,7 +265,13 @@ impl Emitter<'_> {
             }
             CheckedStmt::Emit { value } => {
                 let value = self.emit_expr(value);
-                self.line(&format!("__grf_emit.push({value});"));
+                if self.in_async_iter {
+                    self.line(&format!(
+                        "__grf_tx.send(Ok({value})).await.map_err(|_| graphite_core::diagnostic::runtime_internal(\"asyncIter closed\"))?;"
+                    ));
+                } else {
+                    self.line(&format!("__grf_emit.push({value});"));
+                }
             }
             CheckedStmt::Expr(expr) => {
                 let value = self.emit_expr(expr);
@@ -487,6 +500,43 @@ impl Emitter<'_> {
                 self.indent -= 1;
                 self.line("}");
             }
+            CheckedStmt::AsyncIterate {
+                name,
+                ty,
+                source,
+                body,
+            } => {
+                let outer = self.fresh_label();
+                let inner = self.fresh_label();
+                let source = self.emit_expr(source);
+                self.line("{");
+                self.indent += 1;
+                self.line(&format!("let grf_async_it = {source};"));
+                self.line(&format!("'{outer}: loop {{"));
+                self.indent += 1;
+                self.line(&format!("'{inner}: loop {{"));
+                self.indent += 1;
+                self.loops.push((outer.clone(), inner.clone()));
+                self.line(&format!(
+                    "let mut {}: {} = match grf_async_it.try_next().await? {{",
+                    rust_ident(name),
+                    self.ty_name(*ty)
+                ));
+                self.indent += 1;
+                self.line("Some(__grf_item) => __grf_item,");
+                self.line(&format!("None => break '{outer},"));
+                self.indent -= 1;
+                self.line("};");
+                self.emit_body(body);
+                self.loops.pop();
+                self.line(&format!("break '{inner};"));
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+                self.indent -= 1;
+                self.line("}");
+            }
             CheckedStmt::Try {
                 body,
                 catches,
@@ -494,6 +544,36 @@ impl Emitter<'_> {
             } => self.emit_try(body, catches, finally_body),
             CheckedStmt::Super { .. } => {}
         }
+    }
+
+    /// Lower an `asyncIter` body to a channel producer spawned on Tokio.
+    /// Each `emit` sends one item (awaiting for backpressure); `await` in the
+    /// producer suspends between items.
+    fn emit_async_iter_from_fn(&mut self, body: &[CheckedStmt]) {
+        self.in_async_iter = true;
+        self.line("Ok(graphite_core::async_iter::AsyncIter::spawn(move |__grf_tx| {");
+        self.indent += 1;
+        self.line("Box::pin(async move {");
+        self.indent += 1;
+        self.line("let __grf_err_tx = __grf_tx.clone();");
+        self.line("let __grf_body = async move {");
+        self.indent += 1;
+        for statement in body {
+            self.emit_stmt(statement);
+        }
+        self.line("Ok::<(), graphite_core::diagnostic::RuntimeError>(())");
+        self.indent -= 1;
+        self.line("};");
+        self.line("if let Err(__grf_error) = __grf_body.await {");
+        self.indent += 1;
+        self.line("let _ = __grf_err_tx.send(Err(__grf_error)).await;");
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("})");
+        self.indent -= 1;
+        self.line("}))");
+        self.in_async_iter = false;
     }
 
     /// Lower a generator body to `Iter::from_fn` with an explicit state machine.
@@ -919,6 +999,12 @@ impl Emitter<'_> {
                 }
             }
             CheckedStmt::Super { .. } => {
+                let s = self.gen_alloc_state();
+                self.gen_set_state(s, vec![format!("__st = {after};"), "continue;".to_string()]);
+                s
+            }
+            CheckedStmt::AsyncIterate { .. } => {
+                // asyncIter loops are rejected inside generators by semantic analysis.
                 let s = self.gen_alloc_state();
                 self.gen_set_state(s, vec![format!("__st = {after};"), "continue;".to_string()]);
                 s
@@ -1846,6 +1932,7 @@ impl Emitter<'_> {
             CheckedExpr::IterCall {
                 object,
                 method,
+                suspend,
                 file,
                 line,
                 column,
@@ -1853,13 +1940,21 @@ impl Emitter<'_> {
                 ..
             } => {
                 let object = self.emit_expr(object);
-                match method {
-                    IterMethod::HasNext => format!("({object}).has_next()?"),
-                    IterMethod::Next => {
-                        let site = self.locate(file, *line, *column, *end_column);
-                        format!("({object}).next({site})?")
-                    }
+                let site = self.locate(file, *line, *column, *end_column);
+                let call = match method {
+                    IterMethod::HasNext => format!("({object}).has_next()"),
+                    IterMethod::Next => format!("({object}).next({site})"),
+                    IterMethod::Value => format!("({object}).value({site})"),
                     IterMethod::Iter => format!("({object}).iter()"),
+                };
+                if *suspend {
+                    // asyncIter protocol: methods return bln/T in Graphite but
+                    // suspend via `.await` in the generated Rust.
+                    format!("({call}.await?)")
+                } else if matches!(method, IterMethod::Iter) {
+                    call
+                } else {
+                    format!("({call}?)")
                 }
             }
             CheckedExpr::Range {
@@ -3994,6 +4089,10 @@ impl Emitter<'_> {
             CanonicalType::Optional(_) => "None".to_string(),
             CanonicalType::Map(_) => "std::collections::HashMap::new()".to_string(),
             CanonicalType::Iter(_) => "graphite_core::iter::Iter::from_vec(Vec::new())".to_string(),
+            CanonicalType::AsyncIter(_) => {
+                // asyncIter values are not stored across generator suspension points.
+                "unreachable!()".to_string()
+            }
             other if other.is_integer() => "0".to_string(),
             _ => "Default::default()".to_string(),
         }
@@ -4743,6 +4842,17 @@ impl Emitter<'_> {
                     .map(|shape| shape.element)
                     .unwrap_or(CanonicalType::Int64);
                 format!("graphite_core::iter::Iter<{}>", self.ty_name(element))
+            }
+            CanonicalType::AsyncIter(id) => {
+                let element = self
+                    .async_iters
+                    .get(id.0 as usize)
+                    .map(|shape| shape.element)
+                    .unwrap_or(CanonicalType::Int64);
+                format!(
+                    "graphite_core::async_iter::AsyncIter<{}>",
+                    self.ty_name(element)
+                )
             }
             CanonicalType::Async(id) => {
                 let result = self
@@ -5558,6 +5668,14 @@ fn collect_generator_locals_stmt(stmt: &CheckedStmt, locals: &mut Vec<(String, C
                 collect_generator_locals_stmt(stmt, locals);
             }
         }
+        CheckedStmt::AsyncIterate { name, ty, body, .. } => {
+            if !locals.iter().any(|(n, _)| n == name) {
+                locals.push((name.clone(), *ty));
+            }
+            for stmt in body {
+                collect_generator_locals_stmt(stmt, locals);
+            }
+        }
         CheckedStmt::Try {
             body,
             catches,
@@ -5591,7 +5709,8 @@ fn checked_stmt_contains_emit(stmt: &CheckedStmt) -> bool {
         CheckedStmt::Block { body }
         | CheckedStmt::While { body, .. }
         | CheckedStmt::Loop { body }
-        | CheckedStmt::Iterate { body, .. } => checked_contains_emit(body),
+        | CheckedStmt::Iterate { body, .. }
+        | CheckedStmt::AsyncIterate { body, .. } => checked_contains_emit(body),
         CheckedStmt::If {
             then_body,
             else_body,

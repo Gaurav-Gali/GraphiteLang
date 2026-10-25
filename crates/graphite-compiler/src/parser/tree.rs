@@ -197,6 +197,21 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
                     write_line(out, &header, true, "Iterable");
                     write_expression(out, &child_prefix(&header, true), true, iterable);
                 }
+                LoopKind::AwaitIteration { binding, iterable } => {
+                    write_line(out, &child, false, "AwaitIteration");
+                    let header = child_prefix(&child, false);
+                    write_line(
+                        out,
+                        &header,
+                        false,
+                        &format!(
+                            "await {}",
+                            format_typed_name(binding.conversion, &binding.ty, &binding.name.name)
+                        ),
+                    );
+                    write_line(out, &header, true, "Iterable");
+                    write_expression(out, &child_prefix(&header, true), true, iterable);
+                }
                 LoopKind::CStyle {
                     initializer,
                     init_expr,

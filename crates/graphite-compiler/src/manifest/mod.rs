@@ -106,8 +106,40 @@ pub fn builtin_manifest() -> Manifest {
 }
 
 fn parse_manifest_type(text: &str) -> Result<ManifestType, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("empty type".to_string());
+    }
+    // `async void` or `async<void>` — library async returns (LLD-23).
+    if let Some(inner) = text
+        .strip_prefix("async<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        if !is_known_type(inner) {
+            return Err(format!("unknown manifest type inside async<{inner}>"));
+        }
+        return Ok(ManifestType {
+            auto: false,
+            name: format!("async<{inner}>"),
+        });
+    }
     let mut parts = text.split_whitespace();
     let first = parts.next().ok_or_else(|| "empty type".to_string())?;
+    if first == "async" {
+        let inner = parts
+            .next()
+            .ok_or_else(|| "async requires a result type".to_string())?;
+        if parts.next().is_some() {
+            return Err(format!("invalid manifest type '{text}'"));
+        }
+        if !is_known_type(inner) {
+            return Err(format!("unknown manifest type '{inner}'"));
+        }
+        return Ok(ManifestType {
+            auto: false,
+            name: format!("async<{inner}>"),
+        });
+    }
     let (auto, name) = if first == "auto" {
         let name = parts
             .next()
@@ -227,6 +259,37 @@ mod tests {
         let input = io.functions.get("input").expect("input");
         assert_eq!(input.returns.name, "str");
         assert!(!input.returns.auto);
+    }
+
+    #[test]
+    fn builtin_manifest_keeps_the_time_contract() {
+        let manifest = builtin_manifest();
+        let time = manifest.libraries.get("time").expect("time");
+        let today = time.functions.get("today").expect("today");
+        assert_eq!(today.rust_path, "graphite_core::time::today");
+        assert_eq!(today.returns.name, "str");
+        assert!(today.params.is_empty());
+        let secs = time.functions.get("secs").expect("secs");
+        assert_eq!(secs.params[0].ty.name, "flt");
+        assert!(secs.params[0].ty.auto);
+        assert_eq!(secs.returns.name, "flt");
+        let flt = time.functions.get("flt").expect("flt");
+        assert_eq!(flt.rust_path, "graphite_core::time::current_flt");
+        assert_eq!(flt.returns.name, "flt");
+        let sleep = time.functions.get("sleep").expect("sleep");
+        assert_eq!(sleep.returns.name, "async<void>");
+        assert_eq!(sleep.rust_path, "graphite_core::time::sleep");
+        assert!(time.functions.contains_key("addDays"));
+        assert!(time.functions.contains_key("daysBetween"));
+        assert!(time.functions.contains_key("toDay"));
+    }
+
+    #[test]
+    fn async_void_manifest_types_parse() {
+        let ty = parse_manifest_type("async void").expect("async void");
+        assert_eq!(ty.name, "async<void>");
+        let ty = parse_manifest_type("async<void>").expect("async<void>");
+        assert_eq!(ty.name, "async<void>");
     }
 
     #[test]

@@ -1480,6 +1480,8 @@ impl<'a> Parser<'a> {
         let _ = self.consume(TokenKind::LeftParen, "expected '(' after loop");
         let kind = if self.check(TokenKind::RightParen) {
             LoopKind::Infinite
+        } else if self.check(TokenKind::KwAwait) {
+            self.parse_await_iteration()
         } else if self.check(TokenKind::Semicolon) {
             self.bump();
             self.parse_cstyle_tail(None)
@@ -1597,6 +1599,59 @@ impl<'a> Parser<'a> {
             init_expr: None,
             condition,
             update,
+        }
+    }
+
+    fn parse_await_iteration(&mut self) -> LoopKind {
+        let await_start = self.bump().span.start;
+        if !self.check(TokenKind::Less) {
+            self.error(
+                ParserDiagnosticKind::ExpectedToken,
+                self.current().span,
+                "async iteration requires await<T> name : asyncIter",
+            );
+            return LoopKind::Infinite;
+        }
+        let (arguments, _) = self.parse_required_type_arguments();
+        if arguments.len() != 1 {
+            self.error(
+                ParserDiagnosticKind::InvalidTypeSyntax,
+                self.current().span,
+                "await binding requires exactly one type argument",
+            );
+        }
+        let ty = arguments.into_iter().next().unwrap_or(TypeSyntax {
+            kind: TypeKind::Void,
+            name: String::new(),
+            bounds: Vec::new(),
+            arguments: Vec::new(),
+            optional: false,
+            span: self.current().span,
+        });
+        let name = self
+            .expect_identifier("expected a binding name after await<T>")
+            .unwrap_or(Identifier {
+                name: "_".to_string(),
+                span: self.current().span,
+            });
+        let _ = self.consume(
+            TokenKind::Colon,
+            "expected ':' in async iteration loop binding",
+        );
+        let iterable = self.parse_expression();
+        let span = Span {
+            start: await_start,
+            end: name.span.end,
+        };
+        LoopKind::AwaitIteration {
+            binding: BindingHead {
+                name,
+                ty,
+                conversion: ConversionMode::Exact,
+                mutable: true,
+                span,
+            },
+            iterable,
         }
     }
 
@@ -1986,7 +2041,8 @@ impl<'a> Parser<'a> {
                 expression = self.parse_subscript(expression);
             } else if self.check(TokenKind::Dot) {
                 let _dot = self.bump();
-                if let Some(member) = self.expect_identifier("expected a name after '.'") {
+                // Keywords are allowed as member names (`time.int()`, `value.type`).
+                if let Some(member) = self.expect_member_name("expected a name after '.'") {
                     let span = Span {
                         start: expression.span().start,
                         end: member.span.end,
@@ -2859,6 +2915,23 @@ impl<'a> Parser<'a> {
         None
     }
 
+    /// Like `expect_identifier`, but keywords are valid member names after `.`.
+    fn expect_member_name(&mut self, message: &str) -> Option<Identifier> {
+        if self.check(TokenKind::Identifier) || self.current().kind.is_keyword() {
+            let token = self.bump();
+            return Some(Identifier {
+                name: token.lexeme.clone(),
+                span: token.span,
+            });
+        }
+        self.error(
+            ParserDiagnosticKind::ExpectedToken,
+            self.current().span,
+            message,
+        );
+        None
+    }
+
     fn reject_arrow(&mut self) -> bool {
         if self.current().kind == TokenKind::Minus && self.peek_kind() == TokenKind::Greater {
             self.reject_sequence("->");
@@ -2995,7 +3068,13 @@ impl<'a> Parser<'a> {
         self.named_type_end().is_some_and(|index| {
             matches!(
                 self.kind_at(index),
-                TokenKind::Equal | TokenKind::Semicolon | TokenKind::Comma | TokenKind::RightParen
+                // `=` / `;` / `,` / `)` cover locals, destructuring, and params.
+                // `:` covers iteration bindings: `loop (T item : items)`.
+                TokenKind::Equal
+                    | TokenKind::Semicolon
+                    | TokenKind::Comma
+                    | TokenKind::RightParen
+                    | TokenKind::Colon
             )
         })
     }

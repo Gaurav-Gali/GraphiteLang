@@ -336,6 +336,11 @@ pub enum LoopKind {
         bindings: Vec<BindingHead>,
         iterable: Expr,
     },
+    /// `loop (await<T> name : asyncIterable)` — each step awaits the next item.
+    AwaitIteration {
+        binding: BindingHead,
+        iterable: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

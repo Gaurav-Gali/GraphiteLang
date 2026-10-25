@@ -1,15 +1,19 @@
 import grf.io;
+import grf.time;
 
 async<void> main() {
-  io.println("start");
-  await<str> a = wait<str>("abc");
-  io.println(a);
+  flt start = time.flt();
+  loop(await<str> i : delay<str>("graphite version 1.0".split(""), 0.01)) {
+    io.print(i);
+  }
+  flt end = time.flt();
+
+  io.println(f"\n{time.toSecs(end-start)}");
 }
 
-async<T> wait<T>(T a) {
-  int k = 0;
-  loop(int i : range(10000000)) {
-    k++;
+asyncIter<T> delay<T>(T[] arr, flt dial=1) {
+  loop (T i : arr) {
+    await time.sleep(time.secs(dial));
+    emit i;
   }
-  return a;
 }

@@ -360,6 +360,41 @@ void main() {
 }
 
 #[test]
+fn loop_iteration_accepts_named_and_type_param_bindings() {
+    let program = parse_clean(
+        "\
+iter<T> walk<T>(T[] items) {
+    loop (T item : items) {
+        emit item;
+    }
+}
+void main() {
+    loop (Person p : people) {
+    }
+}
+",
+    );
+    let walk = function(&program, "walk");
+    let Stmt::Loop(loop_stmt) = &walk.body.statements[0] else {
+        panic!("expected loop in walk");
+    };
+    assert!(
+        matches!(loop_stmt.kind, LoopKind::Iteration { .. }),
+        "{:?}",
+        loop_stmt.kind
+    );
+    let main = function(&program, "main");
+    let Stmt::Loop(loop_stmt) = &main.body.statements[0] else {
+        panic!("expected loop in main");
+    };
+    assert!(
+        matches!(loop_stmt.kind, LoopKind::Iteration { .. }),
+        "{:?}",
+        loop_stmt.kind
+    );
+}
+
+#[test]
 fn conditions_loops_and_updates() {
     let program = parse_clean(
         "\
@@ -1200,6 +1235,23 @@ void main() {
         panic!("fn(arr[0]) is a call, not a lambda");
     };
     assert!(matches!(call.callee.as_ref(), Expr::Identifier(name) if name.name == "fn"));
+}
+
+#[test]
+fn keyword_members_are_allowed_after_dot() {
+    let program = parse_clean(
+        "\
+import grf.time;
+
+void main() {
+    flt x = time.flt();
+    int y = time.int();
+    str z = time.str();
+}
+",
+    );
+    let main = function(&program, "main");
+    assert_eq!(main.body.statements.len(), 3);
 }
 
 #[test]

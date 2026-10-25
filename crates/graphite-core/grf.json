@@ -42,6 +42,826 @@
           "rustPath": "graphite_core::io::input"
         }
       }
+    },
+    "time": {
+      "description": "Current time, timestamps, calendar helpers, formatting, durations, and async sleep.",
+      "functions": {
+        "flt": {
+          "description": "Current Unix timestamp in fractional milliseconds.",
+          "params": [],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::current_flt"
+        },
+        "int": {
+          "description": "Current Unix timestamp in integer milliseconds.",
+          "params": [],
+          "returns": "int",
+          "rustPath": "graphite_core::time::current_int"
+        },
+        "str": {
+          "description": "Human-readable current local date and time.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::current_str"
+        },
+        "iso": {
+          "description": "Current UTC timestamp as ISO 8601 with a Z suffix.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::iso_now"
+        },
+        "today": {
+          "description": "Current system-local calendar date as yyyy-MM-dd.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::today"
+        },
+        "now": {
+          "description": "Current system-local clock time as HH:mm:ss.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::now"
+        },
+        "parseDate": {
+          "description": "Parse and normalize a yyyy-MM-dd date.",
+          "params": [
+            {
+              "name": "dateText",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::parse_date"
+        },
+        "parseClockTime": {
+          "description": "Parse and normalize a clock time.",
+          "params": [
+            {
+              "name": "timeText",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::parse_clock_time"
+        },
+        "parse": {
+          "description": "Parse an ISO timestamp with timezone to canonical UTC ISO.",
+          "params": [
+            {
+              "name": "isoText",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::parse_iso"
+        },
+        "parseInt": {
+          "description": "Parse a timestamp to integer Unix milliseconds.",
+          "params": [
+            {
+              "name": "isoText",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::parse_int"
+        },
+        "parseFlt": {
+          "description": "Parse a timestamp to fractional Unix milliseconds.",
+          "params": [
+            {
+              "name": "isoText",
+              "type": "str"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::parse_flt"
+        },
+        "toMs": {
+          "description": "Convert a timestamp to fractional Unix milliseconds.",
+          "params": [
+            {
+              "name": "timestamp",
+              "type": "str"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::to_ms"
+        },
+        "format": {
+          "description": "Format a date, clock time, or timestamp with a pattern.",
+          "params": [
+            {
+              "name": "value",
+              "type": "str"
+            },
+            {
+              "name": "pattern",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::format"
+        },
+        "formatDate": {
+          "description": "Format a date using the canonical yyyy-MM-dd representation.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::format_date"
+        },
+        "formatClockTime": {
+          "description": "Format a clock time using the canonical representation.",
+          "params": [
+            {
+              "name": "clockTime",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::format_clock_time"
+        },
+        "fromMs": {
+          "description": "Convert integer Unix milliseconds to a UTC ISO timestamp.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::iso_from_ms"
+        },
+        "fromFlt": {
+          "description": "Convert fractional Unix milliseconds to a UTC ISO timestamp.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::from_flt"
+        },
+        "isoFromMs": {
+          "description": "Alias for fromMs.",
+          "params": [
+            {
+              "name": "ms",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::iso_from_ms"
+        },
+        "isoFromFlt": {
+          "description": "Alias for fromFlt.",
+          "params": [
+            {
+              "name": "ms",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::iso_from_flt"
+        },
+        "hour": {
+          "description": "Hour component 0-23.",
+          "params": [
+            {
+              "name": "clockTime",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::hour"
+        },
+        "minute": {
+          "description": "Minute component 0-59.",
+          "params": [
+            {
+              "name": "clockTime",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::minute"
+        },
+        "second": {
+          "description": "Second component 0-59.",
+          "params": [
+            {
+              "name": "clockTime",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::second"
+        },
+        "millisecond": {
+          "description": "Millisecond component 0-999.",
+          "params": [
+            {
+              "name": "clockTime",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::millisecond"
+        },
+        "year": {
+          "description": "Calendar year.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::year"
+        },
+        "month": {
+          "description": "Month 1-12.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::month"
+        },
+        "day": {
+          "description": "Day of month.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::day"
+        },
+        "dayOfWeek": {
+          "description": "ISO weekday Monday=1 through Sunday=7.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::day_of_week"
+        },
+        "dayOfYear": {
+          "description": "Day of year 1-366.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::day_of_year"
+        },
+        "daysInMonth": {
+          "description": "Days in the date's month.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::days_in_month"
+        },
+        "isLeapYear": {
+          "description": "Whether the year is a leap year.",
+          "params": [
+            {
+              "name": "year",
+              "type": "int"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_leap_year"
+        },
+        "isWeekday": {
+          "description": "Monday through Friday.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_weekday"
+        },
+        "isWeekend": {
+          "description": "Saturday or Sunday.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_weekend"
+        },
+        "toDay": {
+          "description": "Full English weekday name.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::to_day"
+        },
+        "toDayShort": {
+          "description": "Abbreviated English weekday name.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::to_day_short"
+        },
+        "toMonth": {
+          "description": "Full English month name.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::to_month"
+        },
+        "toMonthShort": {
+          "description": "Abbreviated English month name.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::to_month_short"
+        },
+        "isToday": {
+          "description": "Whether the date is today in the system-local timezone.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_today"
+        },
+        "isFirstDayOfMonth": {
+          "description": "Whether the day is 1.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_first_day_of_month"
+        },
+        "isLastDayOfMonth": {
+          "description": "Whether the date is the last day of its month.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_last_day_of_month"
+        },
+        "isSameDay": {
+          "description": "Whether both dates are the same day.",
+          "params": [
+            {
+              "name": "dateA",
+              "type": "str"
+            },
+            {
+              "name": "dateB",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_same_day"
+        },
+        "isSameMonth": {
+          "description": "Whether both dates share year and month.",
+          "params": [
+            {
+              "name": "dateA",
+              "type": "str"
+            },
+            {
+              "name": "dateB",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_same_month"
+        },
+        "isSameYear": {
+          "description": "Whether both dates share a year.",
+          "params": [
+            {
+              "name": "dateA",
+              "type": "str"
+            },
+            {
+              "name": "dateB",
+              "type": "str"
+            }
+          ],
+          "returns": "bln",
+          "rustPath": "graphite_core::time::is_same_year"
+        },
+        "startOfWeek": {
+          "description": "Monday of the same week.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::start_of_week"
+        },
+        "endOfWeek": {
+          "description": "Sunday of the same week.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::end_of_week"
+        },
+        "startOfMonth": {
+          "description": "First day of the month.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::start_of_month"
+        },
+        "endOfMonth": {
+          "description": "Last day of the month.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::end_of_month"
+        },
+        "startOfYear": {
+          "description": "January 1 of the same year.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::start_of_year"
+        },
+        "endOfYear": {
+          "description": "December 31 of the same year.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::end_of_year"
+        },
+        "tomorrow": {
+          "description": "Tomorrow's local date.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::tomorrow"
+        },
+        "yesterday": {
+          "description": "Yesterday's local date.",
+          "params": [],
+          "returns": "str",
+          "rustPath": "graphite_core::time::yesterday"
+        },
+        "nextMonday": {
+          "description": "First Monday strictly after the date.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::next_monday"
+        },
+        "previousMonday": {
+          "description": "First Monday strictly before the date.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::previous_monday"
+        },
+        "addDays": {
+          "description": "Add or subtract calendar days.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            },
+            {
+              "name": "days",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::add_days"
+        },
+        "addWeeks": {
+          "description": "Add or subtract calendar weeks.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            },
+            {
+              "name": "weeks",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::add_weeks"
+        },
+        "addMonths": {
+          "description": "Add or subtract calendar months with end-of-month clamping.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            },
+            {
+              "name": "months",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::add_months"
+        },
+        "addYears": {
+          "description": "Add or subtract calendar years with end-of-month clamping.",
+          "params": [
+            {
+              "name": "date",
+              "type": "str"
+            },
+            {
+              "name": "years",
+              "type": "int"
+            }
+          ],
+          "returns": "str",
+          "rustPath": "graphite_core::time::add_years"
+        },
+        "daysBetween": {
+          "description": "Signed calendar-day difference.",
+          "params": [
+            {
+              "name": "start",
+              "type": "str"
+            },
+            {
+              "name": "end",
+              "type": "str"
+            }
+          ],
+          "returns": "int",
+          "rustPath": "graphite_core::time::days_between"
+        },
+        "ms": {
+          "description": "Millisecond duration (identity).",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::ms"
+        },
+        "millis": {
+          "description": "Alias for ms.",
+          "params": [
+            {
+              "name": "n",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::millis"
+        },
+        "secs": {
+          "description": "Convert seconds to milliseconds.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::secs"
+        },
+        "mins": {
+          "description": "Convert minutes to milliseconds.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::mins"
+        },
+        "hrs": {
+          "description": "Convert hours to milliseconds.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::hrs"
+        },
+        "days": {
+          "description": "Convert fixed 24-hour days to milliseconds.",
+          "params": [
+            {
+              "name": "value",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::days"
+        },
+        "toSecs": {
+          "description": "Convert milliseconds to seconds.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::to_secs"
+        },
+        "toMins": {
+          "description": "Convert milliseconds to minutes.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::to_mins"
+        },
+        "toHrs": {
+          "description": "Convert milliseconds to hours.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::to_hrs"
+        },
+        "toDays": {
+          "description": "Convert milliseconds to 24-hour days.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::to_days"
+        },
+        "elapsedMs": {
+          "description": "Difference between two numeric timestamps in milliseconds.",
+          "params": [
+            {
+              "name": "start",
+              "type": "auto flt"
+            },
+            {
+              "name": "end",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::elapsed_ms"
+        },
+        "elapsedSecs": {
+          "description": "Difference between two numeric timestamps in seconds.",
+          "params": [
+            {
+              "name": "start",
+              "type": "auto flt"
+            },
+            {
+              "name": "end",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::elapsed_secs"
+        },
+        "elapsedMins": {
+          "description": "Difference between two numeric timestamps in minutes.",
+          "params": [
+            {
+              "name": "start",
+              "type": "auto flt"
+            },
+            {
+              "name": "end",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::elapsed_mins"
+        },
+        "elapsedHrs": {
+          "description": "Difference between two numeric timestamps in hours.",
+          "params": [
+            {
+              "name": "start",
+              "type": "auto flt"
+            },
+            {
+              "name": "end",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "flt",
+          "rustPath": "graphite_core::time::elapsed_hrs"
+        },
+        "sleep": {
+          "description": "Asynchronously sleep for milliseconds.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "async void",
+          "rustPath": "graphite_core::time::sleep"
+        },
+        "sleepMs": {
+          "description": "Asynchronously sleep for milliseconds.",
+          "params": [
+            {
+              "name": "milliseconds",
+              "type": "auto flt"
+            }
+          ],
+          "returns": "async void",
+          "rustPath": "graphite_core::time::sleep_ms"
+        }
+      }
     }
   }
 }

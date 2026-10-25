@@ -105,6 +105,22 @@ where
         Self::pull(&mut inner)?.ok_or_else(|| diagnostic::iterator_exhausted(site))
     }
 
+    /// Current peeked element without consuming. Prefetches if needed.
+    pub fn value(&self, site: Site<'_>) -> Result<T, RuntimeError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| diagnostic::runtime_internal("iterator lock poisoned"))?;
+        if inner.peeked.is_none() {
+            let next = Self::pull(&mut inner)?;
+            inner.peeked = Some(next);
+        }
+        match &inner.peeked {
+            Some(Some(value)) => Ok(value.clone()),
+            _ => Err(diagnostic::iterator_exhausted(site)),
+        }
+    }
+
     fn pull(inner: &mut Inner<T>) -> Result<Option<T>, RuntimeError> {
         match &mut inner.source {
             Source::Ready(iter) => Ok(iter.next()),

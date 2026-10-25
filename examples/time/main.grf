@@ -1,0 +1,27 @@
+import grf.io;
+import grf.time;
+
+async<void> main() {
+    str today = time.today();
+    io.println(today);
+    io.println(time.toDay(today));
+    io.println(time.toMonth(today));
+    io.println(time.isWeekday(today));
+    io.println(time.addDays(today, 1));
+    io.println(time.daysBetween("2026-10-01", "2026-10-26"));
+    io.println(time.addMonths("2026-01-31", 1));
+    io.println(time.format(today, "EEEE, dd MMMM yyyy"));
+    io.println(time.secs(2));
+    io.println(time.days(1));
+    io.println(time.toSecs(time.ms(500)));
+
+    str iso = "2026-10-26T14:30:00Z";
+    io.println(time.fromMs(time.parseInt(iso)));
+    io.println(time.hour("14:30:00"));
+
+    flt start = time.flt();
+    await time.sleepMs(50);
+    await time.sleep(time.ms(50));
+    flt end = time.flt();
+    io.println(time.elapsedMs(start, end));
+}

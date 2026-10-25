@@ -20,11 +20,17 @@ Goals:
 - Keep V1 small and compatible with the existing type system and
   transpiler.
 
-Out of scope for V1: `spawn`, detached/background tasks, cancellation
-APIs, channels, async streams, async closures, user-selectable
-executors, automatic async propagation, nullable `async<T>?`, async
-class/interface methods, async generators, expression-position await,
+Out of scope for V1: `spawn` as a user API, detached/background tasks,
+cancellation APIs, user-visible channels, async closures,
+user-selectable executors, automatic async propagation, nullable
+`async<T>?`, async class/interface methods, expression-position await,
 and synchronous functions whose return type is `async<T>`.
+
+**In scope and supported:** `async<T>` is composable with existing types,
+including `async<iter<T>>` and `async<int[]>` (and other collections).
+Await yields a normal `iter<T>` / array that is iterated synchronously.
+Also in scope: `asyncIter<T>` (async item streams) with
+`loop(await<T> name : stream)` — distinct from `async<iter<T>>`.
 
 ## 2. Source syntax
 
@@ -89,6 +95,86 @@ async<int> useIdentity() {
 Follow Graphite's existing generic-call policy: type arguments remain
 explicit; do not add general type inference for async calls in this
 feature.
+
+### Composing `async` with iterators and collections
+
+`async<T>` wraps any valid result type `T`. Fetching an iterator or
+array asynchronously is ordinary composition — not a new iterator kind:
+
+```grf
+async<iter<int>> getNumbers() {
+    return range(10);
+}
+
+async<int[]> fetchNumbers() {
+    return [10, 20, 30];
+}
+
+async<void> main() {
+    await<iter<int>> numbers = getNumbers();
+    loop(int n : numbers) {
+        // synchronous iteration over the awaited iter
+    }
+
+    await<int[]> values = fetchNumbers();
+    loop(int n : values) {}
+}
+```
+
+Rules:
+
+- `async<iter<int>>` means one async operation that produces an `iter<int>`.
+- After `await`, the binding has type `iter<int>` (or `int[]`, etc.) and
+  uses the normal `loop` rules.
+- Graphite array syntax is `int[]`, not `array<int>`.
+- An async function may `await` other work (for example `time.sleepMs`)
+  before `return`ing an iterator; that is still `async<iter<T>>`, not an
+  async stream.
+
+### `asyncIter<T>` (async item streams)
+
+`asyncIter<T>` is a pull stream of `T` where each next item may suspend.
+It is **not** `async<iter<T>>` (one async value that is a sync iterator).
+
+```grf
+asyncIter<int> getNumbers() {
+    int i = 0;
+    loop (i < 5) {
+        await time.sleep(time.secs(1));
+        emit i;
+        i = i + 1;
+    }
+}
+
+async<void> main() {
+    loop (await<int> n : getNumbers()) {
+        io.println(n);
+    }
+}
+```
+
+Rules:
+
+- An `asyncIter<T>` function may use both `emit` and `await`.
+- `emit` produces the next item; the consumer’s
+  `loop (await<T> name : stream)` awaits until that item is ready.
+- Manual protocol (same names as sync `iter<T>`), only inside
+  `async` / `asyncIter` functions:
+
+```grf
+asyncIter<str> it = stream().iter();
+loop (it.hasNext()) {
+    io.print(it.next());   // or it.value() to peek without consuming
+}
+```
+
+  Graphite types these as `bln` / `T`; codegen inserts `.await` so each
+  step can suspend.
+- `loop (await<T> …)` is only allowed inside `async` / `asyncIter`
+  functions.
+- `emit` is not allowed in plain `async<T>` functions.
+- Lowering: producer runs as a Tokio task writing to a bounded channel
+  (backpressure); consumers use `has_next`/`next`/`value`/`try_next`.
 
 ### Reserved keywords
 
@@ -431,7 +517,9 @@ Suggested diagnostics (adapt wording to existing Graphite conventions):
 8. `grf run main.grf` supports the implemented async path.
 9. Tests cover valid execution, type/context/ownership errors, and
    regressions.
-10. No out-of-scope concurrency or async-generator features are added.
+10. `asyncIter<T>` with `loop(await<T> …)` and emit+await in the
+    producer is supported; user-level spawn/cancellation APIs stay out
+    of scope.
 
 ## 12. Locked V1 decisions
 
@@ -446,7 +534,7 @@ Suggested diagnostics (adapt wording to existing Graphite conventions):
 | 7 | Await same operation twice | Compile-time error when detectable; move-only |
 | 8 | `async<T>` as a value | Locals + parameters + async call results; sync returns of `async<T>` deferred |
 | 9 | Nullable `async<T>?` | Reject in V1 |
-| 10 | Generators and async | Mutually exclusive; reject combinations |
+| 10 | Generators and async | Sync `iter` generators reject `await`; `asyncIter` allows emit+await; plain `async` rejects `emit` |
 | 11 | Blocking sync I/O in async | Allowed (remains blocking) |
 | 12 | Await expression position | Statement-only |
 | 13 | Untyped await | Only `await expr;` for `async<void>` |
@@ -484,6 +572,8 @@ The V1 design uses `async<T>` for a single eventual result,
 `await operation;` for `async<void>`. Calls create pending move-only
 operations rather than spawning tasks. Rust futures provide state
 machines, `.await?` provides suspension with existing error
-propagation, and Tokio drives async `main`. Spawning, cancellation,
-concurrency combinators, async streams, nullable async operations, and
-async generators are separate future features.
+propagation, and Tokio drives async `main`. Item streams use
+`asyncIter<T>` with `loop(await<T> name : stream)` so each next item
+can suspend independently of `async<iter<T>>`. User-level spawn,
+cancellation, concurrency combinators, and nullable async operations
+remain separate future features.

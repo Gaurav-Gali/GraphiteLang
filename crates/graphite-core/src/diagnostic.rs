@@ -337,6 +337,23 @@ pub fn external_library(detail: impl Into<String>) -> RuntimeError {
     }
 }
 
+/// Validation failure from `grf.time` helpers (bad date, pattern, duration, …).
+pub fn time_invalid(detail: impl Into<String>) -> RuntimeError {
+    RuntimeError {
+        kind: "TimeError",
+        code: "GRF-RUN-019",
+        message: "invalid time value".to_string(),
+        file: String::new(),
+        line: 0,
+        column: 0,
+        end_column: 0,
+        excerpt: String::new(),
+        label: detail.into(),
+        cause: None,
+        trace: Vec::new(),
+    }
+}
+
 pub fn empty_pop(site: Site<'_>) -> RuntimeError {
     RuntimeError::at(
         site,

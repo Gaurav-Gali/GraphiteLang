@@ -105,13 +105,50 @@ pub(crate) struct GrfType {
     pub(crate) record: bool,
 }
 
-fn grf_user_main() -> Result<(), graphite_core::diagnostic::RuntimeError> {
-    match graphite_core::io::println(graphite_core::convert::array_text(&(graphite_core::array::slice_copy(&(vec![1i64, 2i64, 3i64, 4i64, 5i64]), None, None, Some(i128::from((-1i128 as i64))), graphite_core::convert::Site { file: "mintest.grf", line: 4, column: 14, end_column: 31, excerpt: "  io.println([1,2,3,4,5][::-1]);" })?), |grf_item| { graphite_core::convert::signed_text(i128::from(*grf_item)) })) { Ok(value) => value, Err(error) => return Err(error.enter_call("println", graphite_core::convert::Site { file: "mintest.grf", line: 4, column: 3, end_column: 32, excerpt: "  io.println([1,2,3,4,5][::-1]);" })) };
+mod grf_fns {
+    use super::*;
+    pub(crate) fn getNumbers() -> Result<graphite_core::async_iter::AsyncIter<i64>, graphite_core::diagnostic::RuntimeError> {
+        Ok(graphite_core::async_iter::AsyncIter::spawn(move |__grf_tx| {
+            Box::pin(async move {
+                let __grf_err_tx = __grf_tx.clone();
+                let __grf_body = async move {
+                    let mut i: i64 = 0i64;
+                    'grf_loop_0: while (i < 5i64) {
+                        (graphite_core::async_rt::box_async(async move { match graphite_core::time::sleep(match graphite_core::time::secs(graphite_core::convert::signed_to_f64(i128::from(1i64), "int64", graphite_core::convert::Site { file: "mintest.grf", line: 7, column: 36, end_column: 37, excerpt: "        await time.sleep(time.secs(1));" })?) { Ok(value) => value, Err(error) => return Err(error.enter_call("secs", graphite_core::convert::Site { file: "mintest.grf", line: 7, column: 26, end_column: 38, excerpt: "        await time.sleep(time.secs(1));" })) }).await { Ok(value) => Ok(value), Err(error) => Err(error.enter_call("sleep", graphite_core::convert::Site { file: "mintest.grf", line: 7, column: 15, end_column: 39, excerpt: "        await time.sleep(time.secs(1));" })) } })).await?;
+                        __grf_tx.send(Ok(i)).await.map_err(|_| graphite_core::diagnostic::runtime_internal("asyncIter closed"))?;
+                        let _ = { i = grf_add!(i, 1i64, graphite_core::convert::Site { file: "mintest.grf", line: 9, column: 13, end_column: 18, excerpt: "        i = i + 1;" }); i };
+                    }
+                    Ok::<(), graphite_core::diagnostic::RuntimeError>(())
+                };
+                if let Err(__grf_error) = __grf_body.await {
+                    let _ = __grf_err_tx.send(Err(__grf_error)).await;
+                }
+            })
+        }))
+    }
+
+}
+
+async fn grf_user_main() -> Result<(), graphite_core::diagnostic::RuntimeError> {
+    {
+        let grf_async_it = match crate::grf_fns::getNumbers() { Ok(value) => value, Err(error) => return Err(error.enter_call("getNumbers", graphite_core::convert::Site { file: "mintest.grf", line: 14, column: 26, end_column: 38, excerpt: "    loop (await<int> n : getNumbers()) {" })) };
+        'grf_loop_1: loop {
+            'grf_loop_2: loop {
+                let mut n: i64 = match grf_async_it.try_next().await? {
+                    Some(__grf_item) => __grf_item,
+                    None => break 'grf_loop_1,
+                };
+                    match graphite_core::io::println(graphite_core::convert::signed_text(i128::from(n))) { Ok(value) => value, Err(error) => return Err(error.enter_call("println", graphite_core::convert::Site { file: "mintest.grf", line: 15, column: 9, end_column: 22, excerpt: "        io.println(n);" })) };
+                break 'grf_loop_2;
+            }
+        }
+    }
     Ok(())
 }
 
-fn main() {
-    if let Err(error) = grf_user_main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = grf_user_main().await {
         graphite_core::diagnostic::report(&error);
         std::process::exit(1);
     }

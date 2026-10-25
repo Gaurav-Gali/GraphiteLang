@@ -195,6 +195,9 @@ fn scan_stmt(stmt: &Stmt, tainted: &mut HashSet<String>, scan: &mut Scan) {
                 LoopKind::Iteration { iterable, .. } => {
                     let _ = scan_expr(iterable, tainted, scan);
                 }
+                LoopKind::AwaitIteration { iterable, .. } => {
+                    let _ = scan_expr(iterable, tainted, scan);
+                }
                 LoopKind::Infinite => {}
             }
             scan_block(&stmt.body, tainted, scan);
@@ -527,6 +530,9 @@ fn walk_stmt(
                     }
                 }
                 LoopKind::Iteration { iterable, .. } => {
+                    let _ = walk_expr(iterable, class, leaks, checking, flow, issues);
+                }
+                LoopKind::AwaitIteration { iterable, .. } => {
                     let _ = walk_expr(iterable, class, leaks, checking, flow, issues);
                 }
                 LoopKind::Infinite => {}

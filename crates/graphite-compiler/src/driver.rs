@@ -254,10 +254,13 @@ fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, Ru
         )));
     }
     let package = format!("grf-{entry_key}");
-    let needs_tokio = checked.functions.iter().any(|f| f.is_async)
-        || checked.specializations.iter().any(|f| f.is_async);
+    let needs_tokio = checked.functions.iter().any(|f| f.is_async || f.is_async_iter)
+        || checked
+            .specializations
+            .iter()
+            .any(|f| f.is_async || f.is_async_iter);
     let tokio_dep = if needs_tokio {
-        "tokio = { version = \"1\", features = [\"rt\", \"macros\"] }\n"
+        "tokio = { version = \"1\", features = [\"rt\", \"macros\", \"time\", \"sync\"] }\n"
     } else {
         ""
     };
@@ -671,7 +674,12 @@ void main() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/async/main.grf");
         let output = run_captured(&path);
         assert_eq!(output.status, 0, "{}", output.stderr);
-        assert_eq!(output.stdout, "42\n");
+        assert_eq!(
+            output.stdout,
+            "42\n0\n1\n2\n3\n4\n10\n20\n30\n",
+            "{}",
+            output.stdout
+        );
         let rust = fs::read_to_string(
             discover_workspace()
                 .unwrap()
@@ -681,6 +689,23 @@ void main() {
         )
         .unwrap();
         assert!(rust.contains("tokio"), "{rust}");
+    }
+
+    #[test]
+    fn time_library_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/time/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let lines: Vec<_> = output.stdout.lines().collect();
+        assert!(lines.len() >= 13, "{}", output.stdout);
+        assert_eq!(lines[5], "25");
+        assert_eq!(lines[6], "2026-02-28");
+        assert!(lines[8].starts_with("2000"), "{}", lines[8]);
+        assert!(lines[9].starts_with("86400000"), "{}", lines[9]);
+        assert_eq!(lines[10], "0.5");
+        assert_eq!(lines[11], "2026-10-26T14:30:00Z");
+        assert_eq!(lines[12], "14");
     }
 
     #[test]

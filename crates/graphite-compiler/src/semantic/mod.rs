@@ -62,6 +62,9 @@ pub struct IterId(pub u32);
 pub struct AsyncId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AsyncIterId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClassId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,6 +133,8 @@ pub enum CanonicalType {
     Generic(GenericId),
     /// Built-in `iter<T>`. The element type lives in the program table.
     Iter(IterId),
+    /// Built-in `asyncIter<T>` — async pull stream of `T`.
+    AsyncIter(AsyncIterId),
     /// Built-in `async<T>`. The eventual result type lives in the program table.
     Async(AsyncId),
 }
@@ -278,6 +283,7 @@ impl PartialEq for CanonicalType {
             (CanonicalType::Param(left), CanonicalType::Param(right)) => left == right,
             (CanonicalType::Generic(left), CanonicalType::Generic(right)) => left == right,
             (CanonicalType::Iter(left), CanonicalType::Iter(right)) => left == right,
+            (CanonicalType::AsyncIter(left), CanonicalType::AsyncIter(right)) => left == right,
             (CanonicalType::Async(left), CanonicalType::Async(right)) => left == right,
             _ => {
                 std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -293,6 +299,7 @@ impl PartialEq for CanonicalType {
                             | CanonicalType::Param(_)
                             | CanonicalType::Generic(_)
                             | CanonicalType::Iter(_)
+                            | CanonicalType::AsyncIter(_)
                             | CanonicalType::Async(_)
                     )
             }
@@ -357,6 +364,9 @@ impl CanonicalType {
             CanonicalType::Callable(_) => "fn()".to_string(),
             CanonicalType::Param(_) => "T".to_string(),
             CanonicalType::Iter(_) => "graphite_core::iter::Iter<()>".to_string(),
+            CanonicalType::AsyncIter(_) => {
+                "graphite_core::async_iter::AsyncIter<()>".to_string()
+            }
             CanonicalType::Async(_) => "graphite_core::async_rt::Async<()>".to_string(),
         }
     }
@@ -367,8 +377,9 @@ impl CanonicalType {
             | CanonicalType::Void
             | CanonicalType::ErrorHandle
             | CanonicalType::Callable(_)
+            | CanonicalType::AsyncIter(_)
             | CanonicalType::Async(_) => {
-                // V1: async operations are not nullable.
+                // V1: async / asyncIter values are not nullable.
                 return None;
             }
             CanonicalType::Int16 => OptionalKind::Int16,
@@ -444,6 +455,7 @@ impl CanonicalType {
             CanonicalType::Param(_) => "param".to_string(),
             CanonicalType::Generic(_) => "generic".to_string(),
             CanonicalType::Iter(_) => "iter".to_string(),
+            CanonicalType::AsyncIter(_) => "asyncIter".to_string(),
             CanonicalType::Async(_) => "async".to_string(),
         }
     }
@@ -508,11 +520,16 @@ impl CanonicalType {
                 | CanonicalType::Array { .. }
                 | CanonicalType::Optional(_)
                 | CanonicalType::Iter(_)
+                | CanonicalType::AsyncIter(_)
         )
     }
 
     pub fn is_iter(self) -> bool {
         matches!(self, CanonicalType::Iter(_))
+    }
+
+    pub fn is_async_iter(self) -> bool {
+        matches!(self, CanonicalType::AsyncIter(_))
     }
 
     pub fn is_async(self) -> bool {
@@ -616,6 +633,7 @@ impl CanonicalType {
             CanonicalType::Optional(_)
             | CanonicalType::Callable(_)
             | CanonicalType::Iter(_)
+            | CanonicalType::AsyncIter(_)
             | CanonicalType::Async(_) => Leaf::Void,
         }
     }
@@ -781,6 +799,7 @@ pub struct CheckedProgram {
     pub interfaces: Vec<CheckedInterface>,
     pub maps: Vec<MapShape>,
     pub iters: Vec<IterShape>,
+    pub async_iters: Vec<IterShape>,
     pub asyncs: Vec<AsyncShape>,
     pub callables: Vec<CallableSignature>,
     pub functions: Vec<CheckedFn>,
@@ -880,6 +899,8 @@ pub struct CheckedFn {
     pub is_generator: bool,
     /// True when the declaration used `async<T>` as its result type.
     pub is_async: bool,
+    /// True when the declaration used `asyncIter<T>` (emit + await allowed).
+    pub is_async_iter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -934,6 +955,13 @@ pub enum CheckedStmt {
         bindings: Vec<(String, CanonicalType, bool)>,
         source: CheckedExpr,
         kind: LoopSourceKind,
+        body: Vec<CheckedStmt>,
+    },
+    /// `loop (await<T> name : asyncIter)` — awaits each item.
+    AsyncIterate {
+        name: String,
+        ty: CanonicalType,
+        source: CheckedExpr,
         body: Vec<CheckedStmt>,
     },
     Try {
@@ -1417,6 +1445,8 @@ pub enum CheckedExpr {
     IterCall {
         object: Box<CheckedExpr>,
         method: IterMethod,
+        /// True for `asyncIter` protocol calls that suspend (`hasNext`/`next`/`value`).
+        suspend: bool,
         ty: CanonicalType,
         file: String,
         line: u32,
@@ -1440,6 +1470,8 @@ pub enum CheckedExpr {
 pub enum IterMethod {
     HasNext,
     Next,
+    /// Current element without consuming (prefetches like `hasNext`).
+    Value,
     Iter,
 }
 
@@ -1553,9 +1585,11 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         at_super_slot: false,
         maps: Vec::new(),
         iters: Vec::new(),
+        async_iters: Vec::new(),
         asyncs: Vec::new(),
         generator_element: None,
         in_async: false,
+        in_async_iter: false,
         resolve_stack: Vec::new(),
         scopes: Vec::new(),
         loop_depth: 0,
@@ -1641,6 +1675,7 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
                     .collect(),
                 maps: checker.maps,
                 iters: checker.iters,
+                async_iters: checker.async_iters,
                 asyncs: checker.asyncs,
                 callables: checker.callables,
                 functions,
@@ -1783,11 +1818,14 @@ struct Checker<'a> {
     at_super_slot: bool,
     maps: Vec<MapShape>,
     iters: Vec<IterShape>,
+    async_iters: Vec<IterShape>,
     asyncs: Vec<AsyncShape>,
-    /// When checking a generator, the element type for `emit`.
+    /// When checking a generator / asyncIter, the element type for `emit`.
     generator_element: Option<CanonicalType>,
     /// True while checking an `async<T>` function body.
     in_async: bool,
+    /// True while checking an `asyncIter<T>` function body.
+    in_async_iter: bool,
     resolve_stack: Vec<RecordId>,
     scopes: Vec<HashMap<String, Binding>>,
     loop_depth: u32,
@@ -2068,6 +2106,30 @@ impl<'a> Checker<'a> {
             let id = self.intern_async(result);
             return CanonicalType::Async(id);
         }
+        if syntax.kind == TypeKind::Named && syntax.name == "asyncIter" {
+            if syntax.arguments.len() != 1 {
+                self.error(
+                    syntax.span,
+                    "asyncIter type requires exactly one type argument",
+                );
+            }
+            let element = syntax
+                .arguments
+                .first()
+                .map(|argument| self.resolve_type(argument))
+                .unwrap_or(CanonicalType::Int64);
+            if !syntax.bounds.is_empty() {
+                self.error(syntax.span, "asyncIter types cannot be arrays");
+            }
+            if syntax.optional {
+                self.error(
+                    syntax.span,
+                    "asyncIter values cannot be nullable in this version",
+                );
+            }
+            let id = self.intern_async_iter(element);
+            return CanonicalType::AsyncIter(id);
+        }
         if syntax.kind == TypeKind::Named {
             if let Some(param) = self.lookup_type_param(&syntax.name) {
                 if !syntax.arguments.is_empty() {
@@ -2222,6 +2284,14 @@ impl<'a> Checker<'a> {
                     .unwrap_or(CanonicalType::Int64);
                 format!("iter<{}>", self.spell(element))
             }
+            CanonicalType::AsyncIter(id) => {
+                let element = self
+                    .async_iters
+                    .get(id.0 as usize)
+                    .map(|shape| shape.element)
+                    .unwrap_or(CanonicalType::Int64);
+                format!("asyncIter<{}>", self.spell(element))
+            }
             CanonicalType::Async(id) => {
                 let result = self
                     .asyncs
@@ -2312,6 +2382,29 @@ impl<'a> Checker<'a> {
     fn async_result(&self, ty: CanonicalType) -> Option<CanonicalType> {
         match ty {
             CanonicalType::Async(id) => self.asyncs.get(id.0 as usize).map(|shape| shape.result),
+            _ => None,
+        }
+    }
+
+    fn intern_async_iter(&mut self, element: CanonicalType) -> AsyncIterId {
+        if let Some(index) = self
+            .async_iters
+            .iter()
+            .position(|shape| shape.element == element)
+        {
+            return AsyncIterId(index as u32);
+        }
+        let id = AsyncIterId(self.async_iters.len() as u32);
+        self.async_iters.push(IterShape { element });
+        id
+    }
+
+    fn async_iter_element(&self, ty: CanonicalType) -> Option<CanonicalType> {
+        match ty {
+            CanonicalType::AsyncIter(id) => self
+                .async_iters
+                .get(id.0 as usize)
+                .map(|shape| shape.element),
             _ => None,
         }
     }
@@ -2720,6 +2813,13 @@ impl<'a> Checker<'a> {
                 let element = self.substitute_type(shape.element, map);
                 CanonicalType::Iter(self.intern_iter(element))
             }
+            CanonicalType::AsyncIter(id) => {
+                let Some(shape) = self.async_iters.get(id.0 as usize).cloned() else {
+                    return ty;
+                };
+                let element = self.substitute_type(shape.element, map);
+                CanonicalType::AsyncIter(self.intern_async_iter(element))
+            }
             CanonicalType::Async(id) => {
                 let Some(shape) = self.asyncs.get(id.0 as usize).cloned() else {
                     return ty;
@@ -2836,13 +2936,14 @@ impl<'a> Checker<'a> {
         let has_emit = contains_emit(&decl.body.statements);
         let has_await = contains_await(&decl.body.statements);
         let is_async = declared_ret.is_async();
+        let is_async_iter = declared_ret.is_async_iter();
         let is_generator = declared_ret.is_iter() && has_emit;
         if has_emit && is_async {
             self.error(decl.span, "emit is not allowed inside an async function");
-        } else if has_emit && !declared_ret.is_iter() {
+        } else if has_emit && !declared_ret.is_iter() && !is_async_iter {
             self.error(
                 decl.span,
-                "emit is only allowed in functions that return iter<T>",
+                "emit is only allowed in functions that return iter<T> or asyncIter<T>",
             );
         }
         if has_await && is_generator {
@@ -2853,9 +2954,16 @@ impl<'a> Checker<'a> {
         } else {
             declared_ret
         };
+        let path_ret = if is_generator || is_async_iter {
+            CanonicalType::Void
+        } else {
+            body_ret
+        };
         let saved_in_async = self.in_async;
-        self.current_return = body_ret;
+        let saved_in_async_iter = self.in_async_iter;
+        self.current_return = path_ret;
         self.in_async = is_async;
+        self.in_async_iter = is_async_iter;
         self.scopes.push(HashMap::new());
         for (param_name, ty, auto) in &params {
             if *ty != CanonicalType::Void {
@@ -2874,6 +2982,8 @@ impl<'a> Checker<'a> {
         let saved_generator = self.generator_element;
         self.generator_element = if is_generator {
             self.iter_element(declared_ret)
+        } else if is_async_iter {
+            self.async_iter_element(declared_ret)
         } else {
             None
         };
@@ -2884,7 +2994,8 @@ impl<'a> Checker<'a> {
             }
         }
         if !is_generator
-            && body_ret != CanonicalType::Void
+            && !is_async_iter
+            && path_ret != CanonicalType::Void
             && !guaranteed_return(&decl.body.statements)
         {
             self.error(
@@ -2895,6 +3006,7 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
         self.generator_element = saved_generator;
         self.in_async = saved_in_async;
+        self.in_async_iter = saved_in_async_iter;
         self.pop_type_params();
         self.param_substitution = saved_substitution;
         self.current_return = saved_return;
@@ -2902,11 +3014,16 @@ impl<'a> Checker<'a> {
         self.specializations.push(CheckedFn {
             name: mangled.clone(),
             params: params.into_iter().map(|(n, ty, _)| (n, ty)).collect(),
-            ret: body_ret,
+            ret: if is_async_iter || is_generator {
+                declared_ret
+            } else {
+                body_ret
+            },
             body,
             type_params: Vec::new(),
             is_generator,
             is_async,
+            is_async_iter,
         });
         self.specialized_keys.insert(key, mangled.clone());
         mangled
@@ -2982,21 +3099,22 @@ impl<'a> Checker<'a> {
         let has_emit = contains_emit(&function.body.statements);
         let has_await = contains_await(&function.body.statements);
         let is_async = declared_ret.is_async();
+        let is_async_iter = declared_ret.is_async_iter();
         let is_generator = declared_ret.is_iter() && has_emit;
         if has_emit && is_async {
             self.error(function.span, "emit is not allowed inside an async function");
-        } else if has_emit && !declared_ret.is_iter() {
+        } else if has_emit && !declared_ret.is_iter() && !is_async_iter {
             self.error(
                 function.span,
-                "emit is only allowed in functions that return iter<T>",
+                "emit is only allowed in functions that return iter<T> or asyncIter<T>",
             );
         }
         if has_await && is_generator {
             self.error(function.span, "await is not allowed inside a generator");
-        } else if has_await && !is_async {
+        } else if has_await && !is_async && !is_async_iter {
             self.error(
                 function.span,
-                "await can only be used inside an async function",
+                "await can only be used inside an async or asyncIter function",
             );
         }
         let body_ret = if is_async {
@@ -3004,11 +3122,20 @@ impl<'a> Checker<'a> {
         } else {
             declared_ret
         };
+        // Generators / asyncIters use emit; body "return type" for path checking is void.
+        let path_ret = if is_generator || is_async_iter {
+            CanonicalType::Void
+        } else {
+            body_ret
+        };
         self.push_type_params(&type_params);
-        self.current_return = body_ret;
+        self.current_return = path_ret;
         self.in_async = is_async;
+        self.in_async_iter = is_async_iter;
         self.generator_element = if is_generator {
             self.iter_element(declared_ret)
+        } else if is_async_iter {
+            self.async_iter_element(declared_ret)
         } else {
             None
         };
@@ -3040,9 +3167,10 @@ impl<'a> Checker<'a> {
                 body.push(checked);
             }
         }
-        // Generators / async finish by falling off the end or bare `return;`.
+        // Generators / asyncIters / async void finish by falling off the end or bare `return;`.
         if !is_generator
-            && body_ret != CanonicalType::Void
+            && !is_async_iter
+            && path_ret != CanonicalType::Void
             && !guaranteed_return(&function.body.statements)
         {
             self.error(
@@ -3056,16 +3184,22 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
         self.generator_element = None;
         self.in_async = false;
+        self.in_async_iter = false;
         let type_param_names = self.type_param_names(&type_params);
         self.pop_type_params();
         Some(CheckedFn {
             name: function.name.name.clone(),
             params,
-            ret: body_ret,
+            ret: if is_async_iter || is_generator {
+                declared_ret
+            } else {
+                body_ret
+            },
             body,
             type_params: type_param_names,
             is_generator,
             is_async,
+            is_async_iter,
         })
     }
 
@@ -3409,15 +3543,83 @@ impl<'a> Checker<'a> {
                 self.restore_ready(&before);
                 result
             }
+            LoopKind::AwaitIteration { binding, iterable } => {
+                let before = self.ready_snapshot();
+                let result = self.check_await_iteration(binding, iterable, stmt);
+                self.restore_ready(&before);
+                result
+            }
         }
     }
 
+    fn check_await_iteration(
+        &mut self,
+        binding: &BindingHead,
+        iterable: &Expr,
+        stmt: &LoopStmt,
+    ) -> Option<CheckedStmt> {
+        if !self.in_async && !self.in_async_iter {
+            self.error(
+                stmt.span,
+                "async iteration (loop await) is only allowed inside an async or asyncIter function",
+            );
+        }
+        let source = self.check_expr(iterable, None, false);
+        let Some(element) = self.async_iter_element(source.ty()) else {
+            self.error(
+                iterable.span(),
+                format!(
+                    "async iteration requires asyncIter<T>, found '{}'",
+                    self.spell(source.ty())
+                ),
+            );
+            return None;
+        };
+        let declared = self.resolve_type(&binding.ty);
+        if declared != element {
+            self.error(
+                binding.ty.span,
+                format!(
+                    "type mismatch: expected '{}', found '{}'",
+                    self.spell(element),
+                    self.spell(declared)
+                ),
+            );
+        }
+        self.scopes.push(HashMap::new());
+        if !self.reject_reserved_name(&binding.name.name, binding.name.span) {
+            self.scopes.last_mut().unwrap().insert(
+                binding.name.name.clone(),
+                Binding {
+                    ty: declared,
+                    mutable: true,
+                    auto: false,
+                    ready: true,
+                    moved: false,
+                },
+            );
+        }
+        self.loop_depth += 1;
+        let body = self.check_block_stmts(&stmt.body);
+        self.loop_depth -= 1;
+        self.scopes.pop();
+        Some(CheckedStmt::AsyncIterate {
+            name: binding.name.name.clone(),
+            ty: declared,
+            source,
+            body,
+        })
+    }
+
     fn check_await(&mut self, stmt: &crate::parser::AwaitStmt) -> CheckedStmt {
-        if self.generator_element.is_some() {
+        if self.generator_element.is_some() && !self.in_async_iter {
             self.error(stmt.span, "await is not allowed inside a generator");
         }
-        if !self.in_async {
-            self.error(stmt.span, "await can only be used inside an async function");
+        if !self.in_async && !self.in_async_iter {
+            self.error(
+                stmt.span,
+                "await can only be used inside an async or asyncIter function",
+            );
         }
         let value = self.check_expr(&stmt.value, None, false);
         let value = self.consume_async_value(value, stmt.value.span());
@@ -3603,6 +3805,7 @@ impl<'a> Checker<'a> {
             | CanonicalType::ErrorHandle
             | CanonicalType::Callable(_)
             | CanonicalType::Iter(_)
+            | CanonicalType::AsyncIter(_)
             | CanonicalType::Async(_) => None,
         }
     }
@@ -4784,19 +4987,12 @@ impl<'a> Checker<'a> {
             }
             return self.dummy(None);
         };
-        let Some(resolved) = self
+        let Some(function) = self
             .manifest
             .libraries
             .get(&import.library)
-            .and_then(|library| {
-                library.functions.get(&member.member.name).map(|function| {
-                    (
-                        function.rust_path.clone(),
-                        canonical_name(&function.returns.name),
-                        function_params(function),
-                    )
-                })
-            })
+            .and_then(|library| library.functions.get(&member.member.name))
+            .cloned()
         else {
             self.error(
                 member.member.span,
@@ -4807,14 +5003,14 @@ impl<'a> Checker<'a> {
             );
             return self.dummy(None);
         };
-        let (path, ret, params) = resolved;
-        let Some(ret) = ret else {
+        let Some(ret) = self.manifest_return_type(&function.returns) else {
             self.error(span, "the library function has an unknown return type");
             return self.dummy(None);
         };
+        let params = function_params(&function);
         let args = self.check_arguments(arguments, &params, span);
         CheckedExpr::Call {
-            path,
+            path: function.rust_path,
             callee: member.member.name.clone(),
             args,
             type_args: Vec::new(),
@@ -4824,6 +5020,18 @@ impl<'a> Checker<'a> {
             column: span.start.column,
             end_column: span.end.column,
         }
+    }
+
+    fn manifest_return_type(&mut self, ty: &ManifestType) -> Option<CanonicalType> {
+        if let Some(inner) = ty
+            .name
+            .strip_prefix("async<")
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            let result = canonical_name(inner)?;
+            return Some(CanonicalType::Async(self.intern_async(result)));
+        }
+        canonical_name(&ty.name)
     }
 
     fn check_range(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
@@ -6302,6 +6510,7 @@ impl<'a> Checker<'a> {
         let method = match name {
             "hasNext" => IterMethod::HasNext,
             "next" => IterMethod::Next,
+            "value" => IterMethod::Value,
             "iter" => IterMethod::Iter,
             other => {
                 self.error(
@@ -6328,18 +6537,33 @@ impl<'a> Checker<'a> {
             }
         }
         let object = self.check_expr(&member.object, None, false);
-        let element = self
-            .iter_element(object.ty())
-            .unwrap_or(CanonicalType::Int64);
+        let async_iter = object.ty().is_async_iter();
+        let element = if async_iter {
+            self.async_iter_element(object.ty())
+                .unwrap_or(CanonicalType::Int64)
+        } else {
+            self.iter_element(object.ty())
+                .unwrap_or(CanonicalType::Int64)
+        };
+        let suspend = async_iter && !matches!(method, IterMethod::Iter);
+        if suspend && !self.in_async && !self.in_async_iter {
+            self.error(
+                span,
+                format!(
+                    "asyncIter method '{name}' can only be used inside an async or asyncIter function"
+                ),
+            );
+        }
         let ty = match method {
             IterMethod::HasNext => CanonicalType::Bln,
-            IterMethod::Next => element,
+            IterMethod::Next | IterMethod::Value => element,
             IterMethod::Iter => object.ty(),
         };
         let (file, line, column, end_column) = self.located(span);
         CheckedExpr::IterCall {
             object: Box::new(object),
             method,
+            suspend,
             ty,
             file,
             line,
@@ -6373,7 +6597,7 @@ impl<'a> Checker<'a> {
             return self.dummy(None);
         }
         if let Some(object_ty) = self.peek_type(&member.object) {
-            if object_ty.is_iter() {
+            if object_ty.is_iter() || object_ty.is_async_iter() {
                 return self.check_iter_method(member, type_arguments, arguments, span);
             }
             if name == "iter" && (object_ty.is_array() || object_ty == CanonicalType::Str) {
@@ -10391,6 +10615,7 @@ fn mangle_type_name(ty: CanonicalType) -> String {
         CanonicalType::Record(id) => format!("R{}", id.0),
         CanonicalType::Map(id) => format!("M{}", id.0),
         CanonicalType::Iter(id) => format!("It{}", id.0),
+        CanonicalType::AsyncIter(id) => format!("AIt{}", id.0),
         CanonicalType::Async(id) => format!("As{}", id.0),
         CanonicalType::Generic(id) => format!("G{}", id.0),
         CanonicalType::Param(id) => format!("P{}", id.0),

@@ -1,4 +1,5 @@
 import grf.io;
+import grf.time;
 
 async<int> fetchCount() {
     return 21;
@@ -9,9 +10,42 @@ async<int> calculate() {
     return count * 2;
 }
 
+async<iter<int>> getNumbers() {
+    await time.sleepMs(1);
+    return range(5);
+}
+
+asyncIter<int> streamNumbers() {
+    int i = 0;
+    loop (i < 3) {
+        await time.sleepMs(1);
+        emit i;
+        i = i + 1;
+    }
+}
+
+async<int[]> fetchNumbers() {
+    return [10, 20, 30];
+}
+
 async<void> main() {
     await<int> result = calculate();
     io.println(result);
+
+    await<iter<int>> numbers = getNumbers();
+    loop(int n : numbers) {
+        io.println(n);
+    }
+
+    loop (await<int> n : streamNumbers()) {
+        io.println(n);
+    }
+
+    await<int[]> values = fetchNumbers();
+    loop(int n : values) {
+        io.println(n);
+    }
+
     await save();
 }
 
