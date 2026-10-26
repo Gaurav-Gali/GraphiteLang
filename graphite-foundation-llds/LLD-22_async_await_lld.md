@@ -23,8 +23,9 @@ Goals:
 Out of scope for V1: `spawn` as a user API, detached/background tasks,
 cancellation APIs, user-visible channels, async closures,
 user-selectable executors, automatic async propagation, nullable
-`async<T>?`, async class/interface methods, expression-position await,
-and synchronous functions whose return type is `async<T>`.
+`async<T>?`, plain `async<T>` class/interface methods, expression-position
+await, and synchronous functions whose return type is `async<T>`.
+(`asyncIter<T>` instance methods on classes are supported.)
 
 **In scope and supported:** `async<T>` is composable with existing types,
 including `async<iter<T>>` and `async<int[]>` (and other collections).
@@ -529,7 +530,7 @@ Suggested diagnostics (adapt wording to existing Graphite conventions):
 | 2 | Async `main` | Included in V1 |
 | 3 | Bare `await` on non-void | Reject |
 | 4 | Discarded async warning | Yes, when detectable |
-| 5 | Async class/interface methods | Deferred |
+| 5 | Async class/interface methods | Plain `async<T>` deferred; `asyncIter<T>` methods allowed |
 | 6 | Error model | Preserve `Result<T, RuntimeError>` |
 | 7 | Await same operation twice | Compile-time error when detectable; move-only |
 | 8 | `async<T>` as a value | Locals + parameters + async call results; sync returns of `async<T>` deferred |

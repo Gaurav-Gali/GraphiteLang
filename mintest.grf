@@ -2,18 +2,22 @@ import grf.io;
 import grf.time;
 
 async<void> main() {
-  flt start = time.flt();
-  loop(await<str> i : delay<str>("graphite version 1.0".split(""), 0.01)) {
-    io.print(i);
-  }
-  flt end = time.flt();
+  int[] arr = [1,2,3,4,5,6];
 
-  io.println(f"\n{time.toSecs(end-start)}");
+  array a = new array(arr);
+
+  loop(await<int> i : a.delay(0.5)) io.println(i);
 }
 
-asyncIter<T> delay<T>(T[] arr, flt dial=1) {
-  loop (T i : arr) {
-    await time.sleep(time.secs(dial));
-    emit i;
+class array {
+  int[] arr;
+
+  array(int[] arr) this.arr = arr;
+
+  asyncIter<int> delay(auto flt _time = 0.1) {
+    loop(int i : this.arr) {
+      await time.sleep(time.secs(_time));
+      emit i;
+    }
   }
 }

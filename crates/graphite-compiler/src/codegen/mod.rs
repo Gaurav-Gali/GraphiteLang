@@ -3389,6 +3389,8 @@ impl Emitter<'_> {
         self.emit_param_limits(&method.params);
         if method.is_generator {
             self.emit_generator_from_fn(&method.body);
+        } else if method.is_async_iter {
+            self.emit_async_iter_from_fn(&method.body);
         } else {
             for statement in &method.body {
                 self.emit_stmt(statement);

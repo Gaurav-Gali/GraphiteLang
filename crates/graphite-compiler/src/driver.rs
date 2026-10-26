@@ -258,7 +258,11 @@ fn prepare(path: &Path, print_ast: bool, emit_rust: bool) -> Result<Prepared, Ru
         || checked
             .specializations
             .iter()
-            .any(|f| f.is_async || f.is_async_iter);
+            .any(|f| f.is_async || f.is_async_iter)
+        || checked
+            .classes
+            .iter()
+            .any(|c| c.methods.iter().any(|m| m.is_async_iter));
     let tokio_dep = if needs_tokio {
         "tokio = { version = \"1\", features = [\"rt\", \"macros\", \"time\", \"sync\"] }\n"
     } else {

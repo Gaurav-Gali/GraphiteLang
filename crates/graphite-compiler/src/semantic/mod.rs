@@ -862,6 +862,7 @@ pub struct CheckedMethod {
     pub is_virtual: bool,
     pub type_params: Vec<String>,
     pub is_generator: bool,
+    pub is_async_iter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9014,7 +9015,7 @@ impl<'a> Checker<'a> {
                 .unwrap_or_default();
             self.in_init = true;
             self.current_class = Some(id);
-            let (body, _) = self.check_member_body(
+            let (body, _, _) = self.check_member_body(
                 id,
                 &params,
                 CanonicalType::Void,
@@ -9059,8 +9060,8 @@ impl<'a> Checker<'a> {
                 .type_params
                 .clone();
             let type_param_names = self.type_param_names(&method_params);
-            let (body, is_generator) = if is_abstract {
-                (Vec::new(), false)
+            let (body, is_generator, is_async_iter) = if is_abstract {
+                (Vec::new(), false, false)
             } else {
                 self.push_type_params(&method_params);
                 self.current_class = Some(id);
@@ -9092,6 +9093,7 @@ impl<'a> Checker<'a> {
                 is_virtual,
                 type_params: type_param_names,
                 is_generator,
+                is_async_iter,
             });
         }
         self.pop_type_params();
@@ -9162,24 +9164,53 @@ impl<'a> Checker<'a> {
         name: &str,
         require_return: bool,
         is_static: bool,
-    ) -> (Vec<CheckedStmt>, bool) {
+    ) -> (Vec<CheckedStmt>, bool, bool) {
         let saved_return = self.current_return;
         let saved_class = self.current_class;
         let saved_static = self.current_static;
         let saved_generator = self.generator_element;
+        let saved_in_async = self.in_async;
+        let saved_in_async_iter = self.in_async_iter;
         let has_emit = contains_emit(&body.statements);
+        let has_await = contains_await(&body.statements);
+        let is_async = ret.is_async();
+        let is_async_iter = ret.is_async_iter();
         let is_generator = ret.is_iter() && has_emit;
-        if has_emit && !ret.is_iter() {
+        if has_emit && is_async {
+            self.error(span, "emit is not allowed inside an async function");
+        } else if has_emit && !ret.is_iter() && !is_async_iter {
             self.error(
                 span,
-                "emit is only allowed in functions that return iter<T>",
+                "emit is only allowed in functions that return iter<T> or asyncIter<T>",
             );
         }
-        self.current_return = ret;
+        if has_await && is_generator {
+            self.error(span, "await is not allowed inside a generator");
+        } else if has_await && !is_async && !is_async_iter {
+            self.error(
+                span,
+                "await can only be used inside an async or asyncIter function",
+            );
+        }
+        let body_ret = if is_async {
+            self.async_result(ret).unwrap_or(CanonicalType::Void)
+        } else {
+            ret
+        };
+        let path_ret = if is_generator || is_async_iter {
+            CanonicalType::Void
+        } else {
+            body_ret
+        };
+        self.current_return = path_ret;
         self.current_class = Some(id);
         self.current_static = is_static;
+        self.in_async = is_async;
+        self.in_async_iter = is_async_iter;
         self.generator_element = if is_generator {
             self.iter_element(ret)
+        } else if is_async_iter {
+            self.async_iter_element(ret)
         } else {
             None
         };
@@ -9192,7 +9223,7 @@ impl<'a> Checker<'a> {
                     mutable: false,
                     auto: false,
                     ready: true,
-                moved: false,
+                    moved: false,
                 },
             );
         }
@@ -9205,7 +9236,7 @@ impl<'a> Checker<'a> {
                         mutable: true,
                         auto: param.auto,
                         ready: true,
-                    moved: false,
+                        moved: false,
                     },
                 );
             }
@@ -9222,7 +9253,8 @@ impl<'a> Checker<'a> {
         self.at_super_slot = false;
         if require_return
             && !is_generator
-            && ret != CanonicalType::Void
+            && !is_async_iter
+            && path_ret != CanonicalType::Void
             && !guaranteed_return(&body.statements)
         {
             self.error(
@@ -9235,7 +9267,9 @@ impl<'a> Checker<'a> {
         self.current_class = saved_class;
         self.current_static = saved_static;
         self.generator_element = saved_generator;
-        (checked, is_generator)
+        self.in_async = saved_in_async;
+        self.in_async_iter = saved_in_async_iter;
+        (checked, is_generator, is_async_iter)
     }
 
     fn check_new(&mut self, expr: &NewExpr) -> CheckedExpr {
