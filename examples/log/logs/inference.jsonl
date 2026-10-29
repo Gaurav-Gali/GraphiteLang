@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-28 16:04:25.099","level":"ERROR","message":"Inference failed","duration":12.33,"model":"classifier-v2","success":false}
+{"timestamp":"2026-10-28 16:04:25.100","level":"INFO","message":"Inference completed","duration":12.33,"model":"classifier-v2","success":true}

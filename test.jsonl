@@ -1,0 +1,5 @@
+{"timestamp":"2026-10-28 16:10:01.771","level":"FATAL","message":"Operation failed","duration":1.0,"error":"log failed"}
+{"timestamp":"2026-10-28 16:10:02.776","level":"FATAL","message":"Operation failed","duration":2.0,"error":"log failed"}
+{"timestamp":"2026-10-28 16:10:03.778","level":"FATAL","message":"Operation failed","duration":3.0,"error":"log failed"}
+{"timestamp":"2026-10-28 16:10:04.780","level":"FATAL","message":"Operation failed","duration":4.0,"error":"log failed"}
+{"timestamp":"2026-10-28 16:10:05.786","level":"FATAL","message":"Operation failed","duration":5.0,"error":"log failed"}

@@ -1,0 +1,32 @@
+import grf.io;
+import grf.io.log;
+
+// Built-in logging class, file append, and subclass static methods.
+// Run: grf run examples/log/main.grf
+// Both styles work:
+//   import grf.io.log;  → log.warn("...")
+//   import grf.io;      → io.log.warn("...")
+
+class CustomLog extends log {
+    @static
+    void checkpoint2(str msg, str save_to = "") {
+        log.custom(msg, level="checkpoint2", color="#454545", save_to=save_to);
+    }
+}
+
+void main() {
+    log.info("hello");
+    io.log.debug("detail");
+    log.warn("careful");
+    io.log.error("failed");
+    log.fatal("critical");
+    io.log.checkpoint("ready");
+    log.custom("Model initialized", level="checkpoint2", color="#454545");
+
+    CustomLog.warn("warnnn");
+    CustomLog.fatal("fatal");
+    CustomLog.checkpoint("check-1");
+    CustomLog.checkpoint2("check-2");
+
+    io.println("done");
+}

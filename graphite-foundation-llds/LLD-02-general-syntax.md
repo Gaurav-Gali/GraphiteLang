@@ -400,15 +400,15 @@ void main() {
 
 A domain is the namespace root under which packages are identified. `grf` is the reserved domain for Graphite-provided core/inbuilt packages. Third-party package domains use their assigned or configured domain names.
 
-v0.1 import grammar is exactly two segments:
+Import grammar (unified):
 
 ```text
-import <domain>.<library>;
+import <domain>.<path> ( '.' <member> )? ( '.' '*' )? ( as <name> )?;
 ```
 
-The first segment is the domain. The second is the library. `import grf.io.print;` is invalid because functions are not imported. Import aliases are not supported. Import paths are case-sensitive. Import statements must appear at the beginning of the source file, before declarations. An import resolves a library through its domain `grf.json`. It does not import a function or a nested module.
+The first segment is the domain. Later segments walk libraries, nested libraries/classes, then a single exported function or static method. `import grf.io.print;` binds `print`. `import grf.io.log.fatal;` binds the static method `fatal`. `import grf.io.*;` and `import grf.io.log.*;` bind public members of that library into the current scope. `import grf.io.log as logger;` aliases the library/class. A wildcard cannot use `as`. Import paths are case-sensitive. Import statements must appear at the beginning of the source file, before declarations. Built-in imports resolve through the domain `grf.json`. User-defined source modules are not implemented yet.
 
-The local namespace is the library name. `import grf.io;` permits `io.print(...)` and `io.println(...)`. `grf.io.print(...)` is not the call syntax for an imported library. A missing domain, library, function, or exported symbol is an error.
+The local namespace of a library import is the last path segment, or the `as` alias. `import grf.io;` permits `io.print(...)` and `io.println(...)` and nested `io.log.warn(...)`. It does not inject `println` into the current scope. `grf.io.print(...)` is not the call syntax for an imported library. A missing domain, library, function, or exported symbol is an error.
 
 Two imports that bind the same local name are a compile error:
 

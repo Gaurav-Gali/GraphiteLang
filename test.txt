@@ -1,0 +1,11 @@
+2026-10-28 00:03:00.337 [INFO] logged @ 1th second
+2026-10-28 00:03:01.343 [INFO] logged @ 2th second
+2026-10-28 00:03:02.345 [INFO] logged @ 3th second
+2026-10-28 00:03:03.351 [INFO] logged @ 4th second
+2026-10-28 00:03:04.358 [INFO] logged @ 5th second
+2026-10-28 10:29:21.000 [WARN] Operation failed {duration=12.33, error=log failed}
+2026-10-28 13:39:36.119 [FATAL] Operation failed {duration=1.0, error=log failed}
+2026-10-28 13:39:37.127 [FATAL] Operation failed {duration=2.0, error=log failed}
+2026-10-28 13:39:38.130 [FATAL] Operation failed {duration=3.0, error=log failed}
+2026-10-28 13:39:39.136 [FATAL] Operation failed {duration=4.0, error=log failed}
+2026-10-28 13:39:40.141 [FATAL] Operation failed {duration=5.0, error=log failed}

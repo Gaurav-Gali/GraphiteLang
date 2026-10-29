@@ -17,7 +17,17 @@ pub fn format_ast(program: &Program) -> String {
             &mut out,
             "",
             last,
-            &format!("Import {}.{}", import.domain.name, import.library.name),
+            &format!(
+                "Import {}.{}{}{}",
+                import.domain.name,
+                import.library_path,
+                if import.wildcard { ".*" } else { "" },
+                import
+                    .alias
+                    .as_ref()
+                    .map(|alias| format!(" as {}", alias.name))
+                    .unwrap_or_default()
+            ),
         );
     }
     for (index, declaration) in program.types.iter().enumerate() {
@@ -322,6 +332,15 @@ fn write_statement(out: &mut String, prefix: &str, last: bool, statement: &Stmt)
     }
 }
 
+fn write_call_arg(out: &mut String, prefix: &str, last: bool, argument: &CallArg) {
+    let label = match &argument.name {
+        Some(name) => format!("Argument {}", name.name),
+        None => "Argument".to_string(),
+    };
+    write_line(out, prefix, last, &label);
+    write_expression(out, &child_prefix(prefix, last), true, &argument.value);
+}
+
 fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Expr) {
     match expression {
         Expr::Identifier(identifier) => {
@@ -380,7 +399,7 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
             let child = child_prefix(prefix, last);
             let arg_count = new_expr.arguments.len();
             for (index, argument) in new_expr.arguments.iter().enumerate() {
-                write_expression(out, &child, index + 1 == arg_count, argument);
+                write_call_arg(out, &child, index + 1 == arg_count, argument);
             }
             if arg_count == 0 {
                 write_line(out, &child, true, "Arguments");
@@ -398,9 +417,7 @@ fn write_expression(out: &mut String, prefix: &str, last: bool, expression: &Exp
                 &call.callee,
             );
             for (index, argument) in call.arguments.iter().enumerate() {
-                let arg_last = index + 1 == arg_count;
-                write_line(out, &child, arg_last, "Argument");
-                write_expression(out, &child_prefix(&child, arg_last), true, argument);
+                write_call_arg(out, &child, index + 1 == arg_count, argument);
             }
         }
         Expr::Member(member) => {

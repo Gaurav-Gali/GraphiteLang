@@ -55,6 +55,68 @@ fn unknown_library_and_function() {
 }
 
 #[test]
+fn member_and_wildcard_imports_resolve() {
+    let fatal = analyze_source(
+        "\
+import grf.io.log.fatal;
+
+void main() {
+    fatal(\"Critical failure\");
+}
+",
+    );
+    assert!(fatal.diagnostics.is_empty(), "{:?}", fatal.diagnostics);
+
+    let missing = messages(
+        "\
+import grf.io.log.missing;
+
+void main() {
+}
+",
+    );
+    assert!(missing.contains("not exported"), "{missing}");
+
+    let alias = analyze_source(
+        "\
+import grf.io.log as logger;
+
+void main() {
+    logger.info(\"ok\");
+}
+",
+    );
+    assert!(alias.diagnostics.is_empty(), "{:?}", alias.diagnostics);
+
+    let star = analyze_source(
+        "\
+import grf.io.*;
+
+void main() {
+    println(\"Hello\");
+    log.warn(\"careful\");
+}
+",
+    );
+    assert!(star.diagnostics.is_empty(), "{:?}", star.diagnostics);
+
+    let println_fn = analyze_source(
+        "\
+import grf.io.println;
+
+void main() {
+    println(\"Hello\");
+}
+",
+    );
+    assert!(
+        println_fn.diagnostics.is_empty(),
+        "{:?}",
+        println_fn.diagnostics
+    );
+}
+
+#[test]
 fn integer_and_float_auto_str_are_accepted() {
     let accepted = analyze_source(
         "import grf.io;\n\nvoid main() {\n    auto str value = 12.433;\n    io.println(value);\n    flt reading = 12.433;\n    io.println(f\"Reading: {reading}\");\n    greet(123);\n}\n\nstr greet(auto str msg) {\n    return f\"Hello {msg}\";\n}\n",
@@ -2733,4 +2795,96 @@ async<void> main() {
     assert!(protocol_rust.contains("has_next().await"), "{protocol_rust}");
     assert!(protocol_rust.contains("next("), "{protocol_rust}");
     assert!(protocol_rust.contains(".await?"), "{protocol_rust}");
+}
+
+#[test]
+fn structured_log_type_checks_fields() {
+    let ok = messages(
+        r#"
+import grf.io.log;
+
+type training_log {
+    epoch: int,
+    loss: flt,
+    accuracy: flt
+}
+
+void main() {
+    log.info<training_log>(
+        "Training progress",
+        { epoch: 50, loss: 0.024, accuracy: 0.97 }
+    );
+    log.info("plain");
+}
+"#,
+    );
+    assert!(ok.is_empty(), "{ok}");
+
+    let wrong_type = messages(
+        r#"
+import grf.io.log;
+type training_log { epoch: int, loss: flt, accuracy: flt }
+void main() {
+    log.info<training_log>(
+        "x",
+        { epoch: "fifty", loss: 0.024, accuracy: 0.97 }
+    );
+}
+"#,
+    );
+    assert!(wrong_type.contains("type mismatch"), "{wrong_type}");
+
+    let missing = messages(
+        r#"
+import grf.io.log;
+type training_log { epoch: int, loss: flt, accuracy: flt }
+void main() {
+    log.info<training_log>("x", { epoch: 50, loss: 0.024 });
+}
+"#,
+    );
+    assert!(missing.contains("missing field 'accuracy'"), "{missing}");
+
+    let unknown = messages(
+        r#"
+import grf.io.log;
+type training_log { epoch: int, loss: flt, accuracy: flt }
+void main() {
+    log.info<training_log>(
+        "x",
+        { epoch: 50, loss: 0.024, accuracy: 0.97, extra: true }
+    );
+}
+"#,
+    );
+    assert!(unknown.contains("unknown field 'extra'"), "{unknown}");
+
+    let reserved = messages(
+        r#"
+import grf.io.log;
+type bad { message: str, epoch: int }
+void main() {
+    log.info<bad>("x", { message: "hi", epoch: 1 });
+}
+"#,
+    );
+    assert!(
+        reserved.contains("conflicts with standard log metadata"),
+        "{reserved}"
+    );
+
+    let unsupported = messages(
+        r#"
+import grf.io.log;
+class Box {}
+type bad { box: Box }
+void main() {
+    log.info<bad>("x", { box: new Box() });
+}
+"#,
+    );
+    assert!(
+        unsupported.contains("structured log fields do not support"),
+        "{unsupported}"
+    );
 }

@@ -27,6 +27,7 @@ mod token;
 
 pub use scanner::{LexResult, lex};
 pub use token::{Token, TokenKind};
+pub(crate) use token::keyword_lexeme;
 
 #[cfg(test)]
 mod tests;

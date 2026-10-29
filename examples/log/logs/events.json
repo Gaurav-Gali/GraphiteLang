@@ -1,0 +1,5 @@
+[
+  {"timestamp":"2026-10-28 11:05:10.195","level":"WARN","message":"Persisted warning","duration":1.5,"error":"timeout"},
+  {"timestamp":"2026-10-28 11:06:37.006","level":"WARN","message":"Persisted warning","duration":1.5,"error":"timeout"},
+  {"timestamp":"2026-10-28 16:04:25.100","level":"WARN","message":"Persisted warning","duration":1.5,"error":"timeout"}
+]

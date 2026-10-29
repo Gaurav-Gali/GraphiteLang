@@ -1,0 +1,4 @@
+timestamp,level,message,accuracy,epoch,loss
+2026-10-28 11:05:10.196,ERROR,Epoch failed,0.1,51,1.0
+2026-10-28 11:06:37.006,ERROR,Epoch failed,0.1,51,1.0
+2026-10-28 16:04:25.100,ERROR,Epoch failed,0.1,51,1.0

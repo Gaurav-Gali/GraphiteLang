@@ -1,0 +1,7 @@
+timestamp,level,message,duration,error
+2026-10-28 11:11:55.116,WARN,Operation failed,12.33,log failed
+2026-10-29 09:16:50.609,WARN,Operation failed,1.0,log failed
+2026-10-29 09:16:51.617,WARN,Operation failed,2.0,log failed
+2026-10-29 09:16:52.620,WARN,Operation failed,3.0,log failed
+2026-10-29 09:16:53.624,WARN,Operation failed,4.0,log failed
+2026-10-29 09:16:54.631,WARN,Operation failed,5.0,log failed

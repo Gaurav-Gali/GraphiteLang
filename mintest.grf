@@ -1,23 +1,23 @@
-import grf.io;
+import grf.io.log;
 import grf.time;
 
-async<void> main() {
-  int[] arr = [1,2,3,4,5,6];
-
-  array a = new array(arr);
-
-  loop(await<int> i : a.delay(0.5)) io.println(i);
+type log_type {
+    duration: auto flt,
+    error: str
 }
 
-class array {
-  int[] arr;
+async<void> main() {
+    loop(int i : range(5)) {
+      await time.sleep(time.secs(1));
 
-  array(int[] arr) this.arr = arr;
-
-  asyncIter<int> delay(auto flt _time = 0.1) {
-    loop(int i : this.arr) {
-      await time.sleep(time.secs(_time));
-      emit i;
+      log.warn<log_type>(
+        "Operation failed",
+        {
+            duration: i+1,
+            error: "log failed"
+        },
+        save_to="./test.csv"
+    );
     }
-  }
+
 }

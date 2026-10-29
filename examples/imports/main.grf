@@ -1,0 +1,25 @@
+import grf.io;
+import grf.io.log;
+import grf.io.println;
+import grf.io.log.info;
+import grf.io.log.warn;
+import grf.io.log.error;
+import grf.io.log.fatal;
+
+// Unified imports: library, class, and individual members.
+// Alias form: import grf.io.log as logger;
+// Wildcard form: import grf.io.*;  /  import grf.io.log.*;
+// Run: grf run examples/imports/main.grf
+
+void main() {
+    io.println("via library");
+    io.log.debug("via nested class");
+
+    log.checkpoint("via class import");
+
+    println("via function import");
+    info("Application started");
+    warn("Cache miss");
+    error("Request failed");
+    fatal("Critical failure");
+}

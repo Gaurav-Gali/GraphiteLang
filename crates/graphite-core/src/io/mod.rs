@@ -8,6 +8,8 @@
 //! once at the program boundary. A successful read of an empty line returns
 //! an empty string. End of file is not reported as an empty string.
 
+pub mod log;
+
 use std::io::{self, BufRead, Write};
 
 use crate::diagnostic::{self, RuntimeError};

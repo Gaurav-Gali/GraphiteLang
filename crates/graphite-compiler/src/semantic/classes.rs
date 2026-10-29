@@ -222,7 +222,7 @@ fn scan_stmt(stmt: &Stmt, tainted: &mut HashSet<String>, scan: &mut Scan) {
         }
         Stmt::Super(stmt) => {
             for argument in &stmt.arguments {
-                let _ = scan_expr(argument, tainted, scan);
+                let _ = scan_expr(&argument.value, tainted, scan);
             }
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
@@ -256,7 +256,7 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
         }
         Expr::New(new_expr) => {
             for argument in &new_expr.arguments {
-                if scan_expr(argument, tainted, scan) {
+                if scan_expr(&argument.value, tainted, scan) {
                     scan.leaked = true;
                 }
             }
@@ -269,7 +269,7 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
                     scan.calls.push(member.member.name.clone());
                 }
                 for argument in &call.arguments {
-                    if scan_expr(argument, tainted, scan) {
+                    if scan_expr(&argument.value, tainted, scan) {
                         scan.leaked = true;
                     }
                 }
@@ -277,7 +277,7 @@ fn scan_expr(expr: &Expr, tainted: &HashSet<String>, scan: &mut Scan) -> bool {
             }
             let _ = scan_expr(&call.callee, tainted, scan);
             for argument in &call.arguments {
-                if scan_expr(argument, tainted, scan) {
+                if scan_expr(&argument.value, tainted, scan) {
                     scan.leaked = true;
                 }
             }
@@ -581,7 +581,7 @@ fn walk_stmt(
         }
         Stmt::Super(stmt) => {
             for argument in &stmt.arguments {
-                let _ = walk_expr(argument, class, leaks, checking, flow, issues);
+                let _ = walk_expr(&argument.value, class, leaks, checking, flow, issues);
             }
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
@@ -651,7 +651,7 @@ fn walk_expr(
         Expr::New(new_expr) => {
             let mut leaked = false;
             for argument in &new_expr.arguments {
-                if walk_expr(argument, class, leaks, checking, flow, issues) {
+                if walk_expr(&argument.value, class, leaks, checking, flow, issues) {
                     leaked = true;
                 }
             }
@@ -685,8 +685,8 @@ fn walk_expr(
                     }
                 }
                 for argument in &call.arguments {
-                    if walk_expr(argument, class, leaks, checking, flow, issues) {
-                        escape(argument.span(), issues);
+                    if walk_expr(&argument.value, class, leaks, checking, flow, issues) {
+                        escape(argument.span, issues);
                     }
                 }
                 return false;
@@ -695,8 +695,8 @@ fn walk_expr(
                 escape(call.span, issues);
             }
             for argument in &call.arguments {
-                if walk_expr(argument, class, leaks, checking, flow, issues) {
-                    escape(argument.span(), issues);
+                if walk_expr(&argument.value, class, leaks, checking, flow, issues) {
+                    escape(argument.span, issues);
                 }
             }
             false

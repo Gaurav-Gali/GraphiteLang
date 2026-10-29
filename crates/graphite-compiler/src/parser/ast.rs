@@ -99,7 +99,16 @@ pub struct FieldDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportDecl {
     pub domain: Identifier,
+    /// Path segments after the domain (`io`, `io.log`, `io.log.fatal`).
+    pub path: Vec<Identifier>,
+    /// Manifest-style dotted path of every segment after the domain.
+    pub library_path: String,
+    /// Bound name: alias if present, otherwise the last path segment.
     pub library: Identifier,
+    /// `import grf.io.*;`
+    pub wildcard: bool,
+    /// `import grf.io.log as logger;`
+    pub alias: Option<Identifier>,
     pub span: Span,
 }
 
@@ -223,7 +232,15 @@ pub struct AwaitBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperStmt {
-    pub arguments: Vec<Expr>,
+    pub arguments: Vec<CallArg>,
+    pub span: Span,
+}
+
+/// One call-site argument. `name` is set for `foo(bar=1)` style named args.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallArg {
+    pub name: Option<Identifier>,
+    pub value: Expr,
     pub span: Span,
 }
 
@@ -506,7 +523,7 @@ pub struct AssignmentExpr {
 pub struct NewExpr {
     pub name: Identifier,
     pub type_arguments: Vec<TypeSyntax>,
-    pub arguments: Vec<Expr>,
+    pub arguments: Vec<CallArg>,
     pub span: Span,
 }
 
@@ -514,7 +531,7 @@ pub struct NewExpr {
 pub struct CallExpr {
     pub callee: Box<Expr>,
     pub type_arguments: Vec<TypeSyntax>,
-    pub arguments: Vec<Expr>,
+    pub arguments: Vec<CallArg>,
     pub span: Span,
 }
 

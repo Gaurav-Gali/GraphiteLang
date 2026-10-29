@@ -21,6 +21,9 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Library {
     pub description: String,
+    /// When true, importing the library also registers a built-in class with
+    /// the same bind name whose static methods mirror these functions.
+    pub exports_class: bool,
     pub functions: BTreeMap<String, Function>,
 }
 
@@ -36,6 +39,9 @@ pub struct Function {
 pub struct Parameter {
     pub name: String,
     pub ty: ManifestType,
+    /// Optional default when the Graphite argument is omitted. Only string
+    /// literals are supported in the manifest today.
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +79,7 @@ pub fn load_manifest(text: &str) -> Result<Manifest, String> {
                 params.push(Parameter {
                     name: param.name,
                     ty: parse_manifest_type(&param.ty)?,
+                    default: param.default,
                 });
             }
             functions.insert(
@@ -89,6 +96,7 @@ pub fn load_manifest(text: &str) -> Result<Manifest, String> {
             name,
             Library {
                 description: library.description,
+                exports_class: library.exports_class,
                 functions,
             },
         );
@@ -202,10 +210,12 @@ struct DomainFile {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code)]
 struct LibraryFile {
     description: String,
+    #[serde(default)]
+    exports_class: bool,
     functions: BTreeMap<String, FunctionFile>,
 }
 
@@ -225,6 +235,8 @@ struct ParamFile {
     name: String,
     #[serde(rename = "type")]
     ty: String,
+    #[serde(default)]
+    default: Option<String>,
 }
 
 #[cfg(test)]
@@ -259,6 +271,21 @@ mod tests {
         let input = io.functions.get("input").expect("input");
         assert_eq!(input.returns.name, "str");
         assert!(!input.returns.auto);
+    }
+
+    #[test]
+    fn builtin_manifest_keeps_the_io_log_contract() {
+        let manifest = builtin_manifest();
+        let log = manifest.libraries.get("io.log").expect("io.log");
+        assert!(log.exports_class);
+        let info = log.functions.get("info").expect("info");
+        assert_eq!(info.rust_path, "graphite_core::io::log::info");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[1].default.as_deref(), Some(""));
+        let custom = log.functions.get("custom").expect("custom");
+        assert_eq!(custom.params[2].default.as_deref(), Some("#FFFFFF"));
+        assert!(log.functions.contains_key("checkpoint"));
+        assert!(log.functions.contains_key("fatal"));
     }
 
     #[test]

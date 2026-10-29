@@ -218,6 +218,16 @@ pub fn semantic_code(message: &str) -> &'static str {
         "GRF-SEM-035"
     } else if message.contains("async") || message.contains("await") {
         "GRF-SEM-036"
+    } else if message.contains("named argument")
+        || message.contains("unknown argument")
+        || message.contains("was provided more than once")
+        || message.contains("positional argument cannot follow")
+        || message.contains("missing argument")
+        || message.contains("does not accept named arguments")
+    {
+        "GRF-SEM-037"
+    } else if message.contains("structured log") {
+        "GRF-SEM-038"
     } else {
         "GRF-SEM-900"
     }

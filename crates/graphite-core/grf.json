@@ -43,6 +43,77 @@
         }
       }
     },
+    "io.log": {
+      "description": "Extensible logging class with colored console output, optional file append, and typed structured fields via method type arguments (e.g. log.info<Fields>(msg, { ... })).",
+      "exportsClass": true,
+      "functions": {
+        "info": {
+          "description": "Logs a normal application event. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::info"
+        },
+        "debug": {
+          "description": "Logs diagnostic detail. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::debug"
+        },
+        "warn": {
+          "description": "Logs a potential problem. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::warn"
+        },
+        "error": {
+          "description": "Logs an error needing attention. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::error"
+        },
+        "fatal": {
+          "description": "Logs a critical failure event without terminating the process. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::fatal"
+        },
+        "checkpoint": {
+          "description": "Logs an execution milestone. With <Fields>, also accepts a record of additional fields.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::checkpoint"
+        },
+        "custom": {
+          "description": "Logs a user-defined event level with an optional RGB color. With <Fields>, also accepts a record of additional fields after level.",
+          "params": [
+            { "name": "message", "type": "str" },
+            { "name": "level", "type": "str" },
+            { "name": "color", "type": "str", "default": "#FFFFFF" },
+            { "name": "save_to", "type": "str", "default": "" }
+          ],
+          "returns": "void",
+          "rustPath": "graphite_core::io::log::custom"
+        }
+      }
+    },
     "time": {
       "description": "Current time, timestamps, calendar helpers, formatting, durations, and async sleep.",
       "functions": {

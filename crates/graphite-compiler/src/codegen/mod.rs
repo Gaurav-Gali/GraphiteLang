@@ -3261,6 +3261,9 @@ impl Emitter<'_> {
         self.emit_class_init(class, id, &struct_params);
 
         for (index, method) in class.methods.iter().enumerate() {
+            if method.builtin_path.is_some() {
+                continue;
+            }
             if !method.is_abstract {
                 self.emit_class_method(class, method, index);
             }
@@ -3535,13 +3538,21 @@ impl Emitter<'_> {
         let is_static = self.classes[class.0 as usize].methods[method].is_static;
         let is_virtual = self.classes[class.0 as usize].methods[method].is_virtual;
         let method_name = self.classes[class.0 as usize].methods[method].name.clone();
+        let builtin_path = self.classes[class.0 as usize].methods[method]
+            .builtin_path
+            .clone();
         let (target, index, virt) = if !direct && is_virtual && !is_static {
             let (origin, origin_index) = self.origin_method(class, method);
             (origin, origin_index, true)
         } else {
             (class, method, false)
         };
-        let path = format!("crate::{}", self.method_symbol(target, index, virt));
+        let is_builtin = builtin_path.is_some();
+        let path = if let Some(path) = builtin_path {
+            path
+        } else {
+            format!("crate::{}", self.method_symbol(target, index, virt))
+        };
         let mut all_type_args = Vec::new();
         if !is_static {
             if let Some(object) = object {
@@ -3549,10 +3560,22 @@ impl Emitter<'_> {
             }
         }
         all_type_args.extend(type_args.iter().copied());
-        let turbofish = self.turbofish(&all_type_args);
+        let turbofish = if is_builtin {
+            String::new()
+        } else {
+            self.turbofish(&all_type_args)
+        };
+        let structured = path.contains("_structured");
         let args = args
             .iter()
-            .map(|arg| self.emit_expr(arg))
+            .map(|arg| {
+                if structured {
+                    if let CanonicalType::Record(id) = arg.ty() {
+                        return self.emit_log_object(arg, id);
+                    }
+                }
+                self.emit_expr(arg)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let site = self.locate(file, line, column, end_column);
@@ -4750,6 +4773,87 @@ impl Emitter<'_> {
         }
         body.push_str(&format!("{output}.push_str(\" }}\"); {output}"));
         format!("{{ {body} }}")
+    }
+
+    fn emit_log_object(&mut self, expr: &CheckedExpr, id: RecordId) -> String {
+        let record = self
+            .records
+            .get(id.0 as usize)
+            .expect("record id is resolved before code generation");
+        let tmp = self.fresh_tmp();
+        let value = self.emit_expr(expr);
+        let pairs = record
+            .fields
+            .iter()
+            .map(|(name, field_ty)| {
+                let access = format!("{tmp}.{}", rust_ident(name));
+                let log_value = self.emit_log_value(*field_ty, &access);
+                format!("({}.to_string(), {log_value})", rust_string(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{{ let {tmp} = {value}; graphite_core::io::log::LogObject::from_pairs([{pairs}]) }}"
+        )
+    }
+
+    fn emit_log_value(&mut self, ty: CanonicalType, access: &str) -> String {
+        match ty {
+            CanonicalType::Str => {
+                format!("graphite_core::io::log::LogValue::Str(({access}).clone())")
+            }
+            CanonicalType::Bln => {
+                format!("graphite_core::io::log::LogValue::Bln({access})")
+            }
+            CanonicalType::Chr => {
+                format!("graphite_core::io::log::LogValue::Str(({access}).to_string())")
+            }
+            CanonicalType::Int16 | CanonicalType::Int32 | CanonicalType::Int64 => {
+                format!("graphite_core::io::log::LogValue::Int(({access}) as i64)")
+            }
+            CanonicalType::UInt16 | CanonicalType::UInt32 | CanonicalType::UInt64 => {
+                format!("graphite_core::io::log::LogValue::UInt(({access}) as u64)")
+            }
+            CanonicalType::Flt32 | CanonicalType::Flt64 => {
+                format!("graphite_core::io::log::LogValue::Flt(({access}) as f64)")
+            }
+            CanonicalType::Optional(kind) => {
+                let inner = self.emit_log_value(kind.canonical(), "grf_opt");
+                format!(
+                    "match &({access}) {{ Some(grf_opt) => {inner}, None => graphite_core::io::log::LogValue::Null }}"
+                )
+            }
+            CanonicalType::Array { .. } => {
+                let element = ty.element().unwrap_or(CanonicalType::Void);
+                let item = self.emit_log_value(element, "grf_item");
+                format!(
+                    "graphite_core::io::log::LogValue::Array(({access}).iter().map(|grf_item| {{ let grf_item = grf_item.clone(); {item} }}).collect())"
+                )
+            }
+            CanonicalType::Record(id) => {
+                let nested = self.emit_log_object_from_access(access, id);
+                format!("graphite_core::io::log::LogValue::Object({nested})")
+            }
+            _ => "graphite_core::io::log::LogValue::Null".to_string(),
+        }
+    }
+
+    fn emit_log_object_from_access(&mut self, access: &str, id: RecordId) -> String {
+        let record = self
+            .records
+            .get(id.0 as usize)
+            .expect("record id is resolved before code generation");
+        let pairs = record
+            .fields
+            .iter()
+            .map(|(name, field_ty)| {
+                let field_access = format!("{access}.{}", rust_ident(name));
+                let log_value = self.emit_log_value(*field_ty, &field_access);
+                format!("({}.to_string(), {log_value})", rust_string(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("graphite_core::io::log::LogObject::from_pairs([{pairs}])")
     }
 
     fn display_value(&mut self, ty: CanonicalType, expr: &str, referenced: bool) -> String {

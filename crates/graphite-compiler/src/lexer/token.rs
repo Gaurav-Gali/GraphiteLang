@@ -158,7 +158,7 @@ impl TokenKind {
     }
 }
 
-fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
+pub(crate) fn keyword_lexeme(kind: TokenKind) -> Option<&'static str> {
     Some(match kind {
         TokenKind::KwImport => "import",
         TokenKind::KwAuto => "auto",

@@ -404,6 +404,26 @@ mod tests {
 
     static BUILD_LOCK: Mutex<()> = Mutex::new(());
 
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
     #[test]
     fn workspace_discovery_finds_graphite_core() {
         let root = discover_workspace().expect("workspace");
@@ -680,7 +700,7 @@ void main() {
         assert_eq!(output.status, 0, "{}", output.stderr);
         assert_eq!(
             output.stdout,
-            "42\n0\n1\n2\n3\n4\n10\n20\n30\n",
+            "42\n0\n1\n2\n3\n4\n0\n1\n2\n10\n20\n30\n",
             "{}",
             output.stdout
         );
@@ -710,6 +730,115 @@ void main() {
         assert_eq!(lines[10], "0.5");
         assert_eq!(lines[11], "2026-10-26T14:30:00Z");
         assert_eq!(lines[12], "14");
+    }
+
+    #[test]
+    fn io_log_library_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/log/main.grf");
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let text = strip_ansi(&output.stdout);
+        assert!(text.contains("[INFO]"), "{text}");
+        assert!(text.contains("[DEBUG]"), "{text}");
+        assert!(text.contains("[WARN]"), "{text}");
+        assert!(text.contains("[ERROR]"), "{text}");
+        assert!(text.contains("[FATAL]"), "{text}");
+        assert!(text.contains("[CHECKPOINT]"), "{text}");
+        assert!(text.contains("[CHECKPOINT2]"), "{text}");
+        assert!(text.contains("hello"), "{text}");
+        assert!(text.contains("check-2"), "{text}");
+        assert!(text.lines().last() == Some("done"), "{text}");
+    }
+
+    #[test]
+    fn nested_library_call_via_parent_import() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-io-log-nest-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io;
+
+void main() {
+    io.log.warn("nested");
+    io.println("ok");
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let text = strip_ansi(&output.stdout);
+        assert!(text.contains("[WARN]"), "{text}");
+        assert!(text.contains("nested"), "{text}");
+        assert!(text.lines().last() == Some("ok"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn member_wildcard_and_alias_imports_run() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("grf-import-unify-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.grf");
+        fs::write(
+            &path,
+            r#"import grf.io.println;
+import grf.io.log.fatal;
+import grf.io.log as logger;
+
+void main() {
+    println("hello");
+    logger.warn("careful");
+    fatal("Critical failure");
+}
+"#,
+        )
+        .unwrap();
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let text = strip_ansi(&output.stdout);
+        assert!(text.contains("hello"), "{text}");
+        assert!(text.contains("[WARN]"), "{text}");
+        assert!(text.contains("[FATAL]"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn io_log_structured_runs() {
+        let _guard = BUILD_LOCK.lock().unwrap();
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/log/structured.grf");
+        let dir = path.parent().unwrap().join("logs");
+        let _ = fs::remove_file(dir.join("inference.jsonl"));
+        let output = run_captured(&path);
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        let text = strip_ansi(&output.stdout);
+        assert!(text.contains("[WARN] Operation failed"), "{text}");
+        assert!(text.contains("\"duration\": 12.33"), "{text}");
+        assert!(text.contains("\"error\": \"log failed\""), "{text}");
+        assert!(text.contains("[INFO] Training progress"), "{text}");
+        assert!(text.contains("[DEBUG] Batch metrics"), "{text}");
+        assert!(text.contains("[INFO] Inference completed"), "{text}");
+        assert!(text.contains("[ERROR] Inference failed"), "{text}");
+        assert!(text.contains("[FATAL] Worker crashed"), "{text}");
+        assert!(text.contains("[CHECKPOINT] Checkpoint reached"), "{text}");
+        assert!(text.contains("[PROBE] External probe"), "{text}");
+        assert!(text.contains("[INFO] Plain file note"), "{text}");
+        assert!(text.contains("[CHECKPOINT2] check-2"), "{text}");
+        assert!(text.contains("CustomLog structured"), "{text}");
+        assert!(text.lines().last() == Some("done"), "{text}");
+        let jsonl = fs::read_to_string(dir.join("inference.jsonl")).expect("jsonl written");
+        assert_eq!(jsonl.lines().count(), 2, "{jsonl}");
+        assert!(jsonl.contains("\"model\":\"classifier-v2\""), "{jsonl}");
+        assert!(jsonl.contains("\"success\":true"), "{jsonl}");
+        assert!(jsonl.contains("\"success\":false"), "{jsonl}");
+        assert!(!jsonl.contains("\u{1b}["), "{jsonl}");
+        assert!(dir.join("events.json").is_file(), "events.json missing");
+        assert!(dir.join("metrics.csv").is_file(), "metrics.csv missing");
+        assert!(dir.join("app.log").is_file(), "app.log missing");
     }
 
     #[test]

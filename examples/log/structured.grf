@@ -1,0 +1,169 @@
+import grf.io;
+import grf.io.log;
+
+// Structured logging syntax for every grf.io.log method.
+// Run: grf run examples/log/structured.grf
+//
+// Pattern:
+//   log.<level><FieldsType>(message, { fields... }, save_to="...")
+//   io.log.<level><FieldsType>(...)   // same API via parent import
+// Message-only calls stay valid: log.info("hello")
+
+type training_log {
+    epoch: int,
+    loss: flt,
+    accuracy: flt
+}
+
+type inference_log {
+    model: str,
+    duration: flt,
+    success: bln
+}
+
+type failure_log {
+    duration: flt,
+    error: str
+}
+
+type milestone_log {
+    stage: str,
+    step: int
+}
+
+type custom_log {
+    code: int,
+    detail: str
+}
+
+class CustomLog extends log {
+    @static
+    void checkpoint2(str msg, str save_to = "") {
+        log.custom(msg, level="checkpoint2", color="#454545", save_to=save_to);
+    }
+}
+
+void main() {
+    // --- message-only (all levels) ---
+    log.info("Application started");
+    io.log.debug("Loading configuration");
+    log.warn("Cache miss");
+    io.log.error("Retryable failure");
+    log.fatal("Critical path degraded");
+    io.log.checkpoint("Model initialized");
+    log.custom("Deployed", level="release", color="#45A029");
+
+    // --- structured: info / debug ---
+    log.info<training_log>(
+        "Training progress",
+        {
+            epoch: 50,
+            loss: 0.024,
+            accuracy: 0.97
+        }
+    );
+
+    io.log.debug<training_log>(
+        "Batch metrics",
+        {
+            epoch: 50,
+            loss: 0.031,
+            accuracy: 0.95
+        }
+    );
+
+    // --- structured: warn / error ---
+    log.warn<failure_log>(
+        "Operation failed",
+        {
+            duration: 12.33,
+            error: "log failed"
+        }
+    );
+
+    io.log.error<inference_log>(
+        "Inference failed",
+        {
+            model: "classifier-v2",
+            duration: 12.33,
+            success: false
+        },
+        save_to="logs/inference.jsonl"
+    );
+
+    // --- structured: fatal / checkpoint / custom ---
+    log.fatal<failure_log>(
+        "Worker crashed",
+        {
+            duration: 0.01,
+            error: "segfault recovered"
+        }
+    );
+
+    io.log.checkpoint<milestone_log>(
+        "Checkpoint reached",
+        {
+            stage: "train",
+            step: 1000
+        }
+    );
+
+    // custom: message, level, fields, then optional named color / save_to
+    log.custom<custom_log>(
+        "External probe",
+        "probe",
+        {
+            code: 200,
+            detail: "ok"
+        },
+        color="#7A5CFF"
+    );
+
+    // --- save_to: format from extension (.jsonl / .json / .csv / .log / .txt) ---
+    log.info<inference_log>(
+        "Inference completed",
+        {
+            model: "classifier-v2",
+            duration: 12.33,
+            success: true
+        },
+        save_to="logs/inference.jsonl"
+    );
+
+    io.log.warn<failure_log>(
+        "Persisted warning",
+        {
+            duration: 1.5,
+            error: "timeout"
+        },
+        save_to="logs/events.json"
+    );
+
+    log.error<training_log>(
+        "Epoch failed",
+        {
+            epoch: 51,
+            loss: 1.0,
+            accuracy: 0.1
+        },
+        save_to="logs/metrics.csv"
+    );
+
+    io.log.info(
+        "Plain file note",
+        save_to="logs/app.log"
+    );
+
+    // --- subclass still works; structured uses the same backend ---
+    CustomLog.warn("inherited warn");
+    CustomLog.checkpoint2("check-2");
+    CustomLog.info<milestone_log>(
+        "CustomLog structured",
+        {
+            stage: "post",
+            step: 2
+        }
+    );
+
+    io.println("done");
+}

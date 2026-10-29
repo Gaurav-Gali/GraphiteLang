@@ -62,6 +62,57 @@ fn minimal_entry_point() {
 }
 
 #[test]
+fn nested_library_import_binds_last_segment() {
+    let program = parse_clean("import grf.io.log;\nvoid main() {}\n");
+    assert_eq!(program.imports[0].library_path, "io.log");
+    assert_eq!(program.imports[0].library.name, "log");
+    assert!(!program.imports[0].wildcard);
+    assert!(program.imports[0].alias.is_none());
+}
+
+#[test]
+fn import_member_wildcard_and_alias_parse() {
+    let member = parse_clean("import grf.io.log.fatal;\nvoid main() {}\n");
+    assert_eq!(member.imports[0].library_path, "io.log.fatal");
+    assert_eq!(member.imports[0].library.name, "fatal");
+    assert_eq!(member.imports[0].path.len(), 3);
+
+    let alias = parse_clean("import grf.io.log as logger;\nvoid main() {}\n");
+    assert_eq!(alias.imports[0].library_path, "io.log");
+    assert_eq!(alias.imports[0].library.name, "logger");
+    assert_eq!(alias.imports[0].alias.as_ref().unwrap().name, "logger");
+
+    let star = parse_clean("import grf.io.log.*;\nvoid main() {}\n");
+    assert!(star.imports[0].wildcard);
+    assert_eq!(star.imports[0].library_path, "io.log");
+}
+
+#[test]
+fn named_call_arguments_parse() {
+    let program = parse_clean(
+        "\
+void main() {
+    add(a=1, b=2);
+}
+
+int add(int a, int b) {
+    return a + b;
+}
+",
+    );
+    let main = function(&program, "main");
+    let Stmt::Expression(statement) = &main.body.statements[0] else {
+        panic!("expected call");
+    };
+    let Expr::Call(call) = &statement.expression else {
+        panic!("expected call expr");
+    };
+    assert_eq!(call.arguments.len(), 2);
+    assert_eq!(call.arguments[0].name.as_ref().unwrap().name, "a");
+    assert_eq!(call.arguments[1].name.as_ref().unwrap().name, "b");
+}
+
+#[test]
 fn import_and_library_call() {
     let program = parse_clean(
         "\
@@ -75,6 +126,7 @@ void main() {
     assert_eq!(program.imports.len(), 1);
     assert_eq!(program.imports[0].domain.name, "grf");
     assert_eq!(program.imports[0].library.name, "io");
+    assert_eq!(program.imports[0].library_path, "io");
     let main = function(&program, "main");
     let Stmt::Expression(statement) = &main.body.statements[0] else {
         panic!("expected expression statement");
@@ -90,7 +142,7 @@ void main() {
     };
     assert_eq!(object.name, "io");
     assert_eq!(member.member.name, "println");
-    let Expr::Literal(LiteralExpr::String { value, .. }) = &call.arguments[0] else {
+    let Expr::Literal(LiteralExpr::String { value, .. }) = &call.arguments[0].value else {
         panic!("expected string argument");
     };
     assert_eq!(value, "Hello");
@@ -118,7 +170,7 @@ int square(int value) {
     let Expr::Call(outer) = &statement.expression else {
         panic!("expected outer call");
     };
-    let Expr::Call(inner) = &outer.arguments[0] else {
+    let Expr::Call(inner) = &outer.arguments[0].value else {
         panic!("expected nested call");
     };
     let Expr::Identifier(name) = inner.callee.as_ref() else {
@@ -706,7 +758,6 @@ fn colon_is_a_slice_token_and_question_stays_lexical() {
 #[test]
 fn rejects_invalid_syntax() {
     assert_rejected("import grf.io\n", "';'");
-    assert_rejected("import grf.io.print;\n", "domain.library");
     assert_rejected(
         "\
 void main() {
@@ -1183,7 +1234,7 @@ void main() {
     let Expr::Call(call) = answer.initializer.as_ref().unwrap() else {
         panic!("execute call");
     };
-    assert!(matches!(call.arguments[1], Expr::Lambda(_)));
+    assert!(matches!(call.arguments[1].value, Expr::Lambda(_)));
 
     let Stmt::VariableDecl(combined) = &main[2] else {
         panic!("combine");
@@ -1191,8 +1242,8 @@ void main() {
     let Expr::Call(call) = combined.initializer.as_ref().unwrap() else {
         panic!("combine call");
     };
-    assert!(matches!(call.arguments[1], Expr::Lambda(_)));
-    assert!(matches!(call.arguments[2], Expr::Lambda(_)));
+    assert!(matches!(call.arguments[1].value, Expr::Lambda(_)));
+    assert!(matches!(call.arguments[2].value, Expr::Lambda(_)));
 
     let Stmt::VariableDecl(calculate) = &main[3] else {
         panic!("block lambda");

@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use crate::manifest::{Manifest, ManifestType};
 use crate::parser::*;
-use crate::span::Span;
+use crate::span::{SourcePosition, Span};
 
 pub(crate) mod classes;
 pub(crate) mod convert;
@@ -832,6 +832,8 @@ pub struct CheckedClass {
     pub init: Option<CheckedInit>,
     pub methods: Vec<CheckedMethod>,
     pub type_params: Vec<String>,
+    /// Built-in library class (for example `log` from `import grf.io.log`).
+    pub builtin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -863,6 +865,8 @@ pub struct CheckedMethod {
     pub type_params: Vec<String>,
     pub is_generator: bool,
     pub is_async_iter: bool,
+    /// When set, codegen calls this Rust path instead of emitting a Graphite body.
+    pub builtin_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1559,6 +1563,12 @@ struct ImportBinding {
     library: String,
 }
 
+#[derive(Clone)]
+enum ImportedCallable {
+    LibraryFunction { library: String, name: String },
+    StaticMethod { class: ClassId, name: String },
+}
+
 #[derive(Clone, Copy)]
 struct Binding {
     ty: CanonicalType,
@@ -1576,6 +1586,8 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
         diagnostics: Vec::new(),
         functions: HashMap::new(),
         imports: HashMap::new(),
+        imported_callables: HashMap::new(),
+        builtin_library_classes: HashMap::new(),
         records: Vec::new(),
         record_names: HashMap::new(),
         classes: Vec::new(),
@@ -1624,12 +1636,68 @@ pub fn analyze(source_name: &str, program: &Program, manifest: &Manifest) -> Ana
     checker.prepare_class_effects(program);
     checker.collect_functions(program);
     checker.check_entry_point(program);
-    let mut checked_classes = Vec::new();
+    let mut checked_slots: Vec<Option<CheckedClass>> =
+        (0..checker.classes.len()).map(|_| None).collect();
     for declaration in &program.classes {
         if let Some(checked) = checker.check_class(declaration) {
-            checked_classes.push(checked);
+            if let Some(id) = checker.class_names.get(&declaration.name.name).copied() {
+                checked_slots[id.0 as usize] = Some(checked);
+            }
         }
     }
+    for (index, class) in checker.classes.iter().enumerate() {
+        if class.builtin && checked_slots[index].is_none() {
+            checked_slots[index] = Some(CheckedClass {
+                name: class.name.clone(),
+                parent: class.parent,
+                implements: class.implements.clone(),
+                abstract_class: class.abstract_class,
+                fields: Vec::new(),
+                init: None,
+                methods: class
+                    .methods
+                    .iter()
+                    .map(|method| CheckedMethod {
+                        name: method.name.clone(),
+                        params: method
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), param.ty))
+                            .collect(),
+                        ret: method.ret,
+                        body: Vec::new(),
+                        mutating: method.mutating,
+                        is_static: method.is_static,
+                        is_abstract: method.is_abstract,
+                        is_virtual: method.is_virtual,
+                        type_params: Vec::new(),
+                        is_generator: false,
+                        is_async_iter: false,
+                        builtin_path: method.builtin_path.clone(),
+                    })
+                    .collect(),
+                type_params: Vec::new(),
+                builtin: true,
+            });
+        }
+    }
+    let checked_classes: Vec<CheckedClass> = checked_slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| {
+            slot.unwrap_or_else(|| CheckedClass {
+                name: checker.classes[index].name.clone(),
+                parent: checker.classes[index].parent,
+                implements: checker.classes[index].implements.clone(),
+                abstract_class: checker.classes[index].abstract_class,
+                fields: Vec::new(),
+                init: None,
+                methods: Vec::new(),
+                type_params: Vec::new(),
+                builtin: checker.classes[index].builtin,
+            })
+        })
+        .collect();
     let mut functions = Vec::new();
     if checker.diagnostics.is_empty() {
         for function in &program.functions {
@@ -1744,6 +1812,7 @@ struct ClassMethodInfo {
     leaks: bool,
     span: Span,
     type_params: Vec<TypeParamId>,
+    builtin_path: Option<String>,
 }
 
 struct ClassInitInfo {
@@ -1795,6 +1864,7 @@ struct ClassInfo {
     methods: Vec<ClassMethodInfo>,
     init: Option<ClassInitInfo>,
     type_params: Vec<TypeParamId>,
+    builtin: bool,
 }
 
 struct TypeParamInfo {
@@ -1809,6 +1879,8 @@ struct Checker<'a> {
     diagnostics: Vec<SemanticDiagnostic>,
     functions: HashMap<String, Signature>,
     imports: HashMap<String, ImportBinding>,
+    imported_callables: HashMap<String, ImportedCallable>,
+    builtin_library_classes: HashMap<String, ClassId>,
     records: Vec<RecordInfo>,
     record_names: HashMap<String, RecordId>,
     classes: Vec<ClassInfo>,
@@ -1871,7 +1943,12 @@ impl<'a> Checker<'a> {
     fn collect_imports(&mut self, program: &Program) {
         let mut seen_paths = Vec::<(String, String, Span)>::new();
         for import in &program.imports {
-            let path = (import.domain.name.clone(), import.library.name.clone());
+            let key = if import.wildcard {
+                format!("{}.*", import.library_path)
+            } else {
+                import.library_path.clone()
+            };
+            let path = (import.domain.name.clone(), key);
             if let Some((_, _, first)) = seen_paths
                 .iter()
                 .find(|(domain, library, _)| *domain == path.0 && *library == path.1)
@@ -1885,16 +1962,6 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
-            if self.imports.contains_key(&import.library.name) {
-                self.error(
-                    import.span,
-                    format!(
-                        "import '{}.{}' conflicts with an earlier import that also binds the name '{}'",
-                        path.0, path.1, import.library.name
-                    ),
-                );
-                continue;
-            }
             seen_paths.push((path.0.clone(), path.1.clone(), import.span));
             if self.manifest.domain != import.domain.name {
                 self.error(
@@ -1903,24 +1970,459 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
-            if !self.manifest.libraries.contains_key(&import.library.name) {
-                self.error(
-                    import.library.span,
-                    format!(
-                        "library '{}' was not found in domain '{}'",
-                        import.library.name, import.domain.name
-                    ),
-                );
+            if import.wildcard {
+                self.bind_wildcard_import(import);
+            } else {
+                self.bind_qualified_import(import);
+            }
+        }
+    }
+
+    fn bind_qualified_import(&mut self, import: &ImportDecl) {
+        let segments: Vec<&str> = import.path.iter().map(|part| part.name.as_str()).collect();
+        if segments.is_empty() {
+            return;
+        }
+        if self.manifest.libraries.contains_key(&import.library_path) {
+            self.bind_library_namespace(
+                import.library.name.as_str(),
+                import.library.span,
+                import.domain.name.as_str(),
+                import.library_path.as_str(),
+                import.span,
+            );
+            return;
+        }
+        for split in (1..import.path.len()).rev() {
+            let library_key = import.path[..split]
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            if !self.manifest.libraries.contains_key(&library_key) {
                 continue;
             }
-            self.imports.insert(
-                import.library.name.clone(),
-                ImportBinding {
-                    domain: path.0,
-                    library: path.1,
-                },
+            let rest = &import.path[split..];
+            if rest.len() != 1 {
+                self.error(
+                    rest.get(1).map(|part| part.span).unwrap_or(import.span),
+                    format!(
+                        "import '{}.{}' is invalid because '{}' is not a module",
+                        library_key,
+                        rest.iter()
+                            .map(|part| part.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        rest[0].name
+                    ),
+                );
+                return;
+            }
+            let member = &rest[0];
+            let bind = import
+                .alias
+                .as_ref()
+                .map(|alias| (alias.name.as_str(), alias.span))
+                .unwrap_or((member.name.as_str(), member.span));
+            self.bind_library_member(
+                bind.0,
+                bind.1,
+                import.domain.name.as_str(),
+                &library_key,
+                member.name.as_str(),
+                member.span,
+                import.span,
+            );
+            return;
+        }
+        let last = import.path.last().unwrap();
+        self.error(
+            last.span,
+            format!(
+                "library '{}' was not found in domain '{}'",
+                import.library_path, import.domain.name
+            ),
+        );
+    }
+
+    fn bind_wildcard_import(&mut self, import: &ImportDecl) {
+        if !self.manifest.libraries.contains_key(&import.library_path) {
+            let last = import.path.last().unwrap();
+            self.error(
+                last.span,
+                format!(
+                    "library '{}' was not found in domain '{}'",
+                    import.library_path, import.domain.name
+                ),
+            );
+            return;
+        }
+        let library = self.manifest.libraries.get(&import.library_path).unwrap();
+        let names: Vec<String> = library.functions.keys().cloned().collect();
+        for name in names {
+            let span = import.path.last().map(|part| part.span).unwrap_or(import.span);
+            self.bind_library_member(
+                &name,
+                span,
+                import.domain.name.as_str(),
+                import.library_path.as_str(),
+                &name,
+                span,
+                import.span,
             );
         }
+        let prefix = format!("{}.", import.library_path);
+        let children: Vec<String> = self
+            .manifest
+            .libraries
+            .keys()
+            .filter(|key| {
+                key.strip_prefix(&prefix)
+                    .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
+            })
+            .cloned()
+            .collect();
+        for child in children {
+            let bind = child.rsplit('.').next().unwrap_or(&child).to_string();
+            let span = import.path.last().map(|part| part.span).unwrap_or(import.span);
+            self.bind_library_namespace(
+                &bind,
+                span,
+                import.domain.name.as_str(),
+                &child,
+                import.span,
+            );
+        }
+    }
+
+    fn bind_library_namespace(
+        &mut self,
+        bind: &str,
+        bind_span: Span,
+        domain: &str,
+        library_key: &str,
+        import_span: Span,
+    ) {
+        if self.import_name_taken(bind) {
+            self.error(
+                import_span,
+                format!(
+                    "import '{domain}.{library_key}' conflicts with an earlier import that also binds the name '{bind}'"
+                ),
+            );
+            return;
+        }
+        let exports_class = self
+            .manifest
+            .libraries
+            .get(library_key)
+            .is_some_and(|library| library.exports_class);
+        if exports_class {
+            if (self.class_names.contains_key(bind) && !self.builtin_library_classes.values().any(|id| {
+                self.class_names.get(bind) == Some(id)
+            })) || self.interface_names.contains_key(bind)
+            {
+                self.error(bind_span, format!("'{bind}' is already declared"));
+                return;
+            }
+            self.bind_builtin_library_class(bind, library_key, bind_span);
+        }
+        self.imports.insert(
+            bind.to_string(),
+            ImportBinding {
+                domain: domain.to_string(),
+                library: library_key.to_string(),
+            },
+        );
+    }
+
+    fn bind_library_member(
+        &mut self,
+        bind: &str,
+        bind_span: Span,
+        domain: &str,
+        library_key: &str,
+        member: &str,
+        member_span: Span,
+        import_span: Span,
+    ) {
+        let (exported, exports_class) = match self.manifest.libraries.get(library_key) {
+            Some(library) => (
+                library.functions.contains_key(member),
+                library.exports_class,
+            ),
+            None => return,
+        };
+        if !exported {
+            self.error(
+                member_span,
+                format!("function '{member}' is not exported by '{domain}.{library_key}'"),
+            );
+            return;
+        }
+        if self.import_name_taken(bind) || self.functions.contains_key(bind) {
+            self.error(
+                import_span,
+                format!(
+                    "import '{domain}.{library_key}.{member}' conflicts with an earlier import that also binds the name '{bind}'"
+                ),
+            );
+            return;
+        }
+        if self.reject_reserved_name(bind, bind_span) {
+            return;
+        }
+        let callable = if exports_class {
+            let Some(class) = self.intern_builtin_library_class(library_key) else {
+                return;
+            };
+            ImportedCallable::StaticMethod {
+                class,
+                name: member.to_string(),
+            }
+        } else {
+            ImportedCallable::LibraryFunction {
+                library: library_key.to_string(),
+                name: member.to_string(),
+            }
+        };
+        self.imported_callables.insert(bind.to_string(), callable);
+    }
+
+    fn import_name_taken(&self, name: &str) -> bool {
+        self.imports.contains_key(name) || self.imported_callables.contains_key(name)
+    }
+
+    fn intern_builtin_library_class(&mut self, library_path: &str) -> Option<ClassId> {
+        if let Some(&id) = self.builtin_library_classes.get(library_path) {
+            return Some(id);
+        }
+        let Some(library) = self.manifest.libraries.get(library_path).cloned() else {
+            return None;
+        };
+        let name = library_path.rsplit('.').next().unwrap_or(library_path);
+        let span = Span {
+            start: SourcePosition {
+                offset: 0,
+                line: 1,
+                column: 1,
+            },
+            end: SourcePosition {
+                offset: 0,
+                line: 1,
+                column: 1,
+            },
+        };
+        let void_syntax = TypeSyntax {
+            kind: TypeKind::Void,
+            name: String::new(),
+            bounds: Vec::new(),
+            arguments: Vec::new(),
+            optional: false,
+            span,
+        };
+        let mut methods = Vec::new();
+        for (method_name, function) in &library.functions {
+            let Some(ret) = self.manifest_return_type(&function.returns) else {
+                continue;
+            };
+            let params = library_param_infos(function, span);
+            methods.push(ClassMethodInfo {
+                name: method_name.clone(),
+                params,
+                param_syntax: Vec::new(),
+                ret,
+                ret_syntax: void_syntax.clone(),
+                public: true,
+                protected: false,
+                is_static: true,
+                is_override: false,
+                is_abstract: false,
+                is_final: false,
+                is_virtual: false,
+                deprecated: false,
+                mutating: false,
+                leaks: false,
+                span,
+                type_params: Vec::new(),
+                builtin_path: Some(function.rust_path.clone()),
+            });
+            if library_path == "io.log" {
+                self.push_log_structured_overload(
+                    &mut methods,
+                    method_name,
+                    &function.rust_path,
+                    ret,
+                    &void_syntax,
+                    span,
+                );
+            }
+        }
+        let id = ClassId(self.classes.len() as u32);
+        self.builtin_library_classes
+            .insert(library_path.to_string(), id);
+        self.classes.push(ClassInfo {
+            name: name.to_string(),
+            span,
+            parent: None,
+            parent_name: None,
+            interface_names: Vec::new(),
+            implements: Vec::new(),
+            abstract_class: false,
+            final_class: false,
+            fields: Vec::new(),
+            methods,
+            init: None,
+            type_params: Vec::new(),
+            builtin: true,
+        });
+        Some(id)
+    }
+
+    fn bind_builtin_library_class(&mut self, name: &str, library_path: &str, span: Span) {
+        let Some(id) = self.intern_builtin_library_class(library_path) else {
+            return;
+        };
+        if let Some(&existing) = self.class_names.get(name) {
+            if existing != id {
+                self.error(span, format!("'{name}' is already declared"));
+            }
+            return;
+        }
+        if self.interface_names.contains_key(name) {
+            self.error(span, format!("'{name}' is already declared"));
+            return;
+        }
+        self.class_names.insert(name.to_string(), id);
+    }
+
+    fn register_builtin_library_class(&mut self, name: &str, library_path: &str) {
+        self.bind_builtin_library_class(
+            name,
+            library_path,
+            Span {
+                start: SourcePosition {
+                    offset: 0,
+                    line: 1,
+                    column: 1,
+                },
+                end: SourcePosition {
+                    offset: 0,
+                    line: 1,
+                    column: 1,
+                },
+            },
+        );
+    }
+
+    fn push_log_structured_overload(
+        &mut self,
+        methods: &mut Vec<ClassMethodInfo>,
+        method_name: &str,
+        base_path: &str,
+        ret: CanonicalType,
+        void_syntax: &TypeSyntax,
+        span: Span,
+    ) {
+        let structured_path = if base_path.ends_with("::custom") {
+            format!("{base_path}_structured")
+        } else {
+            format!("{base_path}_structured")
+        };
+        // Paths are graphite_core::io::log::info → info_structured.
+        let structured_path = if let Some(prefix) = base_path.strip_suffix(method_name) {
+            format!("{prefix}{method_name}_structured")
+        } else {
+            structured_path
+        };
+        let tp = TypeParamId(self.type_params.len() as u32);
+        self.type_params.push(TypeParamInfo {
+            name: "Fields".to_string(),
+            span,
+        });
+        let empty = Expr::Literal(LiteralExpr::String {
+            value: String::new(),
+            span,
+        });
+        let white = Expr::Literal(LiteralExpr::String {
+            value: "#FFFFFF".to_string(),
+            span,
+        });
+        let params = if method_name == "custom" {
+            vec![
+                ParamInfo {
+                    name: "message".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: None,
+                },
+                ParamInfo {
+                    name: "level".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: None,
+                },
+                ParamInfo {
+                    name: "fields".to_string(),
+                    ty: CanonicalType::Param(tp),
+                    auto: false,
+                    default: None,
+                },
+                ParamInfo {
+                    name: "color".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: Some(white),
+                },
+                ParamInfo {
+                    name: "save_to".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: Some(empty),
+                },
+            ]
+        } else {
+            vec![
+                ParamInfo {
+                    name: "message".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: None,
+                },
+                ParamInfo {
+                    name: "fields".to_string(),
+                    ty: CanonicalType::Param(tp),
+                    auto: false,
+                    default: None,
+                },
+                ParamInfo {
+                    name: "save_to".to_string(),
+                    ty: CanonicalType::Str,
+                    auto: false,
+                    default: Some(empty),
+                },
+            ]
+        };
+        methods.push(ClassMethodInfo {
+            name: method_name.to_string(),
+            params,
+            param_syntax: Vec::new(),
+            ret,
+            ret_syntax: void_syntax.clone(),
+            public: true,
+            protected: false,
+            is_static: true,
+            is_override: false,
+            is_abstract: false,
+            is_final: false,
+            is_virtual: false,
+            deprecated: false,
+            mutating: false,
+            leaks: false,
+            span,
+            type_params: vec![tp],
+            builtin_path: Some(structured_path),
+        });
     }
 
     fn reject_reserved_name(&mut self, name: &str, span: Span) -> bool {
@@ -2504,6 +3006,18 @@ impl<'a> Checker<'a> {
                 );
             }
             if self.reject_reserved_name(&function.name.name, function.name.span) {
+                continue;
+            }
+            if self.imported_callables.contains_key(&function.name.name)
+                || self.imports.contains_key(&function.name.name)
+            {
+                self.error(
+                    function.name.span,
+                    format!(
+                        "function '{}' is already declared by an import",
+                        function.name.name
+                    ),
+                );
                 continue;
             }
             if function.name.name == "main" && !type_params.is_empty() {
@@ -3364,7 +3878,7 @@ impl<'a> Checker<'a> {
         let Some(parent) = self.classes[class.0 as usize].parent else {
             self.error(stmt.span, "super requires a parent class");
             for argument in &stmt.arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return None;
         };
@@ -4018,7 +4532,7 @@ impl<'a> Checker<'a> {
         &mut self,
         callee: CheckedExpr,
         id: CallableId,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         callee_name: &str,
     ) -> CheckedExpr {
@@ -4909,15 +5423,37 @@ impl<'a> Checker<'a> {
                 }
                 return self.check_super_call(member, &expr.arguments, expr.span);
             }
-            if let Expr::Identifier(object) = &*member.object {
-                if self.imports.contains_key(&object.name) {
+            if let Some((root, nested, method, method_span)) = library_call_segments(member) {
+                if self.imports.contains_key(&root) {
                     if !expr.type_arguments.is_empty() {
+                        if let Some(class_id) =
+                            self.resolve_exports_class_for_call(&root, &nested)
+                        {
+                            return self.check_static_call_on(
+                                class_id,
+                                &method,
+                                member,
+                                &expr.type_arguments,
+                                &expr.arguments,
+                                expr.span,
+                            );
+                        }
                         self.error(expr.span, "library calls cannot take type arguments");
+                        return self.dummy(None);
                     }
-                    return self.check_library_call(member, &expr.arguments, expr.span, allow_void);
+                    return self.check_library_call_path(
+                        &root,
+                        &nested,
+                        &method,
+                        method_span,
+                        &expr.arguments,
+                        expr.span,
+                        allow_void,
+                    );
                 }
-                if self.lookup(&object.name).is_none()
-                    && self.class_names.contains_key(&object.name)
+                if nested.is_empty()
+                    && self.lookup(&root).is_none()
+                    && self.class_names.contains_key(&root)
                 {
                     return self.check_static_call(
                         member,
@@ -4944,6 +5480,15 @@ impl<'a> Checker<'a> {
             if ident.name == "range" {
                 return self.check_range(&expr.arguments, expr.span);
             }
+            if let Some(imported) = self.imported_callables.get(&ident.name).cloned() {
+                return self.check_imported_call(
+                    &imported,
+                    ident,
+                    &expr.type_arguments,
+                    &expr.arguments,
+                    expr.span,
+                );
+            }
             return self.check_user_call(ident, &expr.type_arguments, &expr.arguments, expr.span);
         }
         if !expr.type_arguments.is_empty() {
@@ -4958,48 +5503,202 @@ impl<'a> Checker<'a> {
         }
         self.error(expr.span, "unsupported call target");
         for argument in &expr.arguments {
-            let _ = self.check_expr(argument, None, false);
+            let _ = self.check_expr(&argument.value, None, false);
         }
         self.dummy(None)
     }
 
-    fn check_library_call(
+    fn resolve_exports_class_for_call(
         &mut self,
+        root: &str,
+        nested: &[String],
+    ) -> Option<ClassId> {
+        let import = self.imports.get(root)?.clone();
+        if nested.is_empty() {
+            return self.class_names.get(root).copied();
+        }
+        let library_key = format!("{}.{}", import.library, nested.join("."));
+        let exports = self
+            .manifest
+            .libraries
+            .get(&library_key)
+            .is_some_and(|library| library.exports_class);
+        if !exports {
+            return None;
+        }
+        let class_name = nested.last()?.as_str();
+        if let Some(id) = self.class_names.get(class_name).copied() {
+            return Some(id);
+        }
+        self.register_builtin_library_class(class_name, &library_key);
+        self.class_names.get(class_name).copied()
+    }
+
+    fn check_static_call_on(
+        &mut self,
+        id: ClassId,
+        method_name: &str,
         member: &MemberExpr,
-        arguments: &[Expr],
+        type_arguments: &[TypeSyntax],
+        arguments: &[CallArg],
         span: Span,
-        _allow_void: bool,
     ) -> CheckedExpr {
-        let Expr::Identifier(object) = &*member.object else {
+        let dummy = CheckedExpr::Null {
+            ty: CanonicalType::Class(id),
+        };
+        // Reuse finish_class_call by synthesizing a member whose name matches.
+        let mut member = member.clone();
+        member.member.name = method_name.to_string();
+        let call = self.finish_class_call(dummy, id, &member, type_arguments, arguments, span);
+        match call {
+            CheckedExpr::ClassCall {
+                class,
+                method,
+                args,
+                type_args,
+                ty,
+                direct,
+                file,
+                line,
+                column,
+                end_column,
+                ..
+            } => {
+                if !self.classes[class.0 as usize].methods[method].is_static {
+                    self.error(
+                        member.member.span,
+                        format!(
+                            "method '{}' requires an instance of '{}'",
+                            method_name,
+                            self.class_name(id)
+                        ),
+                    );
+                    return self.dummy(None);
+                }
+                CheckedExpr::ClassCall {
+                    class,
+                    method,
+                    object: None,
+                    args,
+                    type_args,
+                    ty,
+                    direct,
+                    file,
+                    line,
+                    column,
+                    end_column,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn check_imported_call(
+        &mut self,
+        imported: &ImportedCallable,
+        ident: &Identifier,
+        type_arguments: &[TypeSyntax],
+        arguments: &[CallArg],
+        span: Span,
+    ) -> CheckedExpr {
+        match imported {
+            ImportedCallable::LibraryFunction { library, name } => {
+                if !type_arguments.is_empty() {
+                    self.error(span, "library calls cannot take type arguments");
+                    return self.dummy(None);
+                }
+                self.check_library_function(library, name, ident.span, arguments, span)
+            }
+            ImportedCallable::StaticMethod { class, name } => {
+                let member = MemberExpr {
+                    object: Box::new(Expr::Identifier(ident.clone())),
+                    member: Identifier {
+                        name: name.clone(),
+                        span: ident.span,
+                    },
+                    span: ident.span,
+                };
+                self.check_static_call_on(*class, name, &member, type_arguments, arguments, span)
+            }
+        }
+    }
+
+    fn check_library_function(
+        &mut self,
+        library_key: &str,
+        method: &str,
+        method_span: Span,
+        arguments: &[CallArg],
+        span: Span,
+    ) -> CheckedExpr {
+        let Some(library) = self.manifest.libraries.get(library_key) else {
             self.error(
-                member.span,
-                "a library call must use the imported library name",
+                method_span,
+                format!("library '{library_key}' was not found"),
             );
             return self.dummy(None);
         };
-        let Some(import) = self.imports.get(&object.name).cloned() else {
-            if self.lookup(&object.name).is_some() {
-                self.error(
-                    member.span,
-                    "member access is only supported for imported libraries in this milestone",
-                );
-            } else {
-                self.error(object.span, format!("unknown name '{}'", object.name));
-            }
+        let Some(function) = library.functions.get(method).cloned() else {
+            self.error(
+                method_span,
+                format!("function '{method}' is not exported by '{library_key}'"),
+            );
             return self.dummy(None);
         };
-        let Some(function) = self
-            .manifest
-            .libraries
-            .get(&import.library)
-            .and_then(|library| library.functions.get(&member.member.name))
-            .cloned()
-        else {
+        let Some(ret) = self.manifest_return_type(&function.returns) else {
+            self.error(span, "the library function has an unknown return type");
+            return self.dummy(None);
+        };
+        let params = library_param_infos(&function, span);
+        let args = self.check_call_args(arguments, &params, span);
+        CheckedExpr::Call {
+            path: function.rust_path,
+            callee: method.to_string(),
+            args,
+            type_args: Vec::new(),
+            ty: ret,
+            file: self.source_name.to_string(),
+            line: span.start.line,
+            column: span.start.column,
+            end_column: span.end.column,
+        }
+    }
+
+    fn check_library_call_path(
+        &mut self,
+        root: &str,
+        nested: &[String],
+        method: &str,
+        method_span: Span,
+        arguments: &[CallArg],
+        span: Span,
+        _allow_void: bool,
+    ) -> CheckedExpr {
+        let Some(import) = self.imports.get(root).cloned() else {
+            self.error(span, format!("unknown name '{root}'"));
+            return self.dummy(None);
+        };
+        let library_key = if nested.is_empty() {
+            import.library.clone()
+        } else {
+            format!("{}.{}", import.library, nested.join("."))
+        };
+        let Some(library) = self.manifest.libraries.get(&library_key) else {
             self.error(
-                member.member.span,
+                method_span,
                 format!(
-                    "function '{}' is not exported by '{}.{}'",
-                    member.member.name, import.domain, import.library
+                    "library '{}' was not found under '{}.{}'",
+                    library_key, import.domain, import.library
+                ),
+            );
+            return self.dummy(None);
+        };
+        let Some(function) = library.functions.get(method).cloned() else {
+            self.error(
+                method_span,
+                format!(
+                    "function '{method}' is not exported by '{}.{}'",
+                    import.domain, library_key
                 ),
             );
             return self.dummy(None);
@@ -5008,11 +5707,11 @@ impl<'a> Checker<'a> {
             self.error(span, "the library function has an unknown return type");
             return self.dummy(None);
         };
-        let params = function_params(&function);
-        let args = self.check_arguments(arguments, &params, span);
+        let params = library_param_infos(&function, span);
+        let args = self.check_call_args(arguments, &params, span);
         CheckedExpr::Call {
             path: function.rust_path,
-            callee: member.member.name.clone(),
+            callee: method.to_string(),
             args,
             type_args: Vec::new(),
             ty: ret,
@@ -5035,7 +5734,8 @@ impl<'a> Checker<'a> {
         canonical_name(&ty.name)
     }
 
-    fn check_range(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+    fn check_range(&mut self, arguments: &[CallArg], span: Span) -> CheckedExpr {
+        self.reject_named_call_args(arguments, "range");
         let ty = CanonicalType::Iter(self.intern_iter(CanonicalType::Int64));
         let (file, line, column, end_column) = self.located(span);
         let zero = || CheckedExpr::Int {
@@ -5052,7 +5752,7 @@ impl<'a> Checker<'a> {
         };
         match arguments.len() {
             1 => {
-                let end = check_int(self, &arguments[0]);
+                let end = check_int(self, &arguments[0].value);
                 CheckedExpr::Range {
                     start: Box::new(zero()),
                     end: Box::new(end),
@@ -5065,8 +5765,8 @@ impl<'a> Checker<'a> {
                 }
             }
             2 => {
-                let start = check_int(self, &arguments[0]);
-                let end = check_int(self, &arguments[1]);
+                let start = check_int(self, &arguments[0].value);
+                let end = check_int(self, &arguments[1].value);
                 CheckedExpr::Range {
                     start: Box::new(start),
                     end: Box::new(end),
@@ -5079,11 +5779,11 @@ impl<'a> Checker<'a> {
                 }
             }
             3 => {
-                let start = check_int(self, &arguments[0]);
-                let end = check_int(self, &arguments[1]);
-                let step = check_int(self, &arguments[2]);
+                let start = check_int(self, &arguments[0].value);
+                let end = check_int(self, &arguments[1].value);
+                let step = check_int(self, &arguments[2].value);
                 if let CheckedExpr::Int { value: 0, .. } = step {
-                    self.error(arguments[2].span(), "range step cannot be zero");
+                    self.error(arguments[2].span, "range step cannot be zero");
                 }
                 CheckedExpr::Range {
                     start: Box::new(start),
@@ -5102,21 +5802,22 @@ impl<'a> Checker<'a> {
                     format!("range expects 1, 2, or 3 arguments, found {count}"),
                 );
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 self.dummy(Some(ty))
             }
         }
     }
 
-    fn check_length_of(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+    fn check_length_of(&mut self, arguments: &[CallArg], span: Span) -> CheckedExpr {
+        self.reject_named_call_args(arguments, "lengthOf");
         if arguments.len() != 1 {
             self.error(
                 span,
                 format!("lengthOf expects 1 argument, found {}", arguments.len()),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return CheckedExpr::Int {
                 value: 0,
@@ -5124,7 +5825,7 @@ impl<'a> Checker<'a> {
             };
         }
         let argument = &arguments[0];
-        let value = self.check_expr(argument, None, false);
+        let value = self.check_expr(&argument.value, None, false);
         if let CanonicalType::Record(id) = value.ty() {
             let count = self
                 .records
@@ -5138,7 +5839,7 @@ impl<'a> Checker<'a> {
         }
         if value.ty() != CanonicalType::Str && !value.ty().is_array() && !value.ty().is_map() {
             self.error(
-                argument.span(),
+                argument.span,
                 format!(
                     "lengthOf requires a str, array, record, or map value; '{}' has no defined length",
                     self.spell(value.ty())
@@ -5155,21 +5856,22 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_type_of(&mut self, arguments: &[Expr], span: Span) -> CheckedExpr {
+    fn check_type_of(&mut self, arguments: &[CallArg], span: Span) -> CheckedExpr {
+        self.reject_named_call_args(arguments, "typeOf");
         if arguments.len() != 1 {
             self.error(
                 span,
                 format!("typeOf expects 1 argument, found {}", arguments.len()),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(Some(CanonicalType::Type));
         }
         let argument = &arguments[0];
-        let value = self.check_expr(argument, None, true);
+        let value = self.check_expr(&argument.value, None, true);
         if value.ty() == CanonicalType::Void || value.ty().is_void_array() {
-            self.error(argument.span(), "typeOf requires a value");
+            self.error(argument.span, "typeOf requires a value");
             return self.dummy(Some(CanonicalType::Type));
         }
         let described = value.ty();
@@ -5186,7 +5888,7 @@ impl<'a> Checker<'a> {
                 .is_some_and(|inner| inner.is_generic())
         {
             self.error(
-                argument.span(),
+                argument.span,
                 "typeOf is not supported for generic class values",
             );
             return self.dummy(Some(CanonicalType::Type));
@@ -5202,13 +5904,13 @@ impl<'a> Checker<'a> {
         &mut self,
         ident: &Identifier,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         if let Some(scope) = self.binding_scope(&ident.name) {
             if self.reject_capture(&ident.name, scope, ident.span) {
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
@@ -5229,7 +5931,7 @@ impl<'a> Checker<'a> {
                         format!("cannot call a value of type '{}'", self.spell(binding.ty)),
                     );
                     for argument in arguments {
-                        let _ = self.check_expr(argument, None, false);
+                        let _ = self.check_expr(&argument.value, None, false);
                     }
                     return self.dummy(None);
                 }
@@ -5241,7 +5943,7 @@ impl<'a> Checker<'a> {
                 format!("lambda cannot capture '{}'", ident.name),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(None);
         }
@@ -5282,7 +5984,7 @@ impl<'a> Checker<'a> {
                 format!("cannot construct interface '{}'", ident.name),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(None);
         }
@@ -5296,7 +5998,7 @@ impl<'a> Checker<'a> {
                 format!("generic function '{}' requires type arguments", ident.name),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(Some(signature.ret));
         }
@@ -5309,7 +6011,7 @@ impl<'a> Checker<'a> {
             let Some(map) = self.substitution_map(&signature.type_params, type_arguments, span)
             else {
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(Some(signature.ret));
             };
@@ -5346,47 +6048,119 @@ impl<'a> Checker<'a> {
 
     fn check_call_args(
         &mut self,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         params: &[ParamInfo],
         span: Span,
     ) -> Vec<CheckedExpr> {
-        let min_args = params
+        let mut slots: Vec<Option<&CallArg>> = vec![None; params.len()];
+        let mut next_positional = 0usize;
+        let mut saw_named = false;
+
+        for argument in arguments {
+            if let Some(name) = &argument.name {
+                saw_named = true;
+                let Some(index) = params.iter().position(|param| !param.name.is_empty() && param.name == name.name)
+                else {
+                    self.error(
+                        name.span,
+                        format!("unknown argument '{}'", name.name),
+                    );
+                    let _ = self.check_expr(&argument.value, None, false);
+                    continue;
+                };
+                if slots[index].is_some() {
+                    self.error(
+                        name.span,
+                        format!("argument '{}' was provided more than once", name.name),
+                    );
+                    let _ = self.check_expr(&argument.value, None, false);
+                    continue;
+                }
+                slots[index] = Some(argument);
+            } else {
+                if saw_named {
+                    self.error(
+                        argument.span,
+                        "positional argument cannot follow a named argument",
+                    );
+                    let _ = self.check_expr(&argument.value, None, false);
+                    continue;
+                }
+                if next_positional >= params.len() {
+                    self.error(
+                        argument.span,
+                        format!(
+                            "expected at most {} argument{}, found extras",
+                            params.len(),
+                            if params.len() == 1 { "" } else { "s" }
+                        ),
+                    );
+                    let _ = self.check_expr(&argument.value, None, false);
+                    continue;
+                }
+                slots[next_positional] = Some(argument);
+                next_positional += 1;
+            }
+        }
+
+        let missing: Vec<&str> = params
             .iter()
-            .position(|param| param.default.is_some())
-            .unwrap_or(params.len());
-        let max_args = params.len();
-        if arguments.len() < min_args || arguments.len() > max_args {
+            .enumerate()
+            .filter(|(index, param)| slots[*index].is_none() && param.default.is_none())
+            .map(|(_, param)| {
+                if param.name.is_empty() {
+                    "<unnamed>"
+                } else {
+                    param.name.as_str()
+                }
+            })
+            .collect();
+        if !missing.is_empty() {
+            let min_args = params
+                .iter()
+                .position(|param| param.default.is_some())
+                .unwrap_or(params.len());
+            let max_args = params.len();
             let expected = if min_args == max_args {
                 format!("{max_args}")
             } else {
                 format!("{min_args}..={max_args}")
             };
-            self.error(
-                span,
-                format!(
-                    "expected {expected} argument{}, found {}",
-                    if max_args == 1 { "" } else { "s" },
-                    arguments.len()
-                ),
-            );
+            let filled = slots.iter().filter(|slot| slot.is_some()).count();
+            if missing.iter().any(|name| *name == "<unnamed>") || !saw_named {
+                self.error(
+                    span,
+                    format!(
+                        "expected {expected} argument{}, found {filled}",
+                        if max_args == 1 { "" } else { "s" }
+                    ),
+                );
+            } else {
+                self.error(
+                    span,
+                    format!("missing argument{}: {}", if missing.len() == 1 { "" } else { "s" }, missing.join(", ")),
+                );
+            }
         }
+
         let mut checked = Vec::new();
         for (index, param) in params.iter().enumerate() {
-            if let Some(argument) = arguments.get(index) {
+            if let Some(argument) = slots[index] {
                 let record_shape = self.accepts_brace(param.ty);
-                let expected = if param.auto && !record_shape && !is_ternary_expr(argument) {
-                    None
-                } else {
-                    Some(param.ty)
-                };
+                let expected =
+                    if param.auto && !record_shape && !is_ternary_expr(&argument.value) {
+                        None
+                    } else {
+                        Some(param.ty)
+                    };
                 let saved = self.allow_convert;
                 self.allow_convert = param.auto;
-                let value = self.check_expr(argument, expected, false);
+                let value = self.check_expr(&argument.value, expected, false);
                 self.allow_convert = saved;
                 let converted =
-                    self.apply_conversion(value, param.ty, param.auto, argument.span());
+                    self.apply_conversion(value, param.ty, param.auto, argument.value.span());
                 let converted = if param.ty.is_async() || converted.ty().is_async() {
-                    self.consume_async_value(converted, argument.span())
+                    self.consume_async_value(converted, argument.value.span())
                 } else {
                     converted
                 };
@@ -5401,19 +6175,25 @@ impl<'a> Checker<'a> {
                     converted
                 };
                 checked.push(converted);
-            } else {
-                // Missing required argument — already diagnosed above.
             }
-        }
-        for argument in arguments.iter().skip(params.len()) {
-            let _ = self.check_expr(argument, None, false);
         }
         checked
     }
 
+    fn reject_named_call_args(&mut self, arguments: &[CallArg], what: &str) {
+        for argument in arguments {
+            if let Some(name) = &argument.name {
+                self.error(
+                    name.span,
+                    format!("{what} does not accept named arguments"),
+                );
+            }
+        }
+    }
+
     fn check_arguments(
         &mut self,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         params: &[(CanonicalType, bool)],
         span: Span,
     ) -> Vec<CheckedExpr> {
@@ -6466,7 +7246,7 @@ impl<'a> Checker<'a> {
         &mut self,
         member: &MemberExpr,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         if !type_arguments.is_empty() {
@@ -6481,7 +7261,7 @@ impl<'a> Checker<'a> {
                 ),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
         }
         let object = self.check_expr(&member.object, None, false);
@@ -6501,7 +7281,7 @@ impl<'a> Checker<'a> {
         &mut self,
         member: &MemberExpr,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         if !type_arguments.is_empty() {
@@ -6520,7 +7300,7 @@ impl<'a> Checker<'a> {
                 );
                 let _ = self.check_expr(&member.object, None, false);
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
@@ -6534,7 +7314,7 @@ impl<'a> Checker<'a> {
                 ),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
         }
         let object = self.check_expr(&member.object, None, false);
@@ -6577,7 +7357,7 @@ impl<'a> Checker<'a> {
         &mut self,
         member: &MemberExpr,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         let name = member.member.name.as_str();
@@ -6696,7 +7476,7 @@ impl<'a> Checker<'a> {
         name: &str,
         place: Option<ArrayPlace>,
         object: Option<CheckedExpr>,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         member: &MemberExpr,
     ) -> CheckedExpr {
@@ -6730,7 +7510,7 @@ impl<'a> Checker<'a> {
             _ => {
                 self.error(member.member.span, format!("str has no method '{name}'"));
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
@@ -6818,7 +7598,7 @@ impl<'a> Checker<'a> {
                 (TextMethod::Join, 0) => Some(CanonicalType::Str.nest()),
                 _ => None,
             };
-            let value = self.check_expr(argument, wanted, false);
+            let value = self.check_expr(&argument.value, wanted, false);
             let index_argument = wanted.is_none()
                 && index == 0
                 && matches!(
@@ -6832,7 +7612,7 @@ impl<'a> Checker<'a> {
             let maxsplit = matches!(method, TextMethod::Split | TextMethod::RSplit) && index == 1;
             if (index_argument || maxsplit) && !value.ty().is_integer() {
                 self.error(
-                    argument.span(),
+                    argument.span,
                     format!(
                         "an index must be an integer, found '{}'",
                         self.spell(value.ty())
@@ -6840,7 +7620,7 @@ impl<'a> Checker<'a> {
                 );
             }
             let value = if let Some(wanted) = wanted {
-                self.apply_conversion(value, wanted, false, argument.span())
+                self.apply_conversion(value, wanted, false, argument.span)
             } else {
                 value
             };
@@ -6887,11 +7667,11 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         method: &str,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         for argument in arguments {
-            let _ = self.check_expr(argument, None, false);
+            let _ = self.check_expr(&argument.value, None, false);
         }
         if !arguments.is_empty() {
             self.error(
@@ -6924,7 +7704,7 @@ impl<'a> Checker<'a> {
         name: &str,
         place: Option<ArrayPlace>,
         object: Option<CheckedExpr>,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         member: &MemberExpr,
     ) -> CheckedExpr {
@@ -6933,7 +7713,7 @@ impl<'a> Checker<'a> {
         if name != "name" {
             self.error(member.member.span, format!("Type has no method '{name}'"));
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(Some(CanonicalType::Str));
         }
@@ -6943,7 +7723,7 @@ impl<'a> Checker<'a> {
                 format!("name expects 0 arguments, found {}", arguments.len()),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
         }
         CheckedExpr::TypeName {
@@ -6957,7 +7737,7 @@ impl<'a> Checker<'a> {
         place: Option<ArrayPlace>,
         object: Option<CheckedExpr>,
         array_ty: CanonicalType,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         member: &MemberExpr,
     ) -> CheckedExpr {
@@ -6980,7 +7760,7 @@ impl<'a> Checker<'a> {
             _ => {
                 self.error(member.member.span, format!("array has no method '{name}'"));
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
@@ -7061,7 +7841,7 @@ impl<'a> Checker<'a> {
         name: &str,
         place: Option<ArrayPlace>,
         object: Option<CheckedExpr>,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         member: &MemberExpr,
     ) -> CheckedExpr {
@@ -7083,7 +7863,7 @@ impl<'a> Checker<'a> {
             _ => {
                 self.error(member.member.span, format!("map has no method '{name}'"));
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
@@ -7107,17 +7887,17 @@ impl<'a> Checker<'a> {
         let mut args = Vec::new();
         if expected >= 1 {
             if let Some(argument) = arguments.first() {
-                args.push(self.check_map_key(argument, key_ty));
+                args.push(self.check_map_key(&argument.value, key_ty));
             }
         }
         if expected >= 2 {
             if let Some(argument) = arguments.get(1) {
-                let checked = self.check_expr(argument, Some(value_ty), false);
-                args.push(self.apply_conversion(checked, value_ty, false, argument.span()));
+                let checked = self.check_expr(&argument.value, Some(value_ty), false);
+                args.push(self.apply_conversion(checked, value_ty, false, argument.span));
             }
         }
         for argument in arguments.iter().skip(expected) {
-            let _ = self.check_expr(argument, None, false);
+            let _ = self.check_expr(&argument.value, None, false);
         }
         let ty = match method {
             MapMethod::Get | MapMethod::GetOrDefault => value_ty,
@@ -7188,7 +7968,7 @@ impl<'a> Checker<'a> {
     fn reject_record_call(
         &mut self,
         member: &MemberExpr,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         ty: CanonicalType,
     ) -> CheckedExpr {
         if let CanonicalType::Record(id) = ty {
@@ -7205,7 +7985,7 @@ impl<'a> Checker<'a> {
             }
         }
         for argument in arguments {
-            let _ = self.check_expr(argument, None, false);
+            let _ = self.check_expr(&argument.value, None, false);
         }
         self.dummy(None)
     }
@@ -7245,7 +8025,7 @@ impl<'a> Checker<'a> {
         &mut self,
         method: ArrayMethod,
         array_ty: CanonicalType,
-        arguments: &[Expr],
+        arguments: &[CallArg],
     ) -> Vec<CheckedExpr> {
         let element = array_ty.element().unwrap_or(CanonicalType::Int64);
         let mut checked = Vec::new();
@@ -7259,7 +8039,7 @@ impl<'a> Checker<'a> {
                 (ArrayMethod::Set, 1) | (ArrayMethod::Insert, 1) => Some(element),
                 _ => None,
             };
-            let value = self.check_expr(argument, expected, false);
+            let value = self.check_expr(&argument.value, expected, false);
             let index_argument = matches!(
                 method,
                 ArrayMethod::Get
@@ -7271,7 +8051,7 @@ impl<'a> Checker<'a> {
             if index_argument {
                 if !value.ty().is_integer() && arguments.len() > index {
                     self.error(
-                        argument.span(),
+                        argument.span,
                         format!(
                             "an index must be an integer, found '{}'",
                             self.spell(value.ty())
@@ -7280,7 +8060,7 @@ impl<'a> Checker<'a> {
                 }
             }
             let value = if let Some(expected) = expected {
-                self.apply_conversion(value, expected, false, argument.span())
+                self.apply_conversion(value, expected, false, argument.span)
             } else {
                 value
             };
@@ -8136,7 +8916,7 @@ impl<'a> Checker<'a> {
         start: ClassId,
         name: &str,
         want_static: bool,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> Option<(ClassId, usize, Vec<CheckedExpr>)> {
         let found = self.collect_methods(start, name, want_static);
@@ -8151,9 +8931,46 @@ impl<'a> Checker<'a> {
             let args = self.check_call_args(arguments, &params, span);
             return Some((class, index, args));
         }
+        let has_named = arguments.iter().any(|argument| argument.name.is_some());
+        if has_named {
+            let matches = found
+                .iter()
+                .copied()
+                .filter(|(class, index)| {
+                    let params = &self.classes[class.0 as usize].methods[*index].params;
+                    let min_args = params
+                        .iter()
+                        .position(|param| param.default.is_some())
+                        .unwrap_or(params.len());
+                    arguments.len() >= min_args
+                        && arguments.len() <= params.len()
+                        && arguments.iter().all(|argument| match &argument.name {
+                            None => true,
+                            Some(name) => params.iter().any(|param| param.name == name.name),
+                        })
+                })
+                .collect::<Vec<_>>();
+            if matches.is_empty() {
+                self.error(
+                    span,
+                    format!("no overload of '{name}' matches the arguments"),
+                );
+                return None;
+            }
+            if matches.len() > 1 {
+                self.error(span, format!("ambiguous call to '{name}'"));
+                return None;
+            }
+            let (class, index) = matches[0];
+            let params = self.classes[class.0 as usize].methods[index].params.clone();
+            let deprecated = self.classes[class.0 as usize].methods[index].deprecated;
+            self.note_deprecated(deprecated, span, name);
+            let args = self.check_call_args(arguments, &params, span);
+            return Some((class, index, args));
+        }
         let prelim = arguments
             .iter()
-            .map(|argument| self.check_expr(argument, None, false))
+            .map(|argument| self.check_expr(&argument.value, None, false))
             .collect::<Vec<_>>();
         let matches = found
             .iter()
@@ -8190,7 +9007,7 @@ impl<'a> Checker<'a> {
             .into_iter()
             .zip(arguments.iter().zip(params.iter()))
             .map(|(argument, (source, param))| {
-                self.apply_conversion(argument, param.ty, param.auto, source.span())
+                self.apply_conversion(argument, param.ty, param.auto, source.span)
             })
             .collect();
         for param in params.iter().skip(args.len()) {
@@ -8297,6 +9114,7 @@ impl<'a> Checker<'a> {
                     leaks: false,
                     span: method.span,
                     type_params: method_params,
+                    builtin_path: None,
                 });
             }
             let init = declaration.init.as_ref().map(|init| ClassInitInfo {
@@ -8336,6 +9154,7 @@ impl<'a> Checker<'a> {
                 methods,
                 init,
                 type_params,
+                builtin: false,
             });
         }
     }
@@ -8512,6 +9331,9 @@ impl<'a> Checker<'a> {
     fn finish_class_types(&mut self) {
         let count = self.classes.len();
         for index in 0..count {
+            if self.classes[index].builtin {
+                continue;
+            }
             let class_params = self.classes[index].type_params.clone();
             self.push_type_params(&class_params);
             let fields = self.classes[index]
@@ -9094,6 +9916,7 @@ impl<'a> Checker<'a> {
                 type_params: type_param_names,
                 is_generator,
                 is_async_iter,
+                builtin_path: None,
             });
         }
         self.pop_type_params();
@@ -9106,6 +9929,7 @@ impl<'a> Checker<'a> {
             init,
             methods,
             type_params: self.type_param_names(&class_params),
+            builtin: false,
         })
     }
 
@@ -9279,7 +10103,7 @@ impl<'a> Checker<'a> {
                 format!("unknown class '{}'", expr.name.name),
             );
             for argument in &expr.arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(None);
         };
@@ -9308,7 +10132,7 @@ impl<'a> Checker<'a> {
         &mut self,
         member: &MemberExpr,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         let Expr::Identifier(object) = &*member.object else {
@@ -9366,7 +10190,7 @@ impl<'a> Checker<'a> {
     fn check_construct(
         &mut self,
         id: ClassId,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
         result_ty: CanonicalType,
     ) -> CheckedExpr {
@@ -9402,7 +10226,7 @@ impl<'a> Checker<'a> {
                 format!("expected 0 arguments, found {}", arguments.len()),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             Vec::new()
         };
@@ -9546,7 +10370,7 @@ impl<'a> Checker<'a> {
         &mut self,
         type_params: &[TypeParamId],
         params: &[ParamInfo],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> Option<Vec<(TypeParamId, CanonicalType)>> {
         if type_params.is_empty() {
@@ -9557,14 +10381,14 @@ impl<'a> Checker<'a> {
             if !self.uses_class_params(param.ty, type_params) {
                 continue;
             }
-            let concrete = if let Some(ty) = self.peek_type(argument) {
+            let concrete = if let Some(ty) = self.peek_type(&argument.value) {
                 ty
             } else {
-                self.check_expr(argument, None, false).ty()
+                self.check_expr(&argument.value, None, false).ty()
             };
             if !self.unify_type(param.ty, concrete, &mut map) {
                 self.error(
-                    argument.span(),
+                    argument.span,
                     format!(
                         "type mismatch: expected '{}', found '{}'",
                         self.spell(param.ty),
@@ -9665,7 +10489,7 @@ impl<'a> Checker<'a> {
         id: ClassId,
         member: &MemberExpr,
         type_arguments: &[TypeSyntax],
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         let instance = self.collect_methods(id, &member.member.name, false);
@@ -9684,12 +10508,45 @@ impl<'a> Checker<'a> {
                 );
             }
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(None);
         }
         let want_static = instance.is_empty();
-        let found = if want_static { statics } else { instance };
+        let mut found = if want_static { statics } else { instance };
+        if !type_arguments.is_empty() {
+            found.retain(|(class, index)| {
+                !self.classes[class.0 as usize].methods[*index]
+                    .type_params
+                    .is_empty()
+            });
+        } else {
+            found.retain(|(class, index)| {
+                self.classes[class.0 as usize].methods[*index]
+                    .type_params
+                    .is_empty()
+            });
+        }
+        if found.is_empty() {
+            if type_arguments.is_empty() {
+                self.error(
+                    member.member.span,
+                    format!("unknown method '{}'", member.member.name),
+                );
+            } else {
+                self.error(
+                    span,
+                    format!(
+                        "method '{}' is not generic",
+                        member.member.name
+                    ),
+                );
+            }
+            for argument in arguments {
+                let _ = self.check_expr(&argument.value, None, false);
+            }
+            return self.dummy(None);
+        }
         let (owner, index) = found[0];
         if found.len() > 1 {
             // Fall back to unsubstituted overload resolution for non-generic overloads.
@@ -9736,14 +10593,14 @@ impl<'a> Checker<'a> {
                     ),
                 );
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             }
             let Some(method_map) = self.substitution_map(&method_params, type_arguments, span)
             else {
                 for argument in arguments {
-                    let _ = self.check_expr(argument, None, false);
+                    let _ = self.check_expr(&argument.value, None, false);
                 }
                 return self.dummy(None);
             };
@@ -9754,7 +10611,7 @@ impl<'a> Checker<'a> {
                 let Some(class_map) = self.substitution_map(&class_params, type_arguments, span)
                 else {
                     for argument in arguments {
-                        let _ = self.check_expr(argument, None, false);
+                        let _ = self.check_expr(&argument.value, None, false);
                     }
                     return self.dummy(None);
                 };
@@ -9779,7 +10636,7 @@ impl<'a> Checker<'a> {
                         );
                     }
                     for argument in arguments {
-                        let _ = self.check_expr(argument, None, false);
+                        let _ = self.check_expr(&argument.value, None, false);
                     }
                     return self.dummy(None);
                 }
@@ -9821,6 +10678,19 @@ impl<'a> Checker<'a> {
             }
         }
         let args = self.check_call_args(arguments, &params, span);
+        if self.classes[owner.0 as usize].methods[index]
+            .builtin_path
+            .as_deref()
+            .is_some_and(|path| path.contains("_structured"))
+        {
+            if let Some(fields_ty) = params
+                .iter()
+                .find(|param| param.name == "fields")
+                .map(|param| param.ty)
+            {
+                self.validate_structured_log_fields(fields_ty, span);
+            }
+        }
         let (file, line, column, end_column) = self.located(span);
         CheckedExpr::ClassCall {
             class: owner,
@@ -9834,6 +10704,63 @@ impl<'a> Checker<'a> {
             line,
             column,
             end_column,
+        }
+    }
+
+    fn validate_structured_log_fields(&mut self, ty: CanonicalType, span: Span) {
+        match ty {
+            CanonicalType::Record(id) => {
+                let fields = self
+                    .records
+                    .get(id.0 as usize)
+                    .map(|record| {
+                        record
+                            .fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for (name, field_ty) in fields {
+                    if matches!(name.as_str(), "timestamp" | "level" | "message") {
+                        self.error(
+                            span,
+                            format!(
+                                "structured log field '{name}' conflicts with standard log metadata"
+                            ),
+                        );
+                    }
+                    self.validate_structured_log_fields(field_ty, span);
+                }
+            }
+            CanonicalType::Str
+            | CanonicalType::Bln
+            | CanonicalType::Chr
+            | CanonicalType::Int16
+            | CanonicalType::Int32
+            | CanonicalType::Int64
+            | CanonicalType::UInt16
+            | CanonicalType::UInt32
+            | CanonicalType::UInt64
+            | CanonicalType::Flt32
+            | CanonicalType::Flt64 => {}
+            CanonicalType::Optional(kind) => {
+                self.validate_structured_log_fields(kind.canonical(), span);
+            }
+            CanonicalType::Array { .. } => {
+                if let Some(element) = ty.element() {
+                    self.validate_structured_log_fields(element, span);
+                }
+            }
+            other => {
+                self.error(
+                    span,
+                    format!(
+                        "structured log fields do not support type '{}'",
+                        self.spell(other)
+                    ),
+                );
+            }
         }
     }
 
@@ -10253,7 +11180,7 @@ impl<'a> Checker<'a> {
     fn check_super_call(
         &mut self,
         member: &MemberExpr,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         let Some(class) = self.current_class else {
@@ -10339,7 +11266,7 @@ impl<'a> Checker<'a> {
         object: CheckedExpr,
         id: InterfaceId,
         member: &MemberExpr,
-        arguments: &[Expr],
+        arguments: &[CallArg],
         span: Span,
     ) -> CheckedExpr {
         let found = self.interfaces[id.0 as usize]
@@ -10355,7 +11282,7 @@ impl<'a> Checker<'a> {
                 format!("unknown method '{}'", member.member.name),
             );
             for argument in arguments {
-                let _ = self.check_expr(argument, None, false);
+                let _ = self.check_expr(&argument.value, None, false);
             }
             return self.dummy(None);
         }
@@ -10371,7 +11298,7 @@ impl<'a> Checker<'a> {
         } else {
             let prelim = arguments
                 .iter()
-                .map(|argument| self.check_expr(argument, None, false))
+                .map(|argument| self.check_expr(&argument.value, None, false))
                 .collect::<Vec<_>>();
             let matches = found
                 .iter()
@@ -10394,7 +11321,7 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .zip(arguments.iter().zip(params))
                     .map(|(argument, (source, param))| {
-                        self.apply_conversion(argument, param.ty, param.auto, source.span())
+                        self.apply_conversion(argument, param.ty, param.auto, source.span)
                     })
                     .collect();
                 Some((index, args))
@@ -10473,11 +11400,48 @@ fn string_literal_converts(text: &str, target: CanonicalType) -> bool {
     }
 }
 
-fn function_params(function: &crate::manifest::Function) -> Vec<(CanonicalType, bool)> {
+/// Flattens `io.log.warn` into root `io`, nested `["log"]`, method `warn`.
+fn library_call_segments(
+    member: &MemberExpr,
+) -> Option<(String, Vec<String>, String, Span)> {
+    let method = member.member.name.clone();
+    let method_span = member.member.span;
+    let mut nested = Vec::new();
+    let mut current = &*member.object;
+    loop {
+        match current {
+            Expr::Identifier(ident) => {
+                nested.reverse();
+                return Some((ident.name.clone(), nested, method, method_span));
+            }
+            Expr::Member(inner) => {
+                nested.push(inner.member.name.clone());
+                current = &*inner.object;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn library_param_infos(function: &crate::manifest::Function, span: Span) -> Vec<ParamInfo> {
     function
         .params
         .iter()
-        .filter_map(|param| manifest_type(&param.ty).map(|ty| (ty, param.ty.auto)))
+        .filter_map(|param| {
+            let ty = manifest_type(&param.ty)?;
+            let default = param.default.as_ref().map(|value| {
+                Expr::Literal(LiteralExpr::String {
+                    value: value.clone(),
+                    span,
+                })
+            });
+            Some(ParamInfo {
+                name: param.name.clone(),
+                ty,
+                auto: param.ty.auto,
+                default,
+            })
+        })
         .collect()
 }
 

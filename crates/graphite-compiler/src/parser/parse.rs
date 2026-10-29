@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{Token, TokenKind, keyword_lexeme};
 use crate::span::{SourcePosition, Span};
 
 use super::ast::*;
@@ -758,17 +758,52 @@ impl<'a> Parser<'a> {
             self.synchronize_statement();
             return None;
         }
-        let library = self.expect_identifier("expected a library name")?;
-        if self.check(TokenKind::Dot) {
-            self.error(
-                ParserDiagnosticKind::InvalidImport,
-                self.current().span,
-                "an import path must be domain.library",
-            );
-            while self.check(TokenKind::Dot) || self.check(TokenKind::Identifier) {
+        let first = self.expect_identifier("expected a library name")?;
+        let mut path = vec![first];
+        let mut wildcard = false;
+        while self.check(TokenKind::Dot) {
+            self.bump();
+            if self.check(TokenKind::Star) {
                 self.bump();
+                wildcard = true;
+                break;
             }
+            let next = match self.expect_identifier("expected a library path segment") {
+                Some(ident) => ident,
+                None => {
+                    self.synchronize_statement();
+                    return None;
+                }
+            };
+            path.push(next);
         }
+        let alias = if self.is_as_keyword() {
+            let as_span = self.bump().span;
+            if wildcard {
+                self.error(
+                    ParserDiagnosticKind::InvalidImport,
+                    as_span,
+                    "a wildcard import cannot use 'as'; alias the library instead",
+                );
+            }
+            self.expect_identifier("expected an import alias after 'as'")
+        } else {
+            None
+        };
+        if wildcard && alias.is_some() {
+            // Keep parsing; semantic analysis ignores the alias.
+        }
+        let last = path.last().cloned()?;
+        let library = if wildcard {
+            last
+        } else {
+            alias.clone().unwrap_or(last)
+        };
+        let library_path = path
+            .iter()
+            .map(|segment| segment.name.clone())
+            .collect::<Vec<_>>()
+            .join(".");
         let end = if self.consume(TokenKind::Semicolon, "expected ';' after import") {
             self.previous_end().unwrap_or(library.span.end)
         } else {
@@ -776,12 +811,20 @@ impl<'a> Parser<'a> {
         };
         Some(ImportDecl {
             domain,
+            path,
+            library_path,
             library,
+            wildcard,
+            alias,
             span: Span {
                 start: start.start,
                 end,
             },
         })
+    }
+
+    fn is_as_keyword(&self) -> bool {
+        self.check(TokenKind::Identifier) && self.current().lexeme == "as"
     }
 
     fn parse_function(&mut self) -> Option<FunctionDecl> {
@@ -1350,22 +1393,7 @@ impl<'a> Parser<'a> {
             && !self.check(TokenKind::RightParen)
             && !self.is_at_end()
         {
-            loop {
-                if self.check(TokenKind::RightParen) {
-                    self.error(
-                        ParserDiagnosticKind::InvalidExpression,
-                        self.current().span,
-                        "a trailing comma is not allowed in an argument list",
-                    );
-                    break;
-                }
-                arguments.push(self.parse_expression());
-                if self.check(TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
-            }
+            arguments = self.parse_argument_list();
         }
         let end = if self.check(TokenKind::RightParen) {
             self.bump().span.end
@@ -2098,25 +2126,11 @@ impl<'a> Parser<'a> {
     fn finish_call(&mut self, callee: Expr, type_arguments: Vec<TypeSyntax>) -> Expr {
         let start = callee.span().start;
         self.bump();
-        let mut arguments = Vec::new();
-        if !self.check(TokenKind::RightParen) && !self.is_at_end() {
-            loop {
-                if self.check(TokenKind::RightParen) {
-                    self.error(
-                        ParserDiagnosticKind::InvalidExpression,
-                        self.current().span,
-                        "a trailing comma is not allowed in an argument list",
-                    );
-                    break;
-                }
-                arguments.push(self.parse_expression());
-                if self.check(TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
-            }
-        }
+        let arguments = if !self.check(TokenKind::RightParen) && !self.is_at_end() {
+            self.parse_argument_list()
+        } else {
+            Vec::new()
+        };
         let end = if self.check(TokenKind::RightParen) {
             self.bump().span.end
         } else {
@@ -2133,6 +2147,66 @@ impl<'a> Parser<'a> {
             arguments,
             span: Span { start, end },
         })
+    }
+
+    /// Parses `arg, name=value, …` until `)` or a trailing-comma diagnostic.
+    fn parse_argument_list(&mut self) -> Vec<CallArg> {
+        let mut arguments = Vec::new();
+        loop {
+            if self.check(TokenKind::RightParen) {
+                self.error(
+                    ParserDiagnosticKind::InvalidExpression,
+                    self.current().span,
+                    "a trailing comma is not allowed in an argument list",
+                );
+                break;
+            }
+            arguments.push(self.parse_call_arg());
+            if self.check(TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        arguments
+    }
+
+    fn parse_call_arg(&mut self) -> CallArg {
+        if self.peek_kind() == TokenKind::Equal {
+            if let Some(name) = self.parse_call_arg_name() {
+                self.bump(); // `=`
+                let value = self.parse_expression();
+                let span = Span {
+                    start: name.span.start,
+                    end: value.span().end,
+                };
+                return CallArg {
+                    name: Some(name),
+                    value,
+                    span,
+                };
+            }
+        }
+        let value = self.parse_expression();
+        let span = value.span();
+        CallArg {
+            name: None,
+            value,
+            span,
+        }
+    }
+
+    /// Argument names may be identifiers or keywords (`type=...`).
+    fn parse_call_arg_name(&mut self) -> Option<Identifier> {
+        let token = self.current();
+        let name = if token.kind == TokenKind::Identifier {
+            Some(token.lexeme.clone())
+        } else {
+            keyword_lexeme(token.kind).map(str::to_string)
+        }?;
+        let span = token.span;
+        self.bump();
+        Some(Identifier { name, span })
     }
 
     fn parse_array_literal(&mut self) -> Expr {
@@ -2964,25 +3038,11 @@ impl<'a> Parser<'a> {
                 arguments: Vec::new(),
             });
         }
-        let mut arguments = Vec::new();
-        if !self.check(TokenKind::RightParen) && !self.is_at_end() {
-            loop {
-                if self.check(TokenKind::RightParen) {
-                    self.error(
-                        ParserDiagnosticKind::InvalidExpression,
-                        self.current().span,
-                        "a trailing comma is not allowed in an argument list",
-                    );
-                    break;
-                }
-                arguments.push(self.parse_expression());
-                if self.check(TokenKind::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
-            }
-        }
+        let arguments = if !self.check(TokenKind::RightParen) && !self.is_at_end() {
+            self.parse_argument_list()
+        } else {
+            Vec::new()
+        };
         let end = if self.check(TokenKind::RightParen) {
             self.bump().span.end
         } else {
